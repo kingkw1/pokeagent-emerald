@@ -3,6 +3,9 @@
 **Objective:** Build a resilient agent capable of encountering an obstacle,
 logging it, querying its history via RAG, and replanning using an LLM.
 
+**Status:** Phases 1 & 2 are **complete** and integrated into the live agent.
+Phase 3 (spatial awareness) is next.
+
 ### Design Rationale (LLM-First Approach)
 
 1.  **Interface Consistency:** The LLM call is wired on Day 1 via
@@ -60,13 +63,12 @@ level. The correct access paths are:
 | Screen context          | `perception_output['visual_data']['screen_context']`             | `str`          |
 | Text box visible        | `perception_output['visual_data']['visual_elements']['text_box_visible']` | `bool` |
 
-> **⚠️ Note:** The existing `goal_manager.py` accesses
-> `perception_output.get("on_screen_text")` directly — this is incorrect and
-> will always return `None`. The rewrite must use the paths above.
+> **Note:** This warning applied to the original code. The rewrite correctly
+> uses the nested paths documented above.
 
 ---
 
-## 📅 PHASE 1: The "Reasoning Engine" (MVP — Day 1)
+## 📅 PHASE 1: The "Reasoning Engine" (MVP — Day 1) ✅ COMPLETE
 
 **Goal:** Implement the logic core. The agent "thinks" about obstacles using an
 LLM, with a static "Cheat Sheet" as the context source.
@@ -87,7 +89,7 @@ LLM, with a static "Cheat Sheet" as the context source.
         -   Exposes `get_current_directive()` → returns plan string for the
             action module.
 -   **Verification:**
-    -   **Test:** `tests/test_goal_manager.py`
+    -   **Test:** `tests/test_goal_manager.py` (11 tests, all passing)
     -   **Success:** Feed mock perception:
         ```python
         {"visual_data": {"on_screen_text": {"dialogue": "Wait! Don't go out!"},
@@ -108,17 +110,17 @@ LLM, with a static "Cheat Sheet" as the context source.
         `"You are a Game Guide. Context: {CONTEXT}. Situation: Blocked by {BLOCKER}. What is the immediate recovery action?"`
     -   Calls the existing `utils.vlm.VLM` client (Gemini).
 -   **Verification:**
-    -   **Script:** `demo_planner.py`
+    -   **Script:** `python -m agent.brain.demos.demo_planner`
     -   **Success:** Prints:
         `"Plan: Talk to the Old Man to trigger the catching tutorial."`
 
-> **✅ MVP CHECKPOINT 1:** The agent can perceive a block and produce a correct
+> **✅ MVP CHECKPOINT 1 — DONE:** The agent can perceive a block and produce a correct
 > recovery plan using an LLM with a cheat sheet. The interface is identical to
 > what Phase 2 will use.
 
 ---
 
-## 📅 PHASE 2: The "Episodic Memory" (MVP — Day 2)
+## 📅 PHASE 2: The "Episodic Memory" (MVP — Day 2) ✅ COMPLETE
 
 **Goal:** Replace the static cheat sheet with a dynamic Vector Database.
 
@@ -133,7 +135,7 @@ LLM, with a static "Cheat Sheet" as the context source.
         -   `add_memory(text, metadata)` — stores an event.
         -   `retrieve(query, n=3)` — semantic search, returns list of strings.
 -   **Verification:**
-    -   **Script:** `demo_rag_memory.py` (already exists — verify/refine)
+    -   **Script:** `python -m agent.brain.demos.demo_rag_memory`
     -   **Success:** Log `"NPC said route is closed."` → Query
         `"Why can't I pass?"` → Returns the log entry.
 
@@ -145,15 +147,15 @@ LLM, with a static "Cheat Sheet" as the context source.
         -   **Old:** `CONTEXT = "Old Man = Tutorial..."`
         -   **New:** `CONTEXT = memory.retrieve(query=blocker_description)`
 -   **Verification:**
-    -   **Script:** `demo_full_flow.py`
+    -   **Script:** `python -m agent.brain.demos.demo_full_flow`
     -   **Success:**
         1.  Log: `"Blocked by Old Man."`
         2.  Log: `"Retrieving context..."`
         3.  Log: `"Context Found: 'Old Man needs tutorial.'"`
         4.  Log: `"LLM Plan: 'Interact with the Old Man.'"`
 
-> **🚀 MVP COMPLETION LINE** — If you stop here, you have a Staff-Engineer-level
-> demo: a log trace where the agent "thinks," "remembers," and "adapts."
+> **🚀 MVP COMPLETION LINE — DONE.** The agent "thinks," "remembers," and "adapts"
+> in live gameplay. Verified with real Gemini API on Route 102 trainer battles.
 
 ---
 
@@ -182,23 +184,26 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 ## Immediate Execution Steps
 
-1.  Rewrite `agent/brain/goal_manager.py` — fix input contract, remove
-    hardcoded dictionary, wire `BLOCKED` state transition.
-2.  Create `agent/brain/planner.py` — LLM-based `RecoveryPlanner`.
-3.  Write `tests/test_goal_manager.py` — unit tests with mock perception dicts.
-4.  Create `demo_planner.py` — standalone demo showing LLM reasoning.
+1.  ~~Rewrite `agent/brain/goal_manager.py`~~ ✅
+2.  ~~Create `agent/brain/planner.py`~~ ✅
+3.  ~~Write `tests/test_goal_manager.py`~~ ✅ (11 tests)
+4.  ~~Create demo scripts~~ ✅ (moved to `agent/brain/demos/`)
+5.  ~~Integrate brain into `agent/__init__.py`~~ ✅ (battle transition detection)
+6.  Next: Phase 3 — spatial metadata on `log_event()` calls
 
 ---
 
 ## Summary of Artifacts
 
-| File                          | Phase       | Status       | Purpose                             |
-| ----------------------------- | ----------- | ------------ | ----------------------------------- |
-| `agent/brain/goal_manager.py` | **Phase 1** | Rewrite      | State Machine (Logic Core)          |
-| `agent/brain/planner.py`      | **Phase 1** | New          | LLM-based Recovery Planner          |
-| `tests/test_goal_manager.py`  | **Phase 1** | New          | Unit tests for goal tracking        |
-| `demo_planner.py`             | **Phase 1** | New          | LLM reasoning demo script           |
-| `agent/brain/memory.py`       | **Phase 2** | Exists       | VectorDB Wrapper (`EpisodicMemory`) |
-| `demo_rag_memory.py`          | **Phase 2** | Exists       | Semantic retrieval demo             |
-| `demo_full_flow.py`           | **Phase 2** | New          | End-to-end RAG demo                 |
-| `docs/MEMORY_ARCHITECTURE.md` | **Phase 1** | New          | Architecture documentation          |
+| File                                     | Phase       | Status          | Purpose                             |
+| ---------------------------------------- | ----------- | --------------- | ----------------------------------- |
+| `agent/brain/goal_manager.py`            | **Phase 1** | ✅ Complete      | State Machine (Logic Core)          |
+| `agent/brain/planner.py`                 | **Phase 1** | ✅ Complete      | LLM-based Recovery Planner (RAG)    |
+| `agent/brain/memory.py`                  | **Phase 2** | ✅ Complete      | VectorDB Wrapper (`EpisodicMemory`) |
+| `tests/test_goal_manager.py`             | **Phase 1** | ✅ 11 tests      | Unit tests for goal tracking        |
+| `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
+| `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
+| `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
+| `agent/brain/demos/inspect_brain.py`     | **Util**    | ✅ Complete      | Live DB inspector                   |
+| `agent/brain/README.md`                  | **Docs**    | ✅ Complete      | Module overview & goals             |
+| `agent/brain/PLAN.MD`                    | **Docs**    | ✅ Current       | This roadmap                        |

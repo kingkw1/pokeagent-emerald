@@ -1,14 +1,22 @@
-# demo_planner.py
+# agent/brain/demos/demo_planner.py
 """
 Phase 1 demo: GoalManager detects a blocker, RecoveryPlanner generates a
 recovery plan via LLM (or mock), and the new task is injected back into the
 goal stack.
 
-Usage:
-    python demo_planner.py          # mock mode (no API call)
-    python demo_planner.py --live   # live mode (calls Gemini via VLM)
+Usage (from project root):
+    python -m agent.brain.demos.demo_planner          # mock mode
+    python -m agent.brain.demos.demo_planner --live   # live mode (Gemini)
 """
 import argparse
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path so `agent.*` imports work
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from agent.brain.goal_manager import GoalManager
 from agent.brain.planner import RecoveryPlanner
 

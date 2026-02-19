@@ -1,4 +1,17 @@
-# inspect_brain.py
+# agent/brain/demos/inspect_brain.py
+"""
+Utility: Dumps the contents of the live ChromaDB memory database.
+
+Usage (from project root):
+    python -m agent.brain.demos.inspect_brain
+"""
+import sys
+from pathlib import Path
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from agent.brain.memory import EpisodicMemory
 import pandas as pd
 

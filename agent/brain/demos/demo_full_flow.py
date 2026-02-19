@@ -1,11 +1,27 @@
-# demo_full_flow.py
+# agent/brain/demos/demo_full_flow.py
+"""
+Phase 2 end-to-end RAG demo: Seeds memories, triggers a blocker, queries
+ChromaDB via semantic search, and generates a recovery plan.
+
+Usage (from project root):
+    python -m agent.brain.demos.demo_full_flow          # mock mode
+    python -m agent.brain.demos.demo_full_flow --live   # live mode (Gemini)
+"""
 import argparse
 import shutil
+import sys
+from pathlib import Path
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from agent.brain.goal_manager import GoalManager
 from agent.brain.planner import RecoveryPlanner
 from agent.brain.memory import EpisodicMemory
 
-_DEMO_DB_PATH = "./memory_db_full_flow"
+import os
+_DEMO_DB_PATH = os.path.join(_PROJECT_ROOT, "memory_db_full_flow")
 
 
 def run_demo(live: bool = False):
