@@ -195,7 +195,7 @@ pokeagent-emerald/
 - [x] VLM perception pipeline (Qwen2-VL + OCR + heuristics)
 - [x] Episodic memory with ChromaDB RAG
 - [x] **Phase 1: Brain Consolidation:** Merge the legacy `ObjectiveManager` (milestones) and `GoalManager` (RAG) into a single Executive Router.
-- [ ] **Phase 2: Controller Hollowing:** Refactor the 5,000-line `action.py` into a clean switchboard that delegates to specialized handlers.
+- [x] **Phase 2: Controller Hollowing:** Refactor the 5,000-line `action.py` into a clean switchboard that delegates to specialized handlers. *(Complete — 4,972→584 lines, −88%. Extracted 6 modules: `pathfinding.py`, `stuck_handler.py`, `vlm_action.py`, `directive_nav.py`, `intro_handler.py`, `vlm_prompt.py`)*
 - [ ] **Phase 3: The "Strangler Fig" Deprecation:** Phase out the hardcoded `OpenerBot` by transitioning its movement and battle logic to the dynamic A\* and RL systems.
 - [ ] **Phase 4: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
 
