@@ -214,7 +214,40 @@ The opponent parsing attempts 4 fallback methods but often returns `{}`. Potenti
 - `State_Disadvantage` / `State_Disadvantage2` — type-disadvantaged matchups
 - `State_Neutral` — neutral effectiveness matchups
 
-**Expansion targets:**
+#### D.0: Automated Data Collection Rig
+
+Manually creating save states via `simulation/play_and_save.py` inside `stable-retro` is slow and limited by input-mapping issues (notably the GBA Start button, which can fail depending on the retro integration's `data.json` bitmask config). A better approach is to collect battle states from the **live Pygame client**, where all inputs work reliably.
+
+**How it works:**
+1. Boot the game in manual mode: `python run.py --manual --collect-battles`
+2. A background monitor watches the `in_battle` RAM address.
+3. The moment `in_battle` flips from `False` → `True`, the system auto-saves an mGBA core save state to `simulation/data/collected_states/` with a timestamp and location tag (e.g., `battle_route104_20260301_143022.state`).
+4. A human player (or the autonomous agent) continues playing normally — every battle encounter is captured automatically.
+5. Collected `.state` files are converted/loaded into `stable-retro` for headless PPO training at 1000+ FPS.
+
+**Implementation in `server/client.py`:**
+```python
+# In the game loop, after state_data is fetched:
+in_battle = state_data.get('game', {}).get('in_battle', False)
+if in_battle and not self._was_in_battle:
+    # Battle just started — save state
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    location = state_data.get('player', {}).get('location', 'unknown')
+    save_path = f"simulation/data/collected_states/battle_{location}_{timestamp}.state"
+    self.emulator.save_state(save_path)
+    print(f"💾 [DATA COLLECT] Battle state saved: {save_path}")
+self._was_in_battle = in_battle
+```
+
+**State format compatibility note:** Both the live agent and `stable-retro` use the mGBA emulator core, so save states should be compatible. Verify by loading a collected `.state` into the retro env and checking that RAM values (`my_hp`, `enemy_hp`, move data) read correctly before committing to a full training run.
+
+**Advantages over manual `play_and_save.py`:**
+- No input-mapping issues (Pygame handles all GBA buttons natively)
+- Passive collection — a human plays the game normally while states accumulate
+- Scales to dozens of battle states per playthrough with zero extra effort
+- Can also run in autonomous mode (`--agent-auto --collect-battles`) to harvest battles the agent encounters naturally
+
+#### D.1–D.4: Curriculum Expansion Targets
 
 | Phase | Scenarios | New Challenges |
 |-------|-----------|----------------|
@@ -223,12 +256,11 @@ The opponent parsing attempts 4 fallback methods but often returns `{}`. Potenti
 | D.3 | Gym 2–3 (Brawly, Wattson) | Fighting/Electric types, stat-boosting opponents |
 | D.4 | Multi-pokémon trainer battles | Sequential opponents, HP conservation across fights |
 
-**How to create new curriculum states:**
-1. Use `simulation/play_and_save.py` to play to a battle manually
-2. Save the retro state at the moment the battle menu appears
-3. Add the state file to `simulation/data/PokemonEmerald-GBA/`
-4. Add the state name to `TRAIN_STATES` in `train.py`
-5. Re-train with increased `TOTAL_TIMESTEPS`
+**How to add collected states to training:**
+1. Collect states via the data collection rig (D.0) or manually via `simulation/play_and_save.py`
+2. Copy/convert `.state` files to `simulation/data/PokemonEmerald-GBA/`
+3. Add the state names to `TRAIN_STATES` in `train.py`
+4. Re-train with increased `TOTAL_TIMESTEPS`
 
 **Training improvements to consider:**
 - **Self-play / opponent diversity:** Randomize which of the opponent's moves is used each turn (currently determined by ROM AI)
@@ -260,8 +292,9 @@ def get_action(self, state_data: dict) -> int:
 Phase A (Observation Builder)      ← DO FIRST — unblocks all testing
   └─ Phase B (Fix Opponent Data)   ← In parallel — improves obs quality
       └─ Phase C (Wire to Agent)   ← Once A+B pass unit tests
-          └─ Phase D (Curriculum)  ← Ongoing — more data = better model
-              └─ Phase E (Hybrid)  ← After D proves RL is competitive
+Phase D.0 (Data Collection Rig)    ← CAN START NOW — independent of A/B/C
+  └─ Phase D.1–D.4 (Curriculum)  ← Ongoing — more data = better model
+      └─ Phase E (Hybrid)          ← After D proves RL is competitive
 ```
 
 **Definition of "RL Agent is production-ready":**  
@@ -278,5 +311,6 @@ The RL agent wins ≥90% of battles in evaluation across all training curriculum
 | `agent/__init__.py` | Import + initialize `BattleManager` |
 | `agent/action.py` | Add RL combat branch in priority chain |
 | `agent/battle_bot.py` | Extract move-selection logic to allow RL substitution (Option A) |
-| `run.py` | Add `--use-rl-combat` CLI flag |
+| `run.py` | Add `--use-rl-combat` and `--collect-battles` CLI flags |
+| `server/client.py` | Add battle state auto-save monitor for data collection |
 | `simulation/train.py` | Expand `TRAIN_STATES`, increase `TOTAL_TIMESTEPS` |
