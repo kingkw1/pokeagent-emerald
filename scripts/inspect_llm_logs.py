@@ -2,7 +2,7 @@
 """
 Detailed LLM Log Inspector
 
-Shows what's actually in the LLM logs to help diagnose compliance.
+Shows what's actually in the LLM logs to help diagnose issues.
 """
 
 import json

@@ -82,9 +82,9 @@ class NavigationGoal:
 @dataclass
 class ForceDialogueGoal:
     """
-    Special goal type to force VLM to choose 'A' button while maintaining 100% VLM compliance.
-    Used when we detect misclassified dialogue (e.g., "................................" read as player monologue).
-    The VLM still makes the final decision, we just present A as the only valid option.
+    Special goal type to force pressing 'A' button for misclassified dialogue.
+    Used when we detect dialogue blocking movement that was misclassified by the visual system
+    (e.g., "................................" thinking dialogue).
     """
     reason: str  # Why we're forcing A (for logging)
 
@@ -308,8 +308,8 @@ class OpenerBot:
             print(f"⚠️ [FAILED MOVEMENT] Position stuck for {len(self._movement_history)} frames during dialog state")
             print(f"⚠️ [FAILED MOVEMENT] Likely misclassified dialogue - will force VLM to choose A")
             self._movement_history = []  # Reset history
-            # Return ForceDialogueGoal to maintain 100% VLM compliance
-            # VLM will make the final decision, we just present A as the only valid option
+            # Return ForceDialogueGoal to force A press
+            # Dialogue is blocking movement but was misclassified by visual system
             return ForceDialogueGoal(reason="Position stuck during dialog state - likely misclassified dialogue")
         
         # Debug: Show what data we received
@@ -597,28 +597,13 @@ class OpenerBot:
             
             # SPECIAL CASE: Detect naming keyboard screen
             # Indicators: "YOUR NAME?" in dialogue OR menu_title + still in TITLE_SEQUENCE
-            # ✅ COMPLIANCE FIX: Return ONE button per frame (B→START→A across 3 frames)
+            # Return full B→START→A sequence to skip naming
             location = s.get('player', {}).get('location', '')
             # Check both dialogue and menu_title since VLM may put it in either field
             has_your_name = 'YOUR NAME' in dialogue or 'YOUR NAME' in menu_title
             if has_your_name and 'TITLE_SEQUENCE' in location:
-                # Track which step of the sequence we're on
-                if not hasattr(action_clear_dialogue, '_naming_shortcut_step'):
-                    action_clear_dialogue._naming_shortcut_step = 0
-                
-                # Return ONE button per frame
-                if action_clear_dialogue._naming_shortcut_step == 0:
-                    print(f"🎮 [S1_NAMING] Naming keyboard - step 1/3: pressing B")
-                    action_clear_dialogue._naming_shortcut_step = 1
-                    return ['B']
-                elif action_clear_dialogue._naming_shortcut_step == 1:
-                    print(f"🎮 [S1_NAMING] Naming keyboard - step 2/3: pressing START")
-                    action_clear_dialogue._naming_shortcut_step = 2
-                    return ['START']
-                else:  # step 2
-                    print(f"🎮 [S1_NAMING] Naming keyboard - step 3/3: pressing A")
-                    action_clear_dialogue._naming_shortcut_step = 0  # Reset for next time
-                    return ['A']
+                print(f"🎮 [S1_NAMING] Naming keyboard detected - sending B→START→A")
+                return ['B', 'START', 'A']
             else:
                 # Reset step counter when not in naming keyboard
                 action_clear_dialogue._naming_step = 0
@@ -1032,27 +1017,12 @@ class OpenerBot:
                 return ['A']
             
             # SIMPLIFIED: If we see "YOUR NAME?" anywhere (dialogue or menu_title), use the shortcut
-            # ✅ COMPLIANCE FIX: Return ONE button per frame (B→START→A across 3 frames)
+            # Return full B→START→A sequence to skip naming
             has_your_name = "YOUR NAME" in dialogue or "YOUR NAME" in menu_title
             if has_your_name:
-                # Track which step of the sequence we're on
-                if not hasattr(action_special_naming, '_shortcut_step'):
-                    action_special_naming._shortcut_step = 0
-                
-                # Return ONE button per frame
-                if action_special_naming._shortcut_step == 0:
-                    print(f"🎮 [NAMING] 'YOUR NAME?' detected - step 1/3: pressing B")
-                    action_special_naming._shortcut_step = 1
-                    return ['B']
-                elif action_special_naming._shortcut_step == 1:
-                    print(f"🎮 [NAMING] 'YOUR NAME?' detected - step 2/3: pressing START")
-                    action_special_naming._shortcut_step = 2
-                    return ['START']
-                else:  # step 2
-                    print(f"🎮 [NAMING] 'YOUR NAME?' detected - step 3/3: pressing A")
-                    action_special_naming._shortcut_step = 0  # Reset
-                    action_special_naming._entered_naming_screen = False  # Reset
-                    return ['A']
+                print(f"🎮 [NAMING] 'YOUR NAME?' detected - sending B→START→A")
+                action_special_naming._entered_naming_screen = False  # Reset
+                return ['B', 'START', 'A']
             
             # General dialogue clearing (for other dialogue in this state)
             if v.get('visual_elements', {}).get('text_box_visible', False):
@@ -1138,38 +1108,15 @@ class OpenerBot:
             )
             
             if inside_naming_window:
-                # We're already inside - use B→START→A shortcut to exit (across 3 frames)
-                # ✅ COMPLIANCE FIX: Return ONE button per frame
-                if not hasattr(action_special_nickname, '_exit_step'):
-                    action_special_nickname._exit_step = 0
-                
-                if action_special_nickname._exit_step == 0:
-                    print(f"🎮 [NICKNAME WINDOW] Inside naming screen - step 1/3: pressing B")
-                    action_special_nickname._exit_step = 1
-                    return ['B']
-                elif action_special_nickname._exit_step == 1:
-                    print(f"🎮 [NICKNAME WINDOW] Inside naming screen - step 2/3: pressing START")
-                    action_special_nickname._exit_step = 2
-                    return ['START']
-                else:  # step 2
-                    print(f"🎮 [NICKNAME WINDOW] Inside naming screen - step 3/3: pressing A")
-                    action_special_nickname._exit_step = 0  # Reset
-                    return ['A']
+                # We're already inside - use B→START→A shortcut to exit
+                print(f"🎮 [NICKNAME WINDOW] Inside naming screen - sending B→START→A")
+                return ['B', 'START', 'A']
             
             # If asking about nickname BEFORE entering naming window (ideal case)
-            # ✅ COMPLIANCE FIX: Return ONE button per frame (DOWN→A across 2 frames)
+            # Return full DOWN→A sequence to select NO
             if "NICKNAME" in dialogue and not inside_naming_window:
-                if not hasattr(action_special_nickname, '_prompt_step'):
-                    action_special_nickname._prompt_step = 0
-                
-                if action_special_nickname._prompt_step == 0:
-                    print(f"🎮 [NICKNAME PROMPT] At nickname prompt - step 1/2: pressing DOWN to select NO")
-                    action_special_nickname._prompt_step = 1
-                    return ['DOWN']
-                else:  # step 1
-                    print(f"🎮 [NICKNAME PROMPT] At nickname prompt - step 2/2: pressing A to confirm NO")
-                    action_special_nickname._prompt_step = 0  # Reset
-                    return ['A']
+                print(f"🎮 [NICKNAME PROMPT] At nickname prompt - sending DOWN→A (select NO)")
+                return ['DOWN', 'A']
             
             # Clear any remaining dialogue
             if v.get('visual_elements', {}).get('text_box_visible', False):

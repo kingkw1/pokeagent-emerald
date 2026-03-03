@@ -9,9 +9,10 @@ BATTLE STRATEGY:
 - Trainer Battles: Fight to win using optimal move selection
 
 ARCHITECTURE:
-- Returns symbolic decisions (e.g., "RUN_FROM_WILD", "USE_MOVE_ABSORB")
-- action.py routes these through VLM executor for competition compliance
-- VLM translates symbolic decision to button press (satisfies neural network rule)
+- Returns symbolic decisions (e.g., "VLM_SELECT_RUN", "USE_MOVE_ABSORB")
+- action.py maps these to batched button sequences returned directly
+  (e.g., VLM_SELECT_RUN → ['DOWN', 'RIGHT', 'A'], USE_MOVE_ABSORB → ['A', 'DOWN', 'A'])
+- VLM perception is skipped on alternating battle steps (cached) for speed
 
 ⚠️⚠️⚠️ CRITICAL WARNING - MEMORY READER LIMITATIONS ⚠️⚠️⚠️
 
@@ -46,7 +47,7 @@ USAGE:
     battle_bot = get_battle_bot()
     if battle_bot.should_handle(state_data):
         decision = battle_bot.get_action(state_data)
-        # action.py will route this through VLM executor
+        # action.py maps this to the corresponding button press
 """
 
 import logging

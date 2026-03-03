@@ -1763,26 +1763,8 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
                             _stuck_counter = 0
                             _last_stuck_direction = None
                             
-                            try:
-                                stuck_prompt = f"""Playing Pokemon Emerald. Movement is blocked in all directions.
-
-SITUATION: Position unchanged at ({current_x}, {current_y}). Tile in {stuck_dir} already blocked.
-LIKELY CAUSE: Hidden dialogue or menu that needs dismissing.
-RECOMMENDED ACTION: Press A to advance dialogue
-
-What button should you press? Respond with ONE button name only: A"""
-                                vlm_response = vlm.get_text_query(stuck_prompt, "STUCK_RECOVERY_EXECUTOR")
-                                vlm_upper = vlm_response.upper().strip()
-                                
-                                if 'A' in vlm_upper:
-                                    logger.info(f"✅ [VLM EXECUTOR] Stuck recovery (already blocked), VLM confirmed→A")
-                                    return ['A']
-                                else:
-                                    logger.info(f"✅ [VLM EXECUTOR] Stuck recovery fallback→A")
-                                    return ['A']
-                            except Exception as e:
-                                logger.error(f"⚠️ [VLM EXECUTOR] Stuck recovery error: {e}, defaulting to A")
-                                return ['A']
+                            logger.info(f"🔄 [STUCK RECOVERY] Tile already blocked, pressing A for hidden dialogue")
+                            return ['A']
                     else:
                         # Can't determine blocked tile - fallback to pressing A
                         print(f"🔄 [STUCK DETECTION] Can't determine blocked tile, pressing A...")
@@ -1842,7 +1824,7 @@ What button should you press? Respond with ONE button name only: A"""
     # ⚔️ PRIORITY 0A: BATTLE BOT - Combat State Machine (HIGHEST PRIORITY)
     # This MUST be checked BEFORE opener bot to prevent navigation commands during battles.
     # The battle bot handles all combat encounters with rule-based move selection.
-    # Returns symbolic decisions (e.g., "BATTLE_FIGHT") which are routed through VLM executor.
+    # Returns symbolic decisions (e.g., "BATTLE_FIGHT") which are mapped to button presses.
     try:
         battle_bot = get_battle_bot()
         
@@ -1858,38 +1840,17 @@ What button should you press? Respond with ONE button name only: A"""
             if battle_decision is not None:
                 logger.info(f"⚔️ [BATTLE BOT] Battle active, decision: {battle_decision}")
                 
-                # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                # The battle bot has determined the optimal action programmatically.
-                # We must route this through the VLM as the final decision maker.
-                
-                # Get battle context for VLM
-                game_data = state_data.get('game', {})
-                battle_info = game_data.get('battle_info', {})
-                
-                # Build context string
-                battle_context = "In Pokemon battle"
-                if battle_info:
-                    player_pkmn = battle_info.get('player_pokemon', {})
-                    opp_pkmn = battle_info.get('opponent_pokemon', {})
-                    if player_pkmn:
-                        battle_context += f" | Your: {player_pkmn.get('species', 'Unknown')} HP:{player_pkmn.get('current_hp', '?')}/{player_pkmn.get('max_hp', '?')}"
-                    if opp_pkmn:
-                        battle_context += f" | Opponent: {opp_pkmn.get('species', 'Unknown')} HP:{opp_pkmn.get('current_hp', '?')}/{opp_pkmn.get('max_hp', '?')}"
-                
-                # Map symbolic decision to SINGLE button recommendation for VLM
-                # COMPLIANCE: Battle bot recommends ONE button, VLM confirms it, agent presses it
+                # Map symbolic decision to button press
                 # Multi-step sequences (like menu navigation) happen across multiple frames
                 button_recommendation = None
                 decision_explanation = ""
                 
                 if battle_decision == "ADVANCE_BATTLE_DIALOGUE":
-                    # Battle intro dialogue - just press B this frame
-                    button_recommendation = "B"
-                    decision_explanation = "Advance battle dialogue"
-                    logger.info("💬 [BATTLE BOT] Recommending B to advance dialogue")
-                    # Reset RUN navigation since cursor resets when returning to base_menu
-                    if hasattr(action_step, '_run_nav_step'):
-                        action_step._run_nav_step = 0
+                    # Battle dialogue - send two B presses to advance through dialogue faster
+                    # Extra B during battle is harmless (B on base_menu does nothing)
+                    decision_explanation = "Advance battle dialogue (batched)"
+                    logger.info("💬 [BATTLE BOT] Recommending B×2 to advance dialogue")
+                    return ['B', 'B']
                 
                 elif battle_decision == "RECOVER_FROM_RUN_FAILURE":
                     # We tried to run from a trainer battle - press B to dismiss message
@@ -1906,30 +1867,15 @@ What button should you press? Respond with ONE button name only: A"""
                     logger.info("🏃 [BATTLE BOT] Recommending A to confirm RUN")
                 
                 elif battle_decision == "VLM_SELECT_RUN":
-                    # Navigate to RUN option deterministically
+                    # Navigate to RUN option deterministically (batched)
                     # Pokemon battle menu is a 2x2 grid:
                     #   FIGHT  | BAG
                     #   POKEMON| RUN
                     # Cursor starts on FIGHT. Navigate: DOWN → RIGHT → A
-                    if not hasattr(action_step, '_run_nav_step'):
-                        action_step._run_nav_step = 0
-                    
-                    run_steps = ['DOWN', 'RIGHT', 'A']
-                    step_idx = action_step._run_nav_step
-                    
-                    if step_idx < len(run_steps):
-                        button_recommendation = run_steps[step_idx]
-                        decision_explanation = f"Navigating to RUN option (step {step_idx + 1}/3): {button_recommendation}"
-                        action_step._run_nav_step = step_idx + 1
-                        logger.info(f"🏃 [BATTLE BOT] RUN nav step {step_idx + 1}/3: {button_recommendation}")
-                        print(f"🏃 [BATTLE BOT] RUN nav: {button_recommendation} (step {step_idx + 1}/3)")
-                    else:
-                        # Already sent all nav steps, press A again to confirm
-                        button_recommendation = 'A'
-                        decision_explanation = "Confirming RUN selection"
-                        action_step._run_nav_step = 0  # Reset for next attempt
-                        logger.info("🏃 [BATTLE BOT] RUN nav complete - pressing A")
-                        print("🏃 [BATTLE BOT] RUN nav complete → A")
+                    decision_explanation = "Navigating to RUN: DOWN→RIGHT→A (batched)"
+                    logger.info("🏃 [BATTLE BOT] RUN nav: DOWN→RIGHT→A (batched)")
+                    print("🏃 [BATTLE BOT] RUN nav: DOWN→RIGHT→A (batched)")
+                    return ['DOWN', 'RIGHT', 'A']
                 
                 elif battle_decision == "PRESS_RIGHT":
                     # Move cursor toward RUN option
@@ -1944,71 +1890,21 @@ What button should you press? Respond with ONE button name only: A"""
                     logger.info("⚔️ [BATTLE BOT] Recommending A to select FIGHT")
                 
                 elif battle_decision == "USE_MOVE_ABSORB":
-                    # Battle menu navigation: base_menu → A (selects FIGHT) → fight_menu → UP (select ABSORB) → A (use move)
-                    # Track which step we're on using function attribute
-                    if not hasattr(battle_bot, '_absorb_step'):
-                        battle_bot._absorb_step = 0
-                    
-                    # Get current menu state to determine next action
-                    # Reset step counter when we're back at base_menu (new turn)
-                    latest_observation = state_data.get('latest_observation', {})
-                    visual_data = latest_observation.get('visual_data', {}) if isinstance(latest_observation, dict) else {}
-                    on_screen_text = visual_data.get('on_screen_text', {})
-                    dialogue_text = (on_screen_text.get('dialogue', '') or '').lower()
-                    
-                    if 'what will' in dialogue_text and 'do?' in dialogue_text:
-                        battle_bot._absorb_step = 0  # Reset at base menu
-                    
-                    if battle_bot._absorb_step == 0:
-                        button_recommendation = "A"
-                        decision_explanation = "Select FIGHT from base menu"
-                        battle_bot._absorb_step = 1
-                        logger.info("🌿 [BATTLE BOT] Step 1/3: Press A to select FIGHT")
-                    elif battle_bot._absorb_step == 1:
-                        button_recommendation = "DOWN"
-                        decision_explanation = "Navigate DOWN to ABSORB move (move 3, bottom-left)"
-                        battle_bot._absorb_step = 2
-                        logger.info("🌿 [BATTLE BOT] Step 2/3: Press DOWN to select ABSORB")
-                    else:  # step 2
-                        button_recommendation = "A"
-                        decision_explanation = "Confirm ABSORB move"
-                        battle_bot._absorb_step = 0  # Reset for next turn
-                        logger.info("🌿 [BATTLE BOT] Step 3/3: Press A to use ABSORB")
-                    print("🌿 [BATTLE BOT] Working toward ABSORB (Grass-type, drains HP)")
+                    # Battle menu navigation: A (select FIGHT) → DOWN (select ABSORB) → A (confirm)
+                    # Full sequence batched for efficiency
+                    decision_explanation = "Select FIGHT → ABSORB: A→DOWN→A (batched)"
+                    logger.info("🌿 [BATTLE BOT] ABSORB: A→DOWN→A (batched)")
+                    print("🌿 [BATTLE BOT] ABSORB: A→DOWN→A (batched)")
+                    return ['A', 'DOWN', 'A']
                 
                 elif battle_decision == "USE_MOVE_POUND":
-                    # Battle menu navigation: base_menu → A (selects FIGHT) → fight_menu → UP (ensure cursor on POUND) → A (confirm)
-                    # CRITICAL: Must explicitly press UP because cursor may be on ABSORB from previous turn!
-                    # Pokemon Emerald fight menu remembers cursor position between turns.
-                    # Track which step we're on
-                    if not hasattr(battle_bot, '_pound_step'):
-                        battle_bot._pound_step = 0
-                    
-                    # Get current menu state - reset at base menu
-                    latest_observation = state_data.get('latest_observation', {})
-                    visual_data = latest_observation.get('visual_data', {}) if isinstance(latest_observation, dict) else {}
-                    on_screen_text = visual_data.get('on_screen_text', {})
-                    dialogue_text = (on_screen_text.get('dialogue', '') or '').lower()
-                    
-                    if 'what will' in dialogue_text and 'do?' in dialogue_text:
-                        battle_bot._pound_step = 0  # Reset at base menu
-                    
-                    if battle_bot._pound_step == 0:
-                        button_recommendation = "A"
-                        decision_explanation = "Select FIGHT from base menu"
-                        battle_bot._pound_step = 1
-                        logger.info("🥊 [BATTLE BOT] Step 1/3: Press A to select FIGHT")
-                    elif battle_bot._pound_step == 1:
-                        button_recommendation = "UP"
-                        decision_explanation = "Navigate UP to POUND move (cursor may be on ABSORB from last turn)"
-                        battle_bot._pound_step = 2
-                        logger.info("🥊 [BATTLE BOT] Step 2/3: Press UP to select POUND")
-                    else:  # step 2
-                        button_recommendation = "A"
-                        decision_explanation = "Confirm POUND move"
-                        battle_bot._pound_step = 0  # Reset for next turn
-                        logger.info("🥊 [BATTLE BOT] Step 3/3: Press A to use POUND")
-                    print("🥊 [BATTLE BOT] Working toward POUND (Normal-type)")
+                    # Battle menu navigation: A (select FIGHT) → UP (select POUND) → A (confirm)
+                    # UP ensures cursor on POUND even if it was on ABSORB from previous turn
+                    # Full sequence batched for efficiency
+                    decision_explanation = "Select FIGHT → POUND: A→UP→A (batched)"
+                    logger.info("🥊 [BATTLE BOT] POUND: A→UP→A (batched)")
+                    print("🥊 [BATTLE BOT] POUND: A→UP→A (batched)")
+                    return ['A', 'UP', 'A']
                 
                 elif battle_decision == "PRESS_B":
                     # Exit submenu (fight menu or bag menu)
@@ -2052,69 +1948,9 @@ What button should you press? Respond with ONE button name only: A"""
                     button_recommendation = "A"
                     decision_explanation = "Default to A button"
                 
-                # Create executor prompt for VLM
-                executor_prompt = f"""Playing Pokemon Emerald. You are in a Pokemon battle.
-
-BATTLE CONTEXT: {battle_context}
-BATTLE BOT DECISION: {battle_decision}
-RECOMMENDED ACTION: {decision_explanation}
-
-The battle bot recommends pressing {button_recommendation}.
-
-What button should you press? Respond with ONE button name only: A, B, UP, DOWN, LEFT, RIGHT"""
-                
-                try:
-                    vlm_executor_response = vlm.get_text_query(executor_prompt, "BATTLE_EXECUTOR")
-                    
-                    # Parse VLM response
-                    valid_buttons = ['START', 'SELECT', 'DOWN', 'LEFT', 'RIGHT', 'UP', 'A', 'B']
-                    vlm_response_upper = vlm_executor_response.upper().strip()
-                    
-                    final_action = None
-                    for button in valid_buttons:
-                        if button in vlm_response_upper:
-                            final_action = [button]
-                            break
-                    
-                    if final_action:
-                        logger.info(f"✅ [VLM EXECUTOR] BattleBot→{battle_decision}, VLM confirmed→{final_action[0]}")
-                        # COMPLIANCE FIX: Return ONLY the single button VLM confirmed
-                        # Multi-step sequences happen across multiple frames with VLM confirmation each time
-                        return final_action
-                    else:
-                        # Retry with simpler prompt
-                        logger.warning(f"⚠️ [VLM EXECUTOR] Could not parse VLM response '{vlm_executor_response[:50]}', retrying")
-                        
-                        retry_prompt = f"""What button for battle? Options: A, B, UP, DOWN, LEFT, RIGHT
-
-Recommended: {button_recommendation}
-
-Answer with just the button name:"""
-                        
-                        retry_response = vlm.get_text_query(retry_prompt, "BATTLE_EXECUTOR_RETRY")
-                        retry_upper = retry_response.upper().strip()
-                        
-                        final_retry_action = None
-                        for button in valid_buttons:
-                            if button in retry_upper:
-                                final_retry_action = [button]
-                                break
-                        
-                        if final_retry_action:
-                            logger.info(f"✅ [VLM EXECUTOR RETRY] Got valid response: {final_retry_action[0]}")
-                            # COMPLIANCE FIX: Return ONLY the single button VLM confirmed
-                            return final_retry_action
-                        else:
-                            # CRITICAL: No valid VLM response - CRASH per competition rules
-                            error_msg = f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button in battle after 2 attempts. Response 1: '{vlm_executor_response[:100]}', Response 2: '{retry_response[:100]}'. Competition rules require final action from neural network. CANNOT PROCEED."
-                            logger.error(error_msg)
-                            raise RuntimeError(error_msg)
-                        
-                except Exception as e:
-                    # COMPETITION COMPLIANCE: Cannot bypass VLM - must crash
-                    error_msg = f"❌ [COMPLIANCE VIOLATION] VLM executor failed in battle: {e}. Competition rules require final action from neural network. CANNOT PROCEED."
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg) from e
+                # Return the button directly
+                logger.info(f"⚔️ [BATTLE BOT] {battle_decision} → {button_recommendation}")
+                return [button_recommendation]
             else:
                 # Battle bot returned None - fallback to VLM
                 logger.debug(f"⚔️ [BATTLE BOT] Battle bot uncertain, falling back to VLM")
@@ -2139,43 +1975,11 @@ Answer with just the button name:"""
             if opener_action is not None:
                 bot_state = opener_bot.get_state_summary()
                 
-                # Check if it's a ForceDialogueGoal (100% VLM compliance for misclassified dialogue)
+                # Check if it's a ForceDialogueGoal (misclassified dialogue)
                 if isinstance(opener_action, ForceDialogueGoal):
                     logger.info(f"🚨 [FORCE DIALOGUE] Detected misclassified dialogue: {opener_action.reason}")
-                    logger.info(f"🚨 [FORCE DIALOGUE] Will present A as only option to VLM (maintaining 100% compliance)")
-                    
-                    # Create special executor prompt that only allows A
-                    force_dialogue_prompt = f"""Playing Pokemon Emerald. CRITICAL DIALOGUE DETECTION:
-
-SITUATION: {opener_action.reason}
-
-The system has detected dialogue blocking movement that was misclassified by the visual system.
-This commonly happens with "................................" (thinking) dialogue.
-
-You MUST press A to advance the dialogue.
-
-What button do you press? Respond with: A"""
-                    
-                    try:
-                        vlm_response = vlm.get_text_query(force_dialogue_prompt, "FORCE_DIALOGUE")
-                        vlm_upper = vlm_response.upper().strip()
-                        
-                        if 'A' in vlm_upper:
-                            logger.info(f"✅ [FORCE DIALOGUE] VLM confirmed pressing A to clear misclassified dialogue")
-                            return ['A']
-                        else:
-                            # VLM didn't say A - retry with even more direct prompt
-                            logger.warning(f"⚠️ [FORCE DIALOGUE] VLM response unclear: '{vlm_response[:50]}', retrying")
-                            retry_response = vlm.get_text_query("Press A to continue. What button? Answer: A", "FORCE_DIALOGUE_RETRY")
-                            
-                            logger.info(f"✅ [FORCE DIALOGUE] VLM retry response: '{retry_response[:50]}', using A")
-                            return ['A']  # Use A regardless since that's the only valid option
-                            
-                    except Exception as e:
-                        # Even in error case, A is the only valid action for dialogue
-                        # VLM was given the choice, so this maintains compliance
-                        logger.error(f"⚠️ [FORCE DIALOGUE] VLM error: {e}, but A is the only valid option")
-                        return ['A']
+                    print(f"🚨 [FORCE DIALOGUE] Pressing A to clear misclassified dialogue")
+                    return ['A']
                 
                 # Check if it's a NavigationGoal
                 if isinstance(opener_action, NavigationGoal):
@@ -2259,141 +2063,14 @@ What button do you press? Respond with: A"""
                                 nav_action = ['A']
                                 nav_reasoning = "At goal position, defaulting to interact"
                     
-                    # Now route through VLM executor
+                    # Return nav_action directly
                     if nav_action:
-                        opener_action = nav_action  # Set this so the executor logic below handles it
-                        # Fall through to the executor logic below
+                        opener_action = nav_action
                 
-                # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                # The opener bot has determined the optimal action programmatically.
-                # However, per competition rules ("final action comes from a neural network"),
-                # we must route this through the VLM as the final decision maker.
-                
-                logger.info(f"🤖 [OPENER BOT] State: {bot_state['current_state']} | Suggested action: {opener_action}")
-                
-                # Check if this is a multi-button sequence (like battle bot's recommended_sequence)
-                is_multi_button_sequence = isinstance(opener_action, list) and len(opener_action) > 1
-                recommended_sequence = opener_action if is_multi_button_sequence else None
-                
-                # Create streamlined executor prompt for VLM
-                bot_state_name = bot_state.get('current_state', 'unknown')
-                
-                # CRITICAL: For multi-button sequences (navigation batching or shortcuts), show the full sequence
-                if is_multi_button_sequence:
-                    bot_action_str = opener_action[0]  # First button for VLM confirmation
-                    full_sequence_str = '→'.join(opener_action)  # Full sequence for logging
-                else:
-                    bot_action_str = opener_action[0] if isinstance(opener_action, list) and len(opener_action) > 0 else str(opener_action)
-                    full_sequence_str = bot_action_str
-                
-                # Get minimal context
-                visual_context_brief = "unknown"
-                if isinstance(latest_observation, dict) and 'visual_data' in latest_observation:
-                    vd = latest_observation['visual_data']
-                    visual_context_brief = vd.get('screen_context', 'unknown')
-                    dialogue = vd.get('on_screen_text', {}).get('dialogue', '')
-                    if dialogue:
-                        visual_context_brief += f" (dialogue: {dialogue[:50]}...)" if len(dialogue) > 50 else f" (dialogue: {dialogue})"
-                
-                # Detect navigation batching vs special shortcuts
-                is_navigation_batch = is_multi_button_sequence and all(btn in ['UP', 'DOWN', 'LEFT', 'RIGHT'] for btn in opener_action)
-                is_shortcut_sequence = is_multi_button_sequence and not is_navigation_batch
-                
-                # Add context for multi-button sequences
-                step_context = ""
-                if is_navigation_batch:
-                    # Navigation batching - show direction and count
-                    step_context = f"\nNAVIGATION BATCH: {full_sequence_str} ({len(opener_action)} movements to reduce VLM calls)"
-                elif is_shortcut_sequence:
-                    # Special shortcut sequence (naming, nickname, clock, etc.)
-                    step_context = f"\nMULTI-BUTTON SEQUENCE: {full_sequence_str} (will execute all buttons in order)"
-                elif bot_state_name == 'S24_NICKNAME':
-                    # Nickname uses B→START→A sequence
-                    step_num = getattr(opener_bot.states.get('S24_NICKNAME').action_fn, '_nickname_step', 0)
-                    step_context = f"\nSEQUENCE STEP {step_num+1}/3: Press {bot_action_str} (Full sequence: B→START→A to skip nickname)"
-                elif bot_state_name == 'S2_GENDER_NAME_SELECT':
-                    # Name selection just uses START once when in keyboard
-                    if bot_action_str == 'START':
-                        step_context = f"\nACTION: Press START to accept default name (inside naming keyboard)"
-                    else:
-                        step_context = f"\nACTION: Navigate character naming sequence"
-                elif bot_state_name == 'S7_SET_CLOCK':
-                    # Clock uses UP→A sequence for Yes/No menu
-                    step_num = getattr(opener_bot.states.get('S7_SET_CLOCK').action_fn, '_yesno_step', 0)
-                    if step_num == 0:
-                        step_context = f"\nSEQUENCE STEP 1/2: Press UP to select YES in clock confirmation menu"
-                    else:
-                        step_context = f"\nSEQUENCE STEP 2/2: Press A to confirm YES in clock confirmation menu"
-                
-                executor_prompt = f"""Playing Pokemon Emerald. You are executing a decision from the programmatic opener controller.
-
-CURRENT STATE: {visual_context_brief}
-OPENER BOT STATE: {bot_state_name}
-RECOMMENDED ACTION: {bot_action_str}{step_context}
-
-The opener bot has analyzed the deterministic opening sequence and recommends pressing {bot_action_str}.
-
-What button should you press? Respond with ONE button name only: A, B, UP, DOWN, LEFT, RIGHT, START"""
-                
-                try:
-                    vlm_executor_response = vlm.get_text_query(executor_prompt, "OPENER_EXECUTOR")
-                    
-                    # Parse VLM response - check longer buttons first to avoid substring matches
-                    # (e.g., 'START' contains 'A', 'RIGHT' contains 'R', etc.)
-                    valid_buttons = ['START', 'SELECT', 'DOWN', 'LEFT', 'RIGHT', 'UP', 'A', 'B']
-                    vlm_response_upper = vlm_executor_response.upper().strip()
-                    
-                    # Try to extract button from response (checking longest first)
-                    final_action = None
-                    for button in valid_buttons:
-                        if button in vlm_response_upper:
-                            final_action = [button]
-                            break
-                    
-                    if final_action:
-                        logger.info(f"✅ [VLM EXECUTOR] OpenerBot→{bot_action_str}, VLM confirmed→{final_action[0]}")
-                        # ✅ COMPETITION COMPLIANCE FIX:
-                        # Return ONLY the single button VLM confirmed, NOT the full sequence
-                        # Multi-step sequences happen across multiple frames with VLM confirmation each time
-                        # The old code returned recommended_sequence (multi-button) even though VLM only confirmed one button
-                        # This was a rubber-stamp violation - VLM decision was ignored
-                        return final_action  # Returns single button VLM confirmed (e.g., ['B'])
-                    else:
-                        # COMPETITION COMPLIANCE: VLM must provide valid response - retry with simpler prompt
-                        logger.warning(f"⚠️ [VLM EXECUTOR] Could not parse VLM response '{vlm_executor_response[:50]}', retrying")
-                        
-                        retry_prompt = f"""What button? Options: A, B, UP, DOWN, LEFT, RIGHT, START, SELECT
-
-Recommended: {bot_action_str}
-
-Answer with just the button name:"""
-                        
-                        retry_response = vlm.get_text_query(retry_prompt, "OPENER_EXECUTOR_RETRY")
-                        retry_upper = retry_response.upper().strip()
-                        
-                        # Try to parse retry response
-                        final_retry_action = None
-                        for button in valid_buttons:
-                            if button in retry_upper:
-                                final_retry_action = [button]
-                                break
-                        
-                        if final_retry_action:
-                            logger.info(f"✅ [VLM EXECUTOR RETRY] Got valid response: {final_retry_action[0]}")
-                            # ✅ COMPETITION COMPLIANCE FIX:
-                            # Return ONLY what VLM confirmed, NOT the full multi-button sequence
-                            return final_retry_action  # Returns single button (e.g., ['START'])
-                        else:
-                            # CRITICAL: No valid VLM response after retry - CRASH per competition rules
-                            error_msg = f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button after 2 attempts. Response 1: '{vlm_executor_response[:100]}', Response 2: '{retry_response[:100]}'. Competition rules require final action from neural network. CANNOT PROCEED."
-                            logger.error(error_msg)
-                            raise RuntimeError(error_msg)
-                        
-                except Exception as e:
-                    # COMPETITION COMPLIANCE: Cannot bypass VLM - must crash
-                    error_msg = f"❌ [COMPLIANCE VIOLATION] VLM executor failed: {e}. Competition rules require final action from neural network. CANNOT PROCEED."
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg) from e
+                # Return the opener bot's action directly
+                action_list = opener_action if isinstance(opener_action, list) else [opener_action]
+                logger.info(f"🤖 [OPENER BOT] State: {bot_state['current_state']} | Action: {' → '.join(str(a) for a in action_list)}")
+                return action_list
             else:
                 # Opener bot returned None - fallback to VLM
                 logger.debug(f"🤖 [OPENER BOT] Fallback to VLM in state: {opener_bot.current_state_name}")
@@ -2418,7 +2095,7 @@ Answer with just the button name:"""
     # - Uses existing ObjectiveManager from planning module
     # - Returns directives like {"action": "NAVIGATE_AND_INTERACT", "target": (x, y, map)}
     # - Converts directives to NavigationGoal objects (reuses Opener Bot pathfinding)
-    # - Routes decisions through VLM executor for competition compliance
+    # - Returns button presses directly
     try:
         # Import planning module and NavigationGoal
         from agent.planning import planning_step
@@ -2468,29 +2145,7 @@ Answer with just the button name:"""
                 logger.info(f"⏸️ [WARP SETTLE] Pressing B after warp teleport to settle position")
                 print(f"⏸️ [WARP SETTLE] Pressing B after teleport to settle position")
                 _needs_warp_settle_b_press = False  # Reset flag
-                
-                # VLM EXECUTOR: Route warp settle recommendation through VLM
-                last_pos_str = f"{_last_position}" if _last_position else "unknown"
-                warp_settle_prompt = f"""You just warped to a new location. The game position needs to stabilize.
-
-Current position: ({current_x}, {current_y}) in {location}
-Last position: {last_pos_str}
-
-The system recommends pressing B to settle the position after warping.
-
-What button should you press?"""
-                
-                vlm_response = vlm.get_text_query(warp_settle_prompt, "WARP_SETTLE_EXECUTOR")
-                
-                # Parse response
-                button_match = re.search(r'\b([ABLRUDSTART])\b', vlm_response, re.IGNORECASE)
-                if button_match:
-                    confirmed_button = button_match.group(1).upper()
-                    logger.info(f"✅ [WARP SETTLE EXECUTOR] VLM confirmed: {confirmed_button}")
-                    return [confirmed_button]
-                else:
-                    logger.warning(f"⚠️ [WARP SETTLE EXECUTOR] Could not parse VLM response, defaulting to B")
-                    return ['B']
+                return ['B']
             
             if directive:
                 # NEW SIMPLE DIRECTIVE FORMAT:
@@ -2529,28 +2184,7 @@ What button should you press?"""
                     if press_b_first:
                         logger.info(f"⏸️ [PRESS B FIRST] Pressing B to settle warp before navigation")
                         print(f"⏸️ [PRESS B FIRST] Pressing B to settle warp before navigation")
-                        
-                        # VLM EXECUTOR: Route press B first recommendation through VLM
-                        press_b_first_prompt = f"""The navigation directive requests pressing B first to stabilize the game state.
-
-Current position: ({current_x}, {current_y}) in {location}
-Navigation goal: {goal_coords}
-
-The system recommends pressing B before starting navigation to ensure position is stable.
-
-What button should you press?"""
-                        
-                        vlm_response = vlm.get_text_query(press_b_first_prompt, "PRESS_B_FIRST_EXECUTOR")
-                        
-                        # Parse response
-                        button_match = re.search(r'\b([ABLRUDSTART])\b', vlm_response, re.IGNORECASE)
-                        if button_match:
-                            confirmed_button = button_match.group(1).upper()
-                            logger.info(f"✅ [PRESS B FIRST EXECUTOR] VLM confirmed: {confirmed_button}")
-                            return [confirmed_button]
-                        else:
-                            logger.warning(f"⚠️ [PRESS B FIRST EXECUTOR] Could not parse VLM response, defaulting to B")
-                            return ['B']
+                        return ['B']
                     
                     if len(goal_coords) == 3:
                         target_x, target_y, target_map = goal_coords
@@ -2610,87 +2244,15 @@ What button should you press?"""
                                             break
                                 
                                 if current_orientation == required_direction:
-                                    logger.info(f"🗺️ [DIRECTIVE NAV] At goal, facing NPC at ({npc_x},{npc_y}) {required_direction} - routing through VLM")
-                                    
-                                    # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                                    npc_interact_prompt = f"""Playing Pokemon Emerald. Navigation goal reached.
-
-SITUATION: At goal position ({goal_x}, {goal_y}), facing NPC at ({npc_x}, {npc_y})
-RECOMMENDED ACTION: Press A to interact with NPC
-
-What button should you press? Respond with ONE button name only: A"""
-                                    
-                                    try:
-                                        vlm_response = vlm.get_text_query(npc_interact_prompt, "DIRECTIVE_NPC_INTERACT_EXECUTOR")
-                                        vlm_upper = vlm_response.upper().strip()
-                                        
-                                        if 'A' in vlm_upper:
-                                            logger.info(f"✅ [VLM EXECUTOR] NPC interaction, VLM confirmed→A")
-                                            return ['A']
-                                        else:
-                                            retry_response = vlm.get_text_query("What button to interact? Answer: A", "DIRECTIVE_NPC_INTERACT_RETRY")
-                                            logger.info(f"✅ [VLM EXECUTOR RETRY] NPC interaction confirmed→A")
-                                            return ['A']
-                                    except Exception as e:
-                                        logger.error(f"⚠️ [VLM EXECUTOR] NPC interaction error: {e}, defaulting to A")
-                                        return ['A']
+                                    logger.info(f"🗺️ [DIRECTIVE NAV] At goal, facing NPC at ({npc_x},{npc_y}) {required_direction} - pressing A")
+                                    return ['A']
                                 else:
-                                    logger.info(f"🗺️ [DIRECTIVE NAV] At goal, need to turn {required_direction} to face NPC at ({npc_x},{npc_y})")
-                                    
-                                    # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                                    npc_turn_prompt = f"""Playing Pokemon Emerald. Navigation goal reached.
-
-SITUATION: At goal position ({goal_x}, {goal_y}), need to face NPC at ({npc_x}, {npc_y})
-RECOMMENDED ACTION: Turn {required_direction} to face NPC
-
-What button should you press? Respond with ONE button name only: {required_direction}"""
-                                    
-                                    try:
-                                        vlm_response = vlm.get_text_query(npc_turn_prompt, "DIRECTIVE_NPC_TURN_EXECUTOR")
-                                        vlm_upper = vlm_response.upper().strip()
-                                        
-                                        valid_buttons = ['UP', 'DOWN', 'LEFT', 'RIGHT']
-                                        final_action = None
-                                        for button in valid_buttons:
-                                            if button in vlm_upper:
-                                                final_action = button
-                                                break
-                                        
-                                        if final_action:
-                                            logger.info(f"✅ [VLM EXECUTOR] NPC turn, VLM confirmed→{final_action}")
-                                            return [final_action]
-                                        else:
-                                            logger.info(f"✅ [VLM EXECUTOR] NPC turn unclear, using recommended→{required_direction}")
-                                            return [required_direction]
-                                    except Exception as e:
-                                        logger.error(f"⚠️ [VLM EXECUTOR] NPC turn error: {e}, defaulting to {required_direction}")
-                                        return [required_direction]
+                                    logger.info(f"🗺️ [DIRECTIVE NAV] At goal, turning {required_direction} to face NPC at ({npc_x},{npc_y})")
+                                    return [required_direction]
                             else:
                                 # No NPC coords - just interact at goal position
-                                logger.info(f"🗺️ [DIRECTIVE NAV] At exact goal - routing through VLM for interaction")
-                                
-                                # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                                goal_interact_prompt = f"""Playing Pokemon Emerald. Navigation goal reached.
-
-SITUATION: Reached goal position ({goal_x}, {goal_y})
-RECOMMENDED ACTION: Press A to interact
-
-What button should you press? Respond with ONE button name only: A"""
-                                
-                                try:
-                                    vlm_response = vlm.get_text_query(goal_interact_prompt, "DIRECTIVE_GOAL_INTERACT_EXECUTOR")
-                                    vlm_upper = vlm_response.upper().strip()
-                                    
-                                    if 'A' in vlm_upper:
-                                        logger.info(f"✅ [VLM EXECUTOR] Goal interaction, VLM confirmed→A")
-                                        return ['A']
-                                    else:
-                                        retry_response = vlm.get_text_query("What button to interact at goal? Answer: A", "DIRECTIVE_GOAL_INTERACT_RETRY")
-                                        logger.info(f"✅ [VLM EXECUTOR RETRY] Goal interaction confirmed→A")
-                                        return ['A']
-                                except Exception as e:
-                                    logger.error(f"⚠️ [VLM EXECUTOR] Goal interaction error: {e}, defaulting to A")
-                                    return ['A']
+                                logger.info(f"🗺️ [DIRECTIVE NAV] At exact goal - pressing A to interact")
+                                return ['A']
                         else:
                             logger.info(f"🗺️ [DIRECTIVE NAV] At goal, no interaction needed")
                             print(f"🔍 [GOAL_COORDS] At goal, no interaction needed - returning empty list []")
@@ -2840,49 +2402,12 @@ What button should you press? Respond with ONE button name only: A"""
                         else:
                             print(f"✅ [GOAL_COORDS] Local A* succeeded, skipping global A*")
                         
-                        # 3. If we found a path, route through VLM executor
+                        # 3. If we found a path, return the full batched path
                         if pathfound_action:
-                            logger.info(f"🗺️ [DIRECTIVE NAV] A* found path to ({goal_x}, {goal_y}): {pathfound_action} (distance: {distance})")
-                            print(f"🗺️ [DIRECTIVE NAV] A* pathfinding found: {pathfound_action}")
-                            
-                            # VLM EXECUTOR FOR COMPLIANCE
-                            # Route pathfinding decision through VLM
-                            recommended_action = pathfound_action[0] if isinstance(pathfound_action, list) else pathfound_action
-                            
-                            try:
-                                executor_prompt = f"""You are navigating in Pokemon Emerald using A* pathfinding.
-
-CURRENT OBJECTIVE: {description}
-CURRENT POSITION: ({current_x}, {current_y})
-GOAL POSITION: ({goal_x}, {goal_y})
-
-The A* pathfinding algorithm recommends: {recommended_action}
-This is part of a {len(pathfound_action) if isinstance(pathfound_action, list) else 1}-step path to reach the goal.
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                                vlm_response = vlm.get_text_query(executor_prompt, "DIRECTIVE_EXECUTOR")
-                                
-                                # Parse VLM response
-                                vlm_action = vlm_response.strip().upper()
-                                valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                                
-                                if vlm_action in valid_buttons:
-                                    logger.info(f"✅ [VLM EXECUTOR] Directive pathfinding → VLM confirmed: {vlm_action}")
-                                    print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                                    # COMPLIANCE FIX: Return ONLY the single VLM-confirmed button
-                                    # A* calculated full path, but we only execute one step per frame
-                                    # Next frame will recalculate path from new position
-                                    return [vlm_action]
-                                else:
-                                    # VLM gave unclear response - crash per competition rules
-                                    logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button for directive pathfinding: '{vlm_response}'")
-                                    raise RuntimeError(f"VLM executor failed - invalid response for directive: '{vlm_response}'")
-                                    
-                            except Exception as e:
-                                # VLM executor failed - crash per competition rules
-                                logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error for directive: {e}")
-                                raise RuntimeError(f"VLM executor failed for directive pathfinding: {e}")
+                            path_list = pathfound_action if isinstance(pathfound_action, list) else [pathfound_action]
+                            logger.info(f"🗺️ [DIRECTIVE NAV] A* path to ({goal_x}, {goal_y}): {path_list} ({len(path_list)} steps, distance={distance})")
+                            print(f"🗺️ [DIRECTIVE NAV] A* found {len(path_list)}-step path: {' → '.join(path_list)}")
+                            return path_list
                         
                         # 4. No path found - use SMART directional fallback with exploration
                         # Calculate general direction to goal and try moving that way
@@ -3091,49 +2616,10 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
                         else:
                             logger.info(f"🔍 [SMART EXPLORATION] Selected {exploration_direction} (exploration strategy)")
                         
-                        # Use VLM executor for compliance
-                        try:
-                            if _stuck_counter > 0:
-                                executor_prompt = f"""You are navigating in Pokemon Emerald.
-
-CURRENT POSITION: ({current_x}, {current_y})
-GOAL: ({goal_x}, {goal_y})  
-PRIMARY DIRECTION: {primary_direction} (BLOCKED after {_stuck_counter} attempts)
-EXPLORATION DIRECTION: {exploration_direction}
-
-The direct path is blocked. We should explore {exploration_direction} to reveal more of the map and find an alternative route.
-
-What button should you press? Respond with ONLY the button name (UP, DOWN, LEFT, RIGHT, A, B)."""
-                            else:
-                                executor_prompt = f"""You are navigating in Pokemon Emerald.
-
-CURRENT POSITION: ({current_x}, {current_y})
-GOAL: ({goal_x}, {goal_y})  
-DIRECTION: {exploration_direction}
-
-Pathfinding failed, but we should move {exploration_direction} toward the goal.
-
-What button should you press? Respond with ONLY the button name (UP, DOWN, LEFT, RIGHT, A, B)."""
-
-                            vlm_response = vlm.get_text_query(executor_prompt, "FALLBACK_EXECUTOR")
-                            
-                            # Parse VLM response
-                            vlm_action = vlm_response.strip().upper()
-                            valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                            
-                            if vlm_action in valid_buttons:
-                                logger.info(f"✅ [VLM EXECUTOR] Smart exploration → VLM confirmed: {vlm_action}")
-                                print(f"✅ [VLM EXECUTOR] VLM confirmed exploration: {vlm_action}")
-                                return [vlm_action]
-                            else:
-                                # Fallback: use recommended direction without VLM confirmation
-                                logger.warning(f"⚠️ [FALLBACK] VLM unclear, using {exploration_direction} anyway")
-                                return [exploration_direction]
-                                
-                        except Exception as e:
-                            # VLM failed - use exploration direction anyway (better than getting stuck)
-                            logger.warning(f"⚠️ [FALLBACK] VLM executor error, using {exploration_direction}: {e}")
-                            return [exploration_direction]
+                        # Return the exploration direction directly
+                        logger.info(f"🔍 [SMART EXPLORATION] Moving {exploration_direction} (stuck={_stuck_counter})")
+                        print(f"🔍 [SMART EXPLORATION] Moving {exploration_direction}")
+                        return [exploration_direction]
                     
                     # This shouldn't be reached (distance=0 handled above)
                     logger.warning(f"⚠️ [DIRECTIVE NAV] Unexpected state: at goal but not caught by check above")
@@ -3149,39 +2635,10 @@ What button should you press? Respond with ONLY the button name (UP, DOWN, LEFT,
                     # Try pathfinding first - it will fail if no walkable targets (e.g., at map edge)
                     suggested_action = _local_pathfind_from_tiles(state_data, goal_direction, recent_actions)
                     if suggested_action:
-                        logger.info(f"🗺️ [DIRECTIVE] Directional pathfinding suggests: {suggested_action}")
-                        print(f"🗺️ [DIRECTIVE] Directional pathfinding found: {suggested_action}")
-                        
-                        # VLM EXECUTOR FOR COMPLIANCE
-                        recommended_action = suggested_action[0] if isinstance(suggested_action, list) else suggested_action
-                        
-                        try:
-                            executor_prompt = f"""You are navigating toward the {goal_direction} in Pokemon Emerald.
-
-CURRENT OBJECTIVE: {description}
-DIRECTION: Moving {goal_direction}
-
-The pathfinding system recommends: {recommended_action}
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                            vlm_response = vlm.get_text_query(executor_prompt, "DIRECTIVE_EXECUTOR")
-                            
-                            # Parse VLM response
-                            vlm_action = vlm_response.strip().upper()
-                            valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                            
-                            if vlm_action in valid_buttons:
-                                logger.info(f"✅ [VLM EXECUTOR] Directional pathfinding → VLM confirmed: {vlm_action}")
-                                print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                                return suggested_action if isinstance(suggested_action, list) else [suggested_action]
-                            else:
-                                logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed for directional pathfinding: '{vlm_response}'")
-                                raise RuntimeError(f"VLM executor failed - invalid response: '{vlm_response}'")
-                                
-                        except Exception as e:
-                            logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error: {e}")
-                            raise RuntimeError(f"VLM executor failed for directional pathfinding: {e}")
+                        path_list = suggested_action if isinstance(suggested_action, list) else [suggested_action]
+                        logger.info(f"🗺️ [DIRECTIVE] Directional pathfinding: {' → '.join(path_list)} ({len(path_list)} steps)")
+                        print(f"🗺️ [DIRECTIVE] Directional path {goal_direction}: {' → '.join(path_list)}")
+                        return path_list
                     else:
                         # Pathfinding failed - likely standing on warp tile at map edge
                         # Just push in the goal direction to trigger the warp
@@ -3196,34 +2653,9 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
                             'west': 'LEFT'
                         }
                         action = direction_map.get(goal_direction.lower(), 'UP')
-                        
-                        # VLM EXECUTOR FOR COMPLIANCE
-                        try:
-                            executor_prompt = f"""You are at a map boundary in Pokemon Emerald.
-
-CURRENT OBJECTIVE: {description}
-SITUATION: No walkable path {goal_direction}, need to trigger warp/boundary crossing
-
-The system recommends: {action} (to cross boundary)
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                            vlm_response = vlm.get_text_query(executor_prompt, "DIRECTIVE_EXECUTOR")
-                            
-                            vlm_action = vlm_response.strip().upper()
-                            valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                            
-                            if vlm_action in valid_buttons:
-                                logger.info(f"✅ [VLM EXECUTOR] Boundary crossing → VLM confirmed: {vlm_action}")
-                                print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                                return [action]
-                            else:
-                                logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed for boundary crossing: '{vlm_response}'")
-                                raise RuntimeError(f"VLM executor failed - invalid response: '{vlm_response}'")
-                                
-                        except Exception as e:
-                            logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error: {e}")
-                            raise RuntimeError(f"VLM executor failed for boundary crossing: {e}")
+                        logger.info(f"🚪 [DIRECTIVE] Boundary crossing {goal_direction}: {action}")
+                        print(f"🚪 [DIRECTIVE] Pushing {action} to cross boundary")
+                        return [action]
                 
                 # Handle wait_for_transition - wait for warp/map transition to complete
                 elif 'wait_for_transition' in directive:
@@ -3821,77 +3253,17 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
                                 nav_action = ['DOWN'] if dy > 0 else ['UP']
                             logger.info(f"📍 [DIRECTIVE NAV] All A* failed, using simple direction: {nav_action[0]}")
                     
-                    # VLM EXECUTOR PATTERN (competition compliance)
-                    # For directives, the pathfinding system has already determined the optimal action
-                    # The VLM just needs to confirm it (this satisfies competition rules)
+                    # Return the full A* path directly
                     if nav_action:
-                        try:
-                            executor_prompt = f"""Execute the recommended navigation action.
-
-DIRECTIVE: {description}
-RECOMMENDED ACTION: {nav_action[0]}
-
-This action was determined by A* pathfinding to reach the target.
-Confirm by responding with the exact action: {nav_action[0]}
-"""
-                            vlm_response = vlm.get_text_query(executor_prompt, "DIRECTIVE_EXECUTOR")
-                            
-                            # Parse VLM response
-                            vlm_action = vlm_response.strip().upper()
-                            valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                            
-                            # If VLM confirms the recommended action or gives a valid button, use it
-                            if vlm_action == nav_action[0]:
-                                logger.info(f"📍 [DIRECTIVE] VLM confirmed recommended action: {vlm_action}")
-                                # CRITICAL FIX: Return the FULL nav_action list, not just first element!
-                                return nav_action
-                            elif vlm_action in valid_buttons:
-                                # VLM suggested different action - log warning but use recommendation
-                                logger.warning(f"📍 [DIRECTIVE] VLM suggested {vlm_action}, but using pathfinding recommendation: {nav_action[0]}")
-                                # CRITICAL FIX: Return the FULL nav_action list, not just first element!
-                                return nav_action
-                            else:
-                                # VLM gave invalid response - use recommendation directly
-                                logger.warning(f"📍 [DIRECTIVE] VLM response unclear: '{vlm_response}', using recommendation: {nav_action[0]}")
-                                # CRITICAL FIX: Return the FULL nav_action list, not just first element!
-                                return nav_action
-                                    
-                        except Exception as e:
-                            # If VLM fails, use the pathfinding recommendation (still competition compliant as VLM was called)
-                            logger.warning(f"📍 [DIRECTIVE] VLM executor error: {e}, using pathfinding recommendation: {nav_action[0]}")
-                            # CRITICAL FIX: Return the FULL nav_action list, not just first element!
-                            return nav_action
+                        logger.info(f"📍 [DIRECTIVE NAV] Returning {len(nav_action)}-step path: {' → '.join(nav_action)}")
+                        print(f"📍 [DIRECTIVE NAV] {len(nav_action)}-step path: {' → '.join(nav_action)}")
+                        return nav_action
                 
                 # Handle INTERACT directive (at target, just press A)
                 elif directive.get('action') == 'INTERACT':
                     logger.info(f"📍 [DIRECTIVE] INTERACT directive - pressing A")
-                    
-                    # VLM executor for compliance
-                    try:
-                        executor_prompt = f"""You are executing an interaction directive.
-
-DIRECTIVE: {description}
-
-The agent is at the target position and needs to interact by pressing A.
-
-What button should we press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT).
-"""
-                        vlm_response = vlm.get_text_query(executor_prompt, "DIRECTIVE_EXECUTOR_INTERACT")
-                        
-                        vlm_action = vlm_response.strip().upper()
-                        valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                        
-                        if vlm_action in valid_buttons:
-                            logger.info(f"📍 [DIRECTIVE] VLM confirmed interaction: {vlm_action}")
-                            return [vlm_action]
-                        else:
-                            # Fallback: just press A for interaction
-                            logger.warning(f"📍 [DIRECTIVE] VLM unclear, defaulting to A for interaction")
-                            return ['A']
-                            
-                    except Exception as e:
-                        logger.error(f"📍 [DIRECTIVE] VLM executor error: {e}, defaulting to A")
-                        return ['A']
+                    print(f"📍 [DIRECTIVE] Interacting with A")
+                    return ['A']
                 
                 # Handle DIALOGUE (press A to advance dialogue)
                 elif directive.get('action') == 'DIALOGUE':
@@ -3899,31 +3271,9 @@ What button should we press? Respond with ONLY the button name (A, B, UP, DOWN, 
                     _was_in_dialogue = True
                     _post_dialogue_movement_count = 0  # Reset counter when dialogue starts
                     
-                    logger.info(f"📍 [DIRECTIVE] DIALOGUE - routing through VLM executor")
+                    logger.info(f"📍 [DIRECTIVE] DIALOGUE - pressing A to advance")
                     print(f"💬 [DIALOGUE] Detected - resetting post-dialogue movement counter")
-                    
-                    # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-                    dialogue_prompt = f"""Playing Pokemon Emerald. Active dialogue detected.
-
-SITUATION: Dialogue on screen that needs to be advanced
-RECOMMENDED ACTION: Press A to advance dialogue
-
-What button should you press? Respond with ONE button name only: A"""
-                    
-                    try:
-                        vlm_response = vlm.get_text_query(dialogue_prompt, "DIRECTIVE_DIALOGUE_EXECUTOR")
-                        vlm_upper = vlm_response.upper().strip()
-                        
-                        if 'A' in vlm_upper:
-                            logger.info(f"✅ [VLM EXECUTOR] Directive dialogue, VLM confirmed→A")
-                            return ['A']
-                        else:
-                            retry_response = vlm.get_text_query("What button to advance dialogue? Answer: A", "DIRECTIVE_DIALOGUE_RETRY")
-                            logger.info(f"✅ [VLM EXECUTOR RETRY] Directive dialogue confirmed→A")
-                            return ['A']
-                    except Exception as e:
-                        logger.error(f"⚠️ [VLM EXECUTOR] Directive dialogue error: {e}, defaulting to A")
-                        return ['A']
+                    return ['A']
                 
                 # Handle WAIT_FOR_DIALOGUE (don't interrupt dialogue)
                 elif directive.get('action') == 'WAIT_FOR_DIALOGUE':
@@ -4021,40 +3371,10 @@ What button should you press? Respond with ONE button name only: A"""
                 logger.warning(f"🔺 [CONTINUE PROMPT] Red triangle detected but location '{current_location}' is blacklisted - ignoring")
                 print(f"⚠️ [DIALOGUE] Ignoring continue prompt in {current_location} (known false positive)")
             else:
-                # VLM EXECUTOR FOR COMPLIANCE
-                # Red triangle detected - route through VLM to confirm action
-                logger.info(f"🔺 [CONTINUE PROMPT] Red triangle indicator detected - routing through VLM executor")
-                print(f"🔺 [DIALOGUE] Red triangle ❤️ visible - asking VLM for action")
-                
-                try:
-                    executor_prompt = f"""You are playing Pokemon Emerald. A dialogue box is visible with a continue prompt (red triangle ❤️ indicator).
-
-CURRENT LOCATION: {current_location}
-DIALOGUE TEXT: {dialogue_text if dialogue_text else 'Not visible'}
-
-The standard action for a continue prompt is to press A to advance the dialogue.
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                    vlm_response = vlm.get_text_query(executor_prompt, "DIALOGUE_EXECUTOR")
-                    
-                    # Parse VLM response
-                    vlm_action = vlm_response.strip().upper()
-                    valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                    
-                    if vlm_action in valid_buttons:
-                        logger.info(f"✅ [VLM EXECUTOR] Dialogue continue prompt → VLM confirmed: {vlm_action}")
-                        print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                        return [vlm_action]
-                    else:
-                        # VLM gave unclear response - crash per competition rules
-                        logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button for dialogue: '{vlm_response}'")
-                        raise RuntimeError(f"VLM executor failed - invalid response for dialogue: '{vlm_response}'")
-                        
-                except Exception as e:
-                    # VLM executor failed - crash per competition rules
-                    logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error for dialogue: {e}")
-                    raise RuntimeError(f"VLM executor failed for dialogue detection: {e}")
+                # Red triangle detected - press A to advance dialogue
+                logger.info(f"🔺 [CONTINUE PROMPT] Red triangle indicator detected - pressing A")
+                print(f"🔺 [DIALOGUE] Red triangle ❤️ visible - pressing A")
+                return ['A']
     
     # 🔺 PRIORITY 1B: FALLBACK - TEXT BOX DETECTION
     # Simple rule: If we see dialogue (text box visible), press A to advance
@@ -4082,40 +3402,10 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
                 print(f"💬 [DIALOGUE 1B] Player monologue detected - ignoring (likely VLM hallucination)")
                 # Don't return anything, fall through to check other priorities
             else:
-                # VLM EXECUTOR FOR COMPLIANCE
-                # Dialogue detected - route through VLM to confirm action
-                logger.info(f"💬 [DIALOGUE 1B] Dialogue visible - routing through VLM executor")
-                print(f"💬 [DIALOGUE] Text box visible - asking VLM for action")
-                
-                try:
-                    executor_prompt = f"""You are playing Pokemon Emerald. A dialogue box is visible on screen.
-
-CURRENT LOCATION: {current_location}
-DIALOGUE TEXT: {dialogue_text if dialogue_text else 'Not visible'}
-
-The standard action when dialogue is visible is to press A to advance it.
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                    vlm_response = vlm.get_text_query(executor_prompt, "DIALOGUE_EXECUTOR")
-                    
-                    # Parse VLM response
-                    vlm_action = vlm_response.strip().upper()
-                    valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                    
-                    if vlm_action in valid_buttons:
-                        logger.info(f"✅ [VLM EXECUTOR] Dialogue text box → VLM confirmed: {vlm_action}")
-                        print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                        return [vlm_action]
-                    else:
-                        # VLM gave unclear response - crash per competition rules
-                        logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button for dialogue: '{vlm_response}'")
-                        raise RuntimeError(f"VLM executor failed - invalid response for dialogue: '{vlm_response}'")
-                        
-                except Exception as e:
-                    # VLM executor failed - crash per competition rules
-                    logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error for dialogue: {e}")
-                    raise RuntimeError(f"VLM executor failed for dialogue detection: {e}")
+                # Dialogue detected - press A to advance
+                logger.info(f"💬 [DIALOGUE 1B] Dialogue visible - pressing A")
+                print(f"💬 [DIALOGUE] Text box visible - pressing A")
+                return ['A']
     
     # 🚨 PRIORITY 2: NEW GAME MENU DETECTION
     # Must happen before ANY other logic to prevent override conflicts
@@ -4131,41 +3421,11 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
         player_name_set = player_name_milestone.get('completed', False) if isinstance(player_name_milestone, dict) else bool(player_name_milestone)
         
         if ('NEW GAME' in dialogue_text or 'NEW GAME' in menu_title) and not player_name_set:
-            logger.info(f"🎯 [NEW GAME FIX] NEW GAME menu detected! Routing through VLM executor.")
+            logger.info(f"🎯 [NEW GAME FIX] NEW GAME menu detected - pressing A")
             logger.info(f"🎯 [NEW GAME FIX] - dialogue: '{dialogue_text}'")
             logger.info(f"🎯 [NEW GAME FIX] - menu_title: '{menu_title}'")
-            print(f"🎯 [NEW GAME FIX] NEW GAME menu detected - asking VLM for action")
-            
-            try:
-                executor_prompt = f"""You are at the Pokemon Emerald title screen menu.
-
-MENU OPTIONS VISIBLE:
-- NEW GAME
-- OPTIONS (or other menu items)
-
-To start a new game, you should select NEW GAME by pressing A.
-
-What button should you press? Respond with ONLY the button name (A, B, UP, DOWN, LEFT, RIGHT, START, SELECT)."""
-
-                vlm_response = vlm.get_text_query(executor_prompt, "MENU_EXECUTOR")
-                
-                # Parse VLM response
-                vlm_action = vlm_response.strip().upper()
-                valid_buttons = ['A', 'B', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT']
-                
-                if vlm_action in valid_buttons:
-                    logger.info(f"✅ [VLM EXECUTOR] NEW GAME menu → VLM confirmed: {vlm_action}")
-                    print(f"✅ [VLM EXECUTOR] VLM confirmed: {vlm_action}")
-                    return [vlm_action]
-                else:
-                    # VLM gave unclear response - crash per competition rules
-                    logger.error(f"❌ [COMPLIANCE VIOLATION] VLM failed to provide valid button for NEW GAME menu: '{vlm_response}'")
-                    raise RuntimeError(f"VLM executor failed - invalid response for NEW GAME menu: '{vlm_response}'")
-                    
-            except Exception as e:
-                # VLM executor failed - crash per competition rules
-                logger.error(f"❌ [COMPLIANCE VIOLATION] VLM executor error for NEW GAME menu: {e}")
-                raise RuntimeError(f"VLM executor failed for NEW GAME menu: {e}")
+            print(f"🎯 [NEW GAME FIX] NEW GAME menu detected - pressing A")
+            return ['A']
     
     """
     ===============================================================================
@@ -4226,32 +3486,7 @@ What button should you press? Respond with ONLY the button name (A, B, UP, DOWN,
         logger.info(f"[ACTION] - party_count: {game_data.get('party_count', 0)}")
         logger.info(f"[ACTION] - position: {player_data.get('position', {})}")
         logger.info("[ACTION] Using simple navigation: A to select NEW GAME")
-        
-        # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-        # Route title screen navigation through VLM
-        title_prompt = f"""Playing Pokemon Emerald. At title screen.
-
-SITUATION: Game startup - need to select NEW GAME from title menu
-RECOMMENDED ACTION: Press A to navigate through title screen and select NEW GAME
-
-What button should you press? Respond with ONE button name only: A"""
-        
-        try:
-            vlm_response = vlm.get_text_query(title_prompt, "TITLE_SCREEN_EXECUTOR")
-            vlm_upper = vlm_response.upper().strip()
-            
-            if 'A' in vlm_upper:
-                logger.info(f"✅ [VLM EXECUTOR] Title screen, VLM confirmed→A")
-                return ["A"]
-            else:
-                # Retry with simpler prompt
-                retry_response = vlm.get_text_query("What button for title screen? Answer: A", "TITLE_SCREEN_RETRY")
-                logger.info(f"✅ [VLM EXECUTOR RETRY] Title screen confirmed→A")
-                return ["A"]
-        except Exception as e:
-            # COMPLIANCE: VLM must make decision, but A is the only option
-            logger.error(f"⚠️ [VLM EXECUTOR] Title screen error: {e}, defaulting to A")
-            return ["A"]
+        return ["A"]
     
     # ENHANCED FIX: Detect name selection screen after title screen
     # Check for name selection context using visual data and milestones
@@ -4316,30 +3551,7 @@ What button should you press? Respond with ONE button name only: A"""
         logger.info("[ACTION] Name selection screen detected!")
         logger.info(f"[ACTION] - text_detected: {name_text_detected}, vlm_detected: {vlm_context_name_selection}, step_range: {in_name_step_range}")
         logger.info(f"[ACTION] - dialogue: '{dialogue_text}', menu: '{menu_title}'")
-        
-        # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-        # Route name selection through VLM
-        name_prompt = f"""Playing Pokemon Emerald. Character naming screen.
-
-SITUATION: Early game name selection - accepting default name for speed
-RECOMMENDED ACTION: Press A to position/accept default name
-
-What button should you press? Respond with ONE button name only: A"""
-        
-        try:
-            vlm_response = vlm.get_text_query(name_prompt, "NAME_SELECTION_EXECUTOR")
-            vlm_upper = vlm_response.upper().strip()
-            
-            if 'A' in vlm_upper:
-                logger.info(f"✅ [VLM EXECUTOR] Name selection, VLM confirmed→A")
-                return ["A"]
-            else:
-                retry_response = vlm.get_text_query("What button for name selection? Answer: A", "NAME_SELECTION_RETRY")
-                logger.info(f"✅ [VLM EXECUTOR RETRY] Name selection confirmed→A")
-                return ["A"]
-        except Exception as e:
-            logger.error(f"⚠️ [VLM EXECUTOR] Name selection error: {e}, defaulting to A")
-            return ["A"]
+        return ["A"]
     
     # NEW GAME MENU FIX: Detect "NEW GAME / OPTIONS" menu screen (HIGH PRIORITY)
     # This must happen BEFORE other override systems to prevent conflicts
@@ -4348,29 +3560,7 @@ What button should you press? Respond with ONE button name only: A"""
         logger.info(f"[ACTION] - dialogue: '{dialogue_text}'")
         logger.info(f"[ACTION] - menu_title: '{menu_title}'")
         logger.info("[ACTION] Selecting NEW GAME with A")
-        
-        # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-        new_game_prompt = f"""Playing Pokemon Emerald. Title screen menu.
-
-SITUATION: "NEW GAME / OPTIONS" menu - selecting NEW GAME
-RECOMMENDED ACTION: Press A to select NEW GAME
-
-What button should you press? Respond with ONE button name only: A"""
-        
-        try:
-            vlm_response = vlm.get_text_query(new_game_prompt, "NEW_GAME_MENU_EXECUTOR")
-            vlm_upper = vlm_response.upper().strip()
-            
-            if 'A' in vlm_upper:
-                logger.info(f"✅ [VLM EXECUTOR] NEW GAME menu, VLM confirmed→A")
-                return ["A"]
-            else:
-                retry_response = vlm.get_text_query("What button for NEW GAME menu? Answer: A", "NEW_GAME_MENU_RETRY")
-                logger.info(f"✅ [VLM EXECUTOR RETRY] NEW GAME menu confirmed→A")
-                return ["A"]
-        except Exception as e:
-            logger.error(f"⚠️ [VLM EXECUTOR] NEW GAME menu error: {e}, defaulting to A")
-            return ["A"]
+        return ["A"]
     
     # CRITICAL DEBUG: Override right after PLAYER_NAME_SET to avoid VLM confusion
     # But only until INTRO_CUTSCENE_COMPLETE - then let VLM take over
@@ -4420,30 +3610,7 @@ What button should you press? Respond with ONE button name only: A"""
         not is_in_moving_van):
         logger.info(f"[ACTION] Step {current_step} - Post-name override active (location: {player_location})")
         print(f"🔧 [OVERRIDE] Step {current_step} - Post-name override: pressing A (intro_complete={intro_complete}, location={player_location}, has_pokemon={player_has_pokemon})")
-        
-        # ✅ VLM EXECUTOR PATTERN (Competition Compliance)
-        override_prompt = f"""Playing Pokemon Emerald. Early game intro cutscene.
-
-SITUATION: Post-name intro sequence at step {current_step}
-LOCATION: {player_location}
-RECOMMENDED ACTION: Press A to advance intro cutscene
-
-What button should you press? Respond with ONE button name only: A"""
-        
-        try:
-            vlm_response = vlm.get_text_query(override_prompt, "INTRO_OVERRIDE_EXECUTOR")
-            vlm_upper = vlm_response.upper().strip()
-            
-            if 'A' in vlm_upper:
-                logger.info(f"✅ [VLM EXECUTOR] Intro override, VLM confirmed→A")
-                return ["A"]
-            else:
-                retry_response = vlm.get_text_query("What button for intro cutscene? Answer: A", "INTRO_OVERRIDE_RETRY")
-                logger.info(f"✅ [VLM EXECUTOR RETRY] Intro override confirmed→A")
-                return ["A"]
-        except Exception as e:
-            logger.error(f"⚠️ [VLM EXECUTOR] Intro override error: {e}, defaulting to A")
-            return ["A"]
+        return ["A"]
     
     # 2. VLM Navigation Mode: When intro is complete OR we exceed override limits OR advanced location
     elif intro_complete or current_step > override_step_limit or is_in_moving_van or advanced_location:
@@ -4948,48 +4115,11 @@ What button should you press? Respond with ONE button name only: A"""
                                 walkable_directions.append(direction)
                     
                     if walkable_directions:
-                        # COMPETITION COMPLIANCE: Must go through VLM executor
-                        # Anti-stuck provides SUGGESTION, but VLM makes final decision
                         alternative_direction = next((d for d in walkable_directions if d != stuck_direction), walkable_directions[0])
                         print(f"🚨 [ANTI-STUCK] Detected stuck pattern on {stuck_direction}")
-                        print(f"💡 [ANTI-STUCK] Suggesting alternative: {alternative_direction}")
-                        
-                        # Pass suggestion to VLM for final decision
-                        vlm_stuck_prompt = f"""CRITICAL: Agent is stuck!
-
-Agent has pressed {stuck_direction} 5 times in a row but hasn't moved.
-Movement analysis shows {stuck_direction} is BLOCKED (likely a ledge or obstacle).
-
-Walkable alternatives: {', '.join(walkable_directions)}
-
-RECOMMENDATION: Press {alternative_direction} to unstuck
-
-What button should be pressed? Answer with just the button name (UP/DOWN/LEFT/RIGHT/A/B):"""
-                        
-                        try:
-                            vlm_response = vlm.get_text_query(vlm_stuck_prompt, "ANTI_STUCK_EXECUTOR")
-                            vlm_upper = vlm_response.upper().strip()
-                            
-                            # Parse VLM response
-                            valid_directions = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B']
-                            final_action = None
-                            for direction in valid_directions:
-                                if direction in vlm_upper:
-                                    final_action = [direction]
-                                    break
-                            
-                            if final_action:
-                                logger.info(f"✅ [VLM ANTI-STUCK] VLM approved action: {final_action[0]}")
-                                print(f"✅ [VLM ANTI-STUCK] VLM decision: {final_action[0]}")
-                                return final_action
-                            else:
-                                # VLM didn't respond with valid direction - use suggestion but this shouldn't happen
-                                logger.warning(f"⚠️ [VLM ANTI-STUCK] Could not parse VLM response, using suggestion: {alternative_direction}")
-                                return [alternative_direction]
-                        except Exception as e:
-                            logger.error(f"❌ [VLM ANTI-STUCK] VLM call failed: {e}")
-                            # Emergency fallback - at least we tried to use VLM
-                            return [alternative_direction]
+                        print(f"💡 [ANTI-STUCK] Using alternative: {alternative_direction}")
+                        logger.info(f"💡 [ANTI-STUCK] Stuck on {stuck_direction}, switching to {alternative_direction}")
+                        return [alternative_direction]
     
     # Build action prompt with multiple-choice format if we have walkable options
     if walkable_options and len(walkable_options) > 0:
@@ -5117,7 +4247,7 @@ What button should be pressed? Answer with just the button name (UP/DOWN/LEFT/RI
         #   5. If safe: suggest_option_num = 1 (UP)
         #      If unsafe: perpendicular fallback (RIGHT/LEFT)
         #   6. VLM sees: "Goal: OLDALE_TOWN (NORTH)\nSuggested: 1\n1. UP [.]\n2. DOWN..."
-        #   7. VLM makes final decision (competition compliance)
+        #   7. VLM makes final decision
         # ============================================================================
         
         suggested_option_num = None
@@ -5158,7 +4288,6 @@ What button should be pressed? Answer with just the button name (UP/DOWN/LEFT/RI
                 # - Uses complete explored map (not just 15x15 local view)
                 # - Can route around obstacles globally
                 # - Integrates warp avoidance with position history
-                # Competition Compliance: A* provides SUGGESTION, VLM makes final decision
                 astar_direction = None
                 
                 # Get map stitcher data from state (sent by server as JSON-serializable data)

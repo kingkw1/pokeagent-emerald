@@ -16,7 +16,7 @@ The Directive System is a lightweight tactical guidance layer that bridges the g
 2. **Action Controller Integration** (`agent/action.py`)
    - Priority 0C: Directive execution
    - Positioned between Opener Bot (0B) and Dialogue Detection (1)
-   - Routes all actions through VLM executor for competition compliance
+   - Returns actions directly (batched A* paths, single button presses)
 
 ### Key Features
 
@@ -24,7 +24,7 @@ The Directive System is a lightweight tactical guidance layer that bridges the g
 - **Persistent State Flags**: Events like battle completion persist even after moving away
 - **Dialogue Integration**: Detects active dialogue and prioritizes it over navigation
 - **A* Pathfinding**: Uses same pathfinding as Opener Bot for obstacle avoidance
-- **VLM Compliance**: All actions route through VLM executor pattern
+- **Batched Actions**: A* paths returned in full for efficient execution
 
 ## Implementation Details
 

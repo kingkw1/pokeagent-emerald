@@ -79,15 +79,15 @@ def test_battle_detection():
     print("\nKey Features Verified:")
     print("  ✅ Battle detection works correctly")
     print("  ✅ Returns symbolic decisions (not raw buttons)")
-    print("  ✅ Ready for VLM executor integration")
+    print("  ✅ Ready for action.py integration")
     print("\nNext Steps:")
     print("  1. Run integration test with action.py")
-    print("  2. Verify VLM executor routes decisions correctly")
+    print("  2. Verify action routing works correctly")
     print("  3. Test with real battle scenario")
     print("\nImplementation Status:")
     print("  ✅ agent/battle_bot.py created")
     print("  ✅ agent/action.py modified (Priority 0A battle check)")
-    print("  ✅ VLM executor pattern implemented")
+    print("  ✅ Battle bot pattern implemented")
 
 
 if __name__ == "__main__":
