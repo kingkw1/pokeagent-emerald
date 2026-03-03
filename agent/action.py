@@ -2,7 +2,6 @@ import logging
 from agent.system_prompt import system_prompt
 from agent.opener_bot import get_opener_bot
 from agent.battle_bot import get_battle_bot
-from agent.planning import planning_step  # Import planning_step to access objective_manager
 
 # === NEW MODULE IMPORTS (Phase 2 refactor) ===
 # Stuck detection, warp handling, and post-dialogue limiting
@@ -58,7 +57,7 @@ def format_observation_for_action(observation):
         return str(observation)
 
 
-def action_step(memory_context, current_plan, latest_observation, frame, state_data, recent_actions, vlm, visual_dialogue_active=False):
+def action_step(memory_context, current_plan, latest_observation, frame, state_data, recent_actions, vlm, visual_dialogue_active=False, objective_manager=None):
     """
     Decide and perform the next action button(s) based on memory, plan, observation, and comprehensive state.
     Returns a list of action buttons as strings.
@@ -72,6 +71,7 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
         recent_actions: List of recent actions taken
         vlm: VLM instance for action decisions
         visual_dialogue_active: VLM's visual detection of dialogue box (85.7% accurate, no time cost)
+        objective_manager: ObjectiveManager instance (passed directly from Agent)
     """
     print("=" * 80)
     print("🎯 [ACTION_STEP] CALLED - Starting action decision process")
@@ -377,19 +377,18 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
     # - Converts directives to NavigationGoal objects (reuses Opener Bot pathfinding)
     # - Returns button presses directly
     try:
-        # Import planning module and NavigationGoal
-        from agent.planning import planning_step
         from agent.opener_bot import NavigationGoal
         
-        # Get ObjectiveManager instance (created in planning_step function)
-        # Note: objective_manager is attached to the planning_step function itself, not its return value
-        logger.info(f"🔍 [DIRECTIVE DEBUG] hasattr(planning_step, 'objective_manager'): {hasattr(planning_step, 'objective_manager')}")
-        print(f"🔍 [DIRECTIVE DEBUG] hasattr(planning_step, 'objective_manager'): {hasattr(planning_step, 'objective_manager')}")
+        # ObjectiveManager is now passed directly; fall back to legacy attribute
+        obj_manager = objective_manager
+        if obj_manager is None:
+            from agent.planning import planning_step
+            obj_manager = getattr(planning_step, 'objective_manager', None)
         
-        if hasattr(planning_step, 'objective_manager'):
-            obj_manager = planning_step.objective_manager
-            logger.info(f"🔍 [DIRECTIVE DEBUG] objective_manager exists: {obj_manager}")
-            print(f"🔍 [DIRECTIVE DEBUG] objective_manager exists: {obj_manager}")
+        logger.info(f"🔍 [DIRECTIVE DEBUG] objective_manager resolved: {obj_manager is not None}")
+        print(f"🔍 [DIRECTIVE DEBUG] objective_manager resolved: {obj_manager is not None}")
+        
+        if obj_manager is not None:
             
             # Log state data for debugging battle detection
             player_data = state_data.get('player', {})

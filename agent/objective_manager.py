@@ -643,6 +643,61 @@ class ObjectiveManager:
         logger.info(f"🔍 [OBJECTIVE_MANAGER DEBUG] get_next_action_directive() CALLED")
         print(f"🔍 [OBJECTIVE_MANAGER] get_next_action_directive() CALLED")
         
+        # =====================================================================
+        # PRIORITY 0: EXECUTE RECOVERY TASKS FROM SLOW BRAIN (RAG + LLM)
+        # =====================================================================
+        # If the RecoveryPlanner generated a recovery task (e.g., after a
+        # navigation failure or dialogue blocker), execute it BEFORE resuming
+        # normal milestone progression.  This is the critical link between
+        # the Slow Brain's output and the agent's "hands".
+        # =====================================================================
+        if self._recovery_tasks:
+            task = self._recovery_tasks[0]
+            task_text = task.get('task', '').lower()
+            task_reason = task.get('reason', '')
+            logger.info(f"🧠 [RECOVERY] Executing recovery task: '{task_text}' (reason: {task_reason})")
+            print(f"🧠 [RECOVERY] Brain directive: '{task_text}' (reason: {task_reason})")
+
+            # Heuristic translation of free-text recovery task → structured Directive
+            if any(kw in task_text for kw in ['talk', 'speak', 'interact', 'npc', 'old man']):
+                return {
+                    'action': 'DIALOGUE',
+                    'target': None,
+                    'description': f'RECOVERY: {task["task"]}',
+                    'milestone': None,
+                    'recovery': True,
+                }
+            elif any(kw in task_text for kw in ['battle', 'fight', 'defeat']):
+                # Battles are handled by the BattleBot priority (higher than us)
+                # so auto-complete this recovery task and let the next step proceed.
+                logger.info("🧠 [RECOVERY] Battle recovery — deferring to BattleBot")
+                self.complete_recovery_task()
+                self.clear_blocker()
+                # Fall through to normal milestone logic
+            elif any(kw in task_text for kw in ['explore', 'look', 'search', 'find']):
+                return {
+                    'goal_direction': 'south',
+                    'description': f'RECOVERY: {task["task"]}',
+                    'journey_reason': f'Recovery: {task_reason}',
+                    'recovery': True,
+                }
+            elif any(kw in task_text for kw in ['heal', 'pokemon center', 'restore']):
+                return {
+                    'goal_direction': 'south',
+                    'description': f'RECOVERY: {task["task"]} — head toward Pokemon Center',
+                    'journey_reason': f'Recovery: {task_reason}',
+                    'recovery': True,
+                }
+            else:
+                # Default: treat unknown recovery tasks as "press A to progress"
+                return {
+                    'action': 'DIALOGUE',
+                    'target': None,
+                    'description': f'RECOVERY: {task["task"]}',
+                    'milestone': None,
+                    'recovery': True,
+                }
+
         # First update objectives based on milestones
         self.check_storyline_milestones(state_data)
         
@@ -1722,7 +1777,8 @@ class ObjectiveManager:
         if not brain_in_battle:
             self._scan_dialogue_for_blockers(perception_output)
 
-        # ── D. Short-circuit if blocked by non-battle blocker ──
+        # ── D. Non-battle blocker: generate recovery plan then let
+        #      get_next_action_directive() execute it on the NEXT step. ──
         if not brain_in_battle and self.is_blocked:
             if recovery_planner is not None and not self._recovery_tasks:
                 print("🤔 [ObjectiveManager] Thinking... Querying Memory & LLM...")
@@ -1733,7 +1789,9 @@ class ObjectiveManager:
                 )
                 print(f"💡 [ObjectiveManager] Recovery Plan: {plan['recovery_task']}")
                 self.add_recovery_task(plan["recovery_task"], reason="Obstacle Detected")
-            return ["A"]  # short-circuit: press A to advance dialogue
+            # Don't short-circuit here — let the recovery task flow through
+            # get_next_action_directive() so the Slow Brain's plan drives actions.
+            return None
 
         return None  # let normal pipeline continue
 

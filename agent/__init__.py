@@ -312,15 +312,28 @@ class Agent:
                     self.position_history = self.position_history[-8:]
                 
                 # Detect oscillation: check if we're bouncing between same 2-3 positions
-                if len(self.position_history) >= 6:
+                # GUARD: Skip during battles — player position is static in battle, so
+                # the detector would always fire after 6 steps of combat.
+                in_battle_now = state_data.get('game', {}).get('in_battle', False)
+                if not in_battle_now and len(self.position_history) >= 6:
                     # Check if last 6 positions contain only 2 unique positions
                     recent_positions = self.position_history[-6:]
                     unique_positions = set(recent_positions)
                     if len(unique_positions) <= 2:
                         logger.warning(f"[STUCK DETECTION] Agent oscillating between positions: {unique_positions}")
-                        logger.warning(f"[STUCK DETECTION] This may indicate outdated objectives or navigation issues")
-                        # Reset position history to avoid spam
+                        logger.warning(f"[STUCK DETECTION] Triggering Slow Brain recovery via signal_blocker()")
+                        # Reset position history to avoid re-triggering every step
                         self.position_history = [current_position]
+                        # ── Wire to Slow Brain ──
+                        # signal_blocker() sets the BLOCKED flag; on the next step,
+                        # update_brain() will see is_blocked=True, fire RAG + LLM,
+                        # push a recovery task, and get_next_action_directive() will
+                        # execute it before resuming milestone navigation.
+                        pos_x, pos_y, pos_loc = current_position
+                        self.objective_manager.signal_blocker(
+                            reason="Navigation Stuck",
+                            context=f"Agent oscillating at ({pos_x}, {pos_y}) in {pos_loc}. A* may be failing or path is blocked.",
+                        )
                 
                 # Check if location has changed from previous iteration
                 current_location = state_data.get('player', {}).get('location', 'Unknown')
@@ -384,7 +397,8 @@ class Agent:
                     state_data,
                     recent_actions,  # Use actual recent_actions from server
                     self.vlm,
-                    self.context.get('visual_dialogue_active', False)  # Pass VLM dialogue detection
+                    self.context.get('visual_dialogue_active', False),  # Pass VLM dialogue detection
+                    objective_manager=self.objective_manager,  # Direct reference — no more planning_step attribute hack
                 )
                 
                 # SAFETY CHECK: Ensure action_output is valid
