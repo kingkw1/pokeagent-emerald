@@ -7,7 +7,7 @@ from agent.objective_manager import ObjectiveManager
 # Set up module logging
 logger = logging.getLogger(__name__)
 
-def planning_step(memory_context, current_plan, slow_thinking_needed, state_data, vlm):
+def planning_step(memory_context, current_plan, slow_thinking_needed, state_data, vlm, objective_manager=None):
     """
     Decide and update your high-level plan based on memory context, current state, and the need for slow thinking.
     Returns updated plan.
@@ -81,8 +81,10 @@ def planning_step(memory_context, current_plan, slow_thinking_needed, state_data
     logger.info(f"[PLANNING] Slow thinking needed: {slow_thinking_needed}")
     
     # ENHANCED STRATEGIC PLANNING: Use ObjectiveManager for milestone-driven strategy
-    # Initialize objective manager (persistent across calls)
-    if not hasattr(planning_step, 'objective_manager'):
+    # Use externally provided ObjectiveManager if available, else create local one
+    if objective_manager is not None:
+        planning_step.objective_manager = objective_manager
+    elif not hasattr(planning_step, 'objective_manager'):
         planning_step.objective_manager = ObjectiveManager()
         logger.info("[PLANNING] Initialized ObjectiveManager for strategic planning")
         

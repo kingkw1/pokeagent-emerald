@@ -2454,6 +2454,11 @@ Answer with just the button name:"""
             
             directive = obj_manager.get_next_action_directive(state_data)
             
+            # Convert legacy dict directives to Directive dataclass
+            if isinstance(directive, dict):
+                from agent.objective_manager import Directive
+                directive = Directive.from_dict(directive)
+            
             logger.info(f"🔍 [DIRECTIVE DEBUG] Directive returned: {directive}")
             print(f"🔍 [DIRECTIVE DEBUG] Directive returned: {directive}")
             
@@ -2498,7 +2503,7 @@ What button should you press?"""
                 logger.info(f"📍 [DIRECTIVE] Active directive: {description}")
                 print(f"📍 [DIRECTIVE] {description}")
                 
-                print(f"🔍 [DIRECTIVE CHECK] Keys in directive: {list(directive.keys())}")
+                print(f"🔍 [DIRECTIVE CHECK] Active keys: {list(directive.keys())}")
                 print(f"🔍 [DIRECTIVE CHECK] 'goal_coords' in directive: {'goal_coords' in directive}")
                 print(f"🔍 [DIRECTIVE CHECK] 'journey_complete' in directive: {'journey_complete' in directive}")
                 

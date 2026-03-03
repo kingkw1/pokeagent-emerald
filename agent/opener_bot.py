@@ -145,33 +145,24 @@ class OpenerBot:
     def should_handle(self, state_data: Dict[str, Any], visual_data: Dict[str, Any]) -> bool:
         """
         Determines if the opener bot should be active.
-        STATEFUL: Just checks if we're in COMPLETED state or if opener sequence is done.
-        """
 
-        # Check if we've completed the opener sequence
+        Once the state machine reaches COMPLETED (after nickname/dialogue
+        handling in S23/S24), it permanently hands off to ObjectiveManager.
+        ObjectiveManager then handles lab exit and all subsequent navigation.
+        """
+        # Once COMPLETED, permanently hand off to ObjectiveManager
+        if self.current_state_name == 'COMPLETED':
+            return False
+
         milestones = state_data.get('milestones', {})
         starter_chosen = milestones.get('STARTER_CHOSEN', {}).get('completed', False)
         player_loc = state_data.get('player', {}).get('location', '')
-        
-        # CRITICAL FIX: Even if we're in COMPLETED state, re-activate if we're still in lab with starter
-        # This handles the nicknaming sequence which happens AFTER starter is chosen
-        if self.current_state_name == 'COMPLETED' and starter_chosen and 'PROFESSOR BIRCHS LAB' in player_loc:
-            print(f"[OPENER BOT] REACTIVATING - In lab with starter, need to complete nickname/exit sequence!")
-            # Re-detect state to handle nickname screen
-            detected_state = self._detect_starting_state(state_data)
-            print(f"[OPENER BOT] Re-detected state: {detected_state}")
-            self._transition_to_state(detected_state)
-            return True
-        
-        # Check if we should transition to COMPLETED (outside lab after getting starter)
-        if starter_chosen:
-            if 'PROFESSOR BIRCHS LAB' not in player_loc:
-                # print(f"[OPENER BOT] Starter chosen and outside lab (PROFESSOR BIRCHS LAB not in '{player_loc}'). Handing off to VLM.")
-                self._transition_to_state('COMPLETED')
-                return False
-            else:
-                print(f"[OPENER BOT] Starter chosen but STILL IN LAB ('{player_loc}'). Continuing opener sequence.")
-        
+
+        # Safety net: if somehow still active after starter and outside lab
+        if starter_chosen and 'PROFESSOR BIRCHS LAB' not in player_loc:
+            self._transition_to_state('COMPLETED')
+            return False
+
         print(f"🤖 [OPENER BOT SHOULD_HANDLE] Bot is ACTIVE, will handle action")
         return True  # Bot is active
 
@@ -1848,20 +1839,15 @@ class OpenerBot:
                 name='S23_BIRCH_DIALOG_2',
                 description='Dialogue with Birch after battle (in lab) - may or may not show nickname screen',
                 action_fn=action_clear_dialogue,
-                next_state_fn=trans_nickname_or_dialogue_done(nickname_state='S24_NICKNAME', no_nickname_state='S25_LEAVE_LAB')
+                next_state_fn=trans_nickname_or_dialogue_done(nickname_state='S24_NICKNAME', no_nickname_state='COMPLETED')
             ),
             'S24_NICKNAME': BotState(
                 name='S24_NICKNAME',
                 description='Nickname starter screen',
                 action_fn=action_special_nickname,
-                next_state_fn=trans_no_dialogue_and_no_nickname_text('S25_LEAVE_LAB')
+                next_state_fn=trans_no_dialogue_and_no_nickname_text('COMPLETED')
             ),
-            'S25_LEAVE_LAB': BotState(
-                name='S25_LEAVE_LAB',
-                description="Leave Birch's Lab",
-                action_fn=action_nav(NavigationGoal(x=6, y=13, map_location='BIRCHS_LAB', description="Exit Lab")),
-                next_state_fn=trans_location_exact('LITTLEROOT TOWN', 'COMPLETED')  # Exact match - not inside lab!
-            ),
+            # S25_LEAVE_LAB removed — ObjectiveManager handles lab exit navigation
             
             # === Final State ===
             'COMPLETED': BotState(
@@ -1871,68 +1857,6 @@ class OpenerBot:
                 next_state_fn=lambda s, v: None
             )
         }
-
-    def _action_exit_house(self, state_data: Dict[str, Any], visual_data: Dict[str, Any]) -> Union[List[str], NavigationGoal]:
-        """
-        Multi-phase house exit: 2F -> stairs -> 1F -> door
-        Stairs are WALK-ON tiles - just navigate to them, don't press directions!
-        
-        On 1F: Uses waypoint navigation to avoid table obstacle.
-        - From mom's position (4,5), go RIGHT to (8,5) to clear the table
-        - Then go DOWN to door at (4,7)
-        
-        NOTE: Dialogue clearing is handled by get_action's early return logic.
-        Do NOT clear dialogue here - it bypasses VLM executor and doesn't check for player monologues.
-        """
-        player_location = state_data.get('player', {}).get('location', '')
-        player_pos = state_data.get('player', {}).get('position', {})
-        x, y = player_pos.get('x', 0), player_pos.get('y', 0)
-        
-        if '2F' in player_location:
-            # Phase 1: Navigate to stairs on 2F (walk-on tile at 7, 1)
-            logger.info(f"[EXIT HOUSE] Phase 1: At ({x},{y}), navigating to 2F stairs (7,1)")
-            return NavigationGoal(x=7, y=1, map_location='PLAYERS_HOUSE_2F', description="2F Stairs")
-        
-        elif '1F' in player_location:
-            # Phase 2: Navigate to door on 1F
-            # Door is at (8, 9) and (9, 9) - south wall of the house
-            # Mom's position is (4,5), table may block some paths
-            
-            # Simple navigation: just go to the door at (8,9)
-            logger.info(f"[EXIT HOUSE] Phase 2: At ({x},{y}), navigating to door (8,9)")
-            return NavigationGoal(x=8, y=9, map_location='PLAYERS_HOUSE_1F', description="Exit House")
-        
-        else:
-            logger.warning(f"[EXIT HOUSE] Unknown location: {player_location}")
-            return None
-
-    def _action_exit_house_batched(self, state_data: Dict[str, Any], visual_data: Dict[str, Any]) -> Union[List[str], None]:
-        """
-        Multi-phase house exit with BATCHED navigation: 2F -> stairs -> 1F -> door
-        Uses action_nav helper to batch movements and clear dialogue.
-        
-        This replaces _action_exit_house to enable movement batching.
-        """
-        player_location = state_data.get('player', {}).get('location', '')
-        
-        # Get the navigation function factory
-        action_nav_fn = None
-        
-        if '2F' in player_location:
-            # Phase 1: Navigate to stairs on 2F (walk-on tile at 7, 1)
-            nav_goal = NavigationGoal(x=7, y=1, map_location='PLAYERS_HOUSE_2F', description="2F Stairs")
-            # Build the action_nav function - need to access it from _build_state_machine scope
-            # Since we're in the class, we need to rebuild the nav function here
-            # For now, just use the NavigationGoal and let action.py handle it
-            # TODO: This still uses single moves - need to refactor
-            return NavigationGoal(x=7, y=1, map_location='PLAYERS_HOUSE_2F', description="2F Stairs")
-        
-        elif '1F' in player_location:
-            # Phase 2: Navigate to door on 1F
-            return NavigationGoal(x=8, y=9, map_location='PLAYERS_HOUSE_1F', description="Exit House")
-        
-        else:
-            return None
 
     def get_state_summary(self) -> Dict[str, Any]:
         """Get current state summary for debugging/monitoring"""

@@ -219,7 +219,8 @@ def load_simple_agent_state(simple_agent, filename="agent_state.json"):
         bool: True if loaded successfully
     """
     try:
-        from agent.simple import HistoryEntry, Objective
+        from agent.simple import HistoryEntry
+        from agent.objective_manager import Objective
         
         with open(filename, 'r') as f:
             state_data = json.load(f)

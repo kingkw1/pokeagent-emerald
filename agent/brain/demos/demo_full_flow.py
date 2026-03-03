@@ -16,7 +16,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from agent.brain.goal_manager import GoalManager
+from agent.objective_manager import ObjectiveManager
 from agent.brain.planner import RecoveryPlanner
 from agent.brain.memory import EpisodicMemory
 
@@ -41,7 +41,7 @@ def run_demo(live: bool = False):
     else:
         print("   Mode: MOCK (no API call)")
 
-    gm = GoalManager()
+    om = ObjectiveManager()
     planner = RecoveryPlanner(vlm=vlm, memory=memory, verbose=True)
 
     # 2. The "Learning" Phase
@@ -69,17 +69,19 @@ def run_demo(live: bool = False):
             },
         }
     }
-    gm.update(mock_perception)
+    om._scan_dialogue_for_blockers(mock_perception)
 
     # 4. The "Solution" Phase (RAG + Planning)
-    active_task = gm.state["sub_tasks"][0]
-    if active_task["status"] == "BLOCKED":
+    if om.is_blocked:
         print("\n--- PHASE 3: RAG & PLANNING ---")
 
+        active = om.get_active_objectives()
+        current_goal = active[0].description if active else "Reach Petalburg City"
+
         plan = planner.generate_recovery_plan(
-            current_goal=active_task["task"],
+            current_goal=current_goal,
             blocker_reason="NPC Dialogue Keyword",
-            blocker_context=active_task["blocker_context"],
+            blocker_context=om._blocker_state.get("context", ""),
         )
 
         print(f"🤖 LLM REASONING: {plan['reasoning']}")
@@ -91,7 +93,7 @@ def run_demo(live: bool = False):
         else:
             print("\n⚠️  WARNING: The plan seems generic. RAG might not have retrieved the right key.")
     else:
-        print("\n❌ FAIL: GoalManager did not detect the blocker.")
+        print("\n❌ FAIL: ObjectiveManager did not detect the blocker.")
 
     # Cleanup demo DB
     shutil.rmtree(_DEMO_DB_PATH, ignore_errors=True)

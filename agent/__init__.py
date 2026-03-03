@@ -45,8 +45,8 @@ from .planning import planning_step
 from .simple import SimpleAgent, get_simple_agent, simple_mode_processing_multiprocess, configure_simple_agent_defaults
 from .opener_bot import OpenerBot, get_opener_bot
 from .brain.memory import EpisodicMemory
-from .brain.goal_manager import GoalManager
 from .brain.planner import RecoveryPlanner
+from .objective_manager import ObjectiveManager
 
 # Set up module logging
 logger = logging.getLogger(__name__)
@@ -89,12 +89,10 @@ class Agent:
             }
             print(f"   Mode: Four-module architecture")
             
-            # 🧠 Brain initialization (Memory + GoalManager + Planner)
+            # 🧠 Brain initialization (Memory + ObjectiveManager + Planner)
             self.episodic_memory = EpisodicMemory(db_path="./memory_db")
-            self.goal_manager = GoalManager()
+            self.objective_manager = ObjectiveManager()
             self.planner = RecoveryPlanner(vlm=self.vlm, memory=self.episodic_memory, verbose=True)
-            self.last_logged_dialogue = None
-            self._brain_prev_in_battle = False  # Track battle transitions
             
             # Pre-seed knowledge for mid-game save states
             _SEED_MARKER = {"type": "seed_marker"}
@@ -180,91 +178,16 @@ class Agent:
                 self.context['perception_output'] = perception_output
                 
                 # -----------------------------------------------------------
-                # 🧠 BRAIN UPDATE (Memory + GoalManager + Recovery Planner)
+                # 🧠 BRAIN UPDATE (ObjectiveManager: Memory + Blocker + Recovery)
                 # -----------------------------------------------------------
-                
-                # A. Log new dialogue to episodic memory
-                brain_visual = perception_output.get('visual_data', {})
-                brain_on_screen = brain_visual.get('on_screen_text', {})
-                brain_dialogue = None
-                if isinstance(brain_on_screen, str):
-                    brain_dialogue = brain_on_screen
-                elif isinstance(brain_on_screen, dict):
-                    brain_dialogue = brain_on_screen.get('dialogue')
-                
-                if brain_dialogue and brain_dialogue != self.last_logged_dialogue:
-                    self.episodic_memory.log_event(
-                        f"Heard dialogue: '{brain_dialogue}'",
-                        {"type": "dialogue"}
-                    )
-                    self.last_logged_dialogue = brain_dialogue
-                
-                # B. Detect battle transitions (overworld → battle, battle → overworld)
-                brain_in_battle = state_data.get('game', {}).get('in_battle', False)
-                brain_screen = brain_visual.get('screen_context', '')
-                brain_location = state_data.get('player', {}).get('location', 'Unknown')
-                
-                if brain_in_battle and not self._brain_prev_in_battle:
-                    # === BATTLE START ===
-                    battle_context = brain_dialogue or f"Entered battle on {brain_location}"
-                    self.episodic_memory.log_event(
-                        f"Battle started on {brain_location}: {battle_context}",
-                        {"type": "battle_start", "location": brain_location}
-                    )
-                    # Signal GoalManager and fire RAG query
-                    self.goal_manager.signal_blocker(
-                        reason="Trainer Battle",
-                        context=battle_context
-                    )
-                    if self.goal_manager.state["sub_tasks"]:
-                        active_task = self.goal_manager.state["sub_tasks"][0]
-                        if active_task.get("type") != "RECOVERY":
-                            plan = self.planner.generate_recovery_plan(
-                                current_goal=active_task["task"],
-                                blocker_reason="Trainer Battle",
-                                blocker_context=battle_context,
-                            )
-                            print(f"💡 [Agent] Recovery Plan: {plan['recovery_task']}")
-                            self.goal_manager.add_recovery_task(plan["recovery_task"])
-                
-                elif not brain_in_battle and self._brain_prev_in_battle:
-                    # === BATTLE END ===
-                    self.episodic_memory.log_event(
-                        f"Battle ended on {brain_location}. Resumed navigation.",
-                        {"type": "battle_end", "location": brain_location}
-                    )
-                    # Complete the recovery task so normal navigation resumes
-                    if (self.goal_manager.state["sub_tasks"] and
-                            self.goal_manager.state["sub_tasks"][0].get("type") == "RECOVERY"):
-                        self.goal_manager.complete_task()
-                    # Also clear any BLOCKED state on the underlying task
-                    if (self.goal_manager.state["sub_tasks"] and
-                            self.goal_manager.state["sub_tasks"][0]["status"] == "BLOCKED"):
-                        self.goal_manager.state["sub_tasks"][0]["status"] = "IN_PROGRESS"
-                        self.goal_manager.state["sub_tasks"][0]["blocker_context"] = None
-                    print(f"✅ [Brain] Battle complete. Resuming navigation.")
-                
-                self._brain_prev_in_battle = brain_in_battle
-                
-                # C. Update GoalManager with dialogue keywords (non-battle blockers)
-                if not brain_in_battle:
-                    self.goal_manager.update(perception_output)
-                
-                # D. If blocked by a NON-BATTLE blocker, short-circuit
-                #    (Battle blockers are handled by the battle bot — don't short-circuit)
-                if (not brain_in_battle and self.goal_manager.state["sub_tasks"]
-                        and self.goal_manager.state["sub_tasks"][0]["status"] == "BLOCKED"):
-                    active_task = self.goal_manager.state["sub_tasks"][0]
-                    if active_task.get("type") != "RECOVERY":
-                        print("🤔 [Agent] Thinking... Querying Memory & LLM...")
-                        plan = self.planner.generate_recovery_plan(
-                            current_goal=active_task["task"],
-                            blocker_reason="Obstacle Detected",
-                            blocker_context=active_task["blocker_context"] or "",
-                        )
-                        print(f"💡 [Agent] Recovery Plan: {plan['recovery_task']}")
-                        self.goal_manager.add_recovery_task(plan["recovery_task"])
-                    return {'action': ['A']}
+                brain_override = self.objective_manager.update_brain(
+                    perception_output=perception_output,
+                    state_data=state_data,
+                    episodic_memory=self.episodic_memory,
+                    recovery_planner=self.planner,
+                )
+                if brain_override is not None:
+                    return {'action': brain_override}
                 
                 # -----------------------------------------------------------
                 
@@ -403,9 +326,8 @@ class Agent:
                 
                 # CRITICAL FIX: Update milestones EVERY step (not just when replanning)
                 # This ensures battle state transitions are tracked even when location unchanged
-                if hasattr(planning_step, 'objective_manager'):
-                    planning_step.objective_manager.check_storyline_milestones(state_data)
-                    logger.debug("[AGENT] Updated storyline milestones for state tracking")
+                self.objective_manager.check_storyline_milestones(state_data)
+                logger.debug("[AGENT] Updated storyline milestones for state tracking")
                 
                 # Only call planning_step if replanning is needed
                 if should_replan:
@@ -415,7 +337,8 @@ class Agent:
                         current_plan,
                         True,  # Force planning since we determined it's needed
                         state_data,
-                        self.vlm
+                        self.vlm,
+                        objective_manager=self.objective_manager,
                     )
                     self.context['planning_output'] = planning_output
                 else:

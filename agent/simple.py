@@ -42,6 +42,7 @@ from PIL import Image
 
 from utils.state_formatter import format_state_for_llm
 from agent.opener_bot import get_opener_bot
+from agent.objective_manager import Objective, MILESTONE_PROGRESSION
 
 logger = logging.getLogger(__name__)
 
@@ -69,19 +70,7 @@ def configure_simple_agent_defaults(max_history_entries: int = None, max_recent_
     logger.info(f"Updated SimpleAgent defaults: {DEFAULT_MAX_HISTORY_ENTRIES} history, {DEFAULT_MAX_RECENT_ACTIONS} actions, "
                f"display {DEFAULT_HISTORY_DISPLAY_COUNT}/{DEFAULT_ACTIONS_DISPLAY_COUNT}")
 
-@dataclass
-class Objective:
-    """Single objective/goal for the agent"""
-    id: str
-    description: str
-    objective_type: str  # "location", "battle", "item", "dialogue", "custom"
-    target_value: Optional[Any] = None  # Specific target (coords, trainer name, item name, etc.)
-    completed: bool = False
-    created_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
-    progress_notes: str = ""
-    storyline: bool = False  # True for main storyline objectives (auto-verified), False for agent sub-objectives
-    milestone_id: Optional[str] = None  # Emulator milestone ID for storyline objectives
+# Objective dataclass imported from agent.objective_manager (single source of truth)
 
 @dataclass
 class HistoryEntry:
@@ -140,116 +129,54 @@ class SimpleAgent:
         self._initialize_storyline_objectives()
         
     def _initialize_storyline_objectives(self):
-        """Initialize the main storyline objectives for Pokémon Emerald progression"""
-        storyline_objectives = [
-            {
-                "id": "story_game_start",
-                "description": "Complete title sequence and begin the game",
-                "objective_type": "system",
-                "target_value": "Game Running",
-                "milestone_id": "GAME_RUNNING"
-            },
-            {
-                "id": "story_littleroot_town",
-                "description": "Arrive in Littleroot Town and explore the area",
-                "objective_type": "location", 
-                "target_value": "Littleroot Town",
-                "milestone_id": "LITTLEROOT_TOWN"
-            },
-            {
-                "id": "story_route_101",
-                "description": "Travel north to Route 101 and encounter Prof. Birch",
-                "objective_type": "location",
-                "target_value": "Route 101", 
-                "milestone_id": "ROUTE_101"
-            },
-            {
-                "id": "story_starter_chosen",
-                "description": "Choose starter Pokémon and receive first party member",
-                "objective_type": "pokemon",
-                "target_value": "Starter Pokémon",
-                "milestone_id": "STARTER_CHOSEN"
-            },
-            {
-                "id": "story_oldale_town",
-                "description": "Continue journey to Oldale Town",
-                "objective_type": "location",
-                "target_value": "Oldale Town",
-                "milestone_id": "OLDALE_TOWN"
-            },
-            {
-                "id": "story_route_103",
-                "description": "Travel to Route 103 to meet rival",
-                "objective_type": "location",
-                "target_value": "Route 103",
-                "milestone_id": "ROUTE_103"
-            },
-            {
-                "id": "story_route_102",
-                "description": "Return through Route 102 toward Petalburg City",
-                "objective_type": "location",
-                "target_value": "Route 102", 
-                "milestone_id": "ROUTE_102"
-            },
-            {
-                "id": "story_petalburg_city",
-                "description": "Navigate to Petalburg City and visit Dad's gym",
-                "objective_type": "location",
-                "target_value": "Petalburg City",
-                "milestone_id": "PETALBURG_CITY"
-            },
-            {
-                "id": "story_route_104",
-                "description": "Travel north through Route 104 toward Petalburg Woods",
-                "objective_type": "location",
-                "target_value": "Route 104",
-                "milestone_id": "ROUTE_104"
-            },
-            {
-                "id": "story_petalburg_woods",
-                "description": "Navigate through Petalburg Woods to help Devon researcher",
-                "objective_type": "location",
-                "target_value": "Petalburg Woods",
-                "milestone_id": "PETALBURG_WOODS"
-            },
-            {
-                "id": "story_rustboro_city",
-                "description": "Arrive in Rustboro City and deliver Devon Goods",
-                "objective_type": "location",
-                "target_value": "Rustboro City",
-                "milestone_id": "RUSTBORO_CITY"
-            },
-            {
-                "id": "story_rustboro_gym",
-                "description": "Enter the Rustboro Gym and prepare for Roxanne battle",
-                "objective_type": "location",
-                "target_value": "Rustboro Gym",
-                "milestone_id": None  # Gym entry doesn't have separate milestone
-            },
-            {
-                "id": "story_stone_badge",
-                "description": "Defeat Roxanne and earn the Stone Badge",
-                "objective_type": "battle",
-                "target_value": "Stone Badge",
-                "milestone_id": "STONE_BADGE"
-            }
-        ]
+        """Initialize storyline objectives from MILESTONE_PROGRESSION (single source of truth).
         
-        # Add storyline objectives to the state
-        for obj_data in storyline_objectives:
+        Derives objective_type from milestone metadata instead of maintaining
+        a separate hardcoded list. This ensures SimpleAgent always tracks the
+        same milestones as ObjectiveManager.
+        """
+        def _infer_objective_type(entry: dict) -> str:
+            """Infer objective_type from MILESTONE_PROGRESSION entry metadata."""
+            milestone = entry["milestone"]
+            special = entry.get("special", "")
+            target_loc = entry.get("target_location")
+            
+            # Battles: explicit special tag or keyword in milestone name
+            if special in ("rival_battle",) or "DEFEATED" in milestone or "ROXANNE" in milestone:
+                return "battle"
+            # Dialogue events: gym conversations
+            if special in ("gym_dialogue",):
+                return "dialogue"
+            # Pokemon acquisition
+            if milestone in ("STARTER_CHOSEN",):
+                return "pokemon"
+            # Item acquisition
+            if "RECEIVED" in milestone or "STONE_BADGE" in milestone:
+                return "item"
+            # Location arrivals: has a target_location
+            if target_loc:
+                return "location"
+            # Everything else is system/progression events
+            return "system"
+        
+        for entry in MILESTONE_PROGRESSION:
+            milestone = entry["milestone"]
+            obj_type = _infer_objective_type(entry)
+            target_loc = entry.get("target_location")
+            
             objective = Objective(
-                id=obj_data["id"],
-                description=obj_data["description"],
-                objective_type=obj_data["objective_type"],
-                target_value=obj_data["target_value"],
+                id=f"story_{milestone.lower()}",
+                description=entry["description"],
+                objective_type=obj_type,
+                target_value=target_loc or entry["description"],
                 completed=False,
                 progress_notes="Storyline objective - verified by emulator milestones",
                 storyline=True,
-                milestone_id=obj_data["milestone_id"]
+                milestone_id=milestone,
             )
             self.state.objectives.append(objective)
             
-        logger.info(f"Initialized {len(storyline_objectives)} storyline objectives for Emerald progression")
+        logger.info(f"Initialized {len(MILESTONE_PROGRESSION)} storyline objectives from MILESTONE_PROGRESSION")
         
     def get_game_context(self, game_state: Dict[str, Any]) -> str:
         """Determine current game context (overworld, battle, menu, dialogue)"""

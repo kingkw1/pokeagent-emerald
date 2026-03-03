@@ -1,6 +1,6 @@
 # agent/brain/demos/demo_planner.py
 """
-Phase 1 demo: GoalManager detects a blocker, RecoveryPlanner generates a
+Phase 1 demo: ObjectiveManager detects a blocker, RecoveryPlanner generates a
 recovery plan via LLM (or mock), and the new task is injected back into the
 goal stack.
 
@@ -17,7 +17,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from agent.brain.goal_manager import GoalManager
+from agent.objective_manager import ObjectiveManager
 from agent.brain.planner import RecoveryPlanner
 
 
@@ -35,10 +35,10 @@ def run_demo(live: bool = False):
     else:
         print("   Mode: MOCK (no API call)")
 
-    gm = GoalManager()
+    om = ObjectiveManager()
     planner = RecoveryPlanner(vlm=vlm)
 
-    print(f"\n[Status] Initial: {gm.current_directive}")
+    print(f"\n[Status] Initial: {om.current_brain_directive}")
 
     # 2. Simulate getting blocked by the Old Man
     mock_perception = {
@@ -53,27 +53,29 @@ def run_demo(live: bool = False):
     }
 
     print("\n--- AGENT RECEIVES VISUAL DATA ---")
-    gm.update(mock_perception)
+    om._scan_dialogue_for_blockers(mock_perception)
 
     # 3. If blocked, trigger the Planner
-    active_task = gm.state["sub_tasks"][0]
-    if active_task["status"] == "BLOCKED":
+    if om.is_blocked:
         print("\n--- TRIGGERING RECOVERY PLANNER ---")
 
+        active = om.get_active_objectives()
+        current_goal = active[0].description if active else "Reach Petalburg City"
+
         plan = planner.generate_recovery_plan(
-            current_goal=active_task["task"],
+            current_goal=current_goal,
             blocker_reason="NPC Dialogue Keyword Detected",
-            blocker_context=active_task["blocker_context"],
+            blocker_context=om._blocker_state.get("context", ""),
         )
 
         print(f"🤖 LLM REASONING: {plan['reasoning']}")
         print(f"✅ NEW TASK GENERATED: {plan['recovery_task']}")
 
-        # 4. Inject the recovery task into the GoalManager
-        gm.add_recovery_task(plan["recovery_task"])
+        # 4. Inject the recovery task into the ObjectiveManager
+        om.add_recovery_task(plan["recovery_task"])
 
-    print(f"\n[Status] Final: {gm.current_directive}")
-    print("==================================================")
+    print(f"\n[Status] Final: {om.current_brain_directive}")
+    print("==" * 25)
 
 
 if __name__ == "__main__":

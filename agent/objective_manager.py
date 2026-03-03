@@ -13,6 +13,9 @@ from agent.navigation_planner import NavigationPlanner
 
 logger = logging.getLogger(__name__)
 
+# Keywords indicating the player cannot progress (ported from GoalManager)
+BLOCKING_KEYWORDS = ["wait", "stop", "don't go", "dangerous"]
+
 # ============================================================================
 # SEQUENTIAL MILESTONE PROGRESSION SYSTEM
 # ============================================================================
@@ -112,6 +115,103 @@ class Objective:
     milestone_id: Optional[str] = None  # Emulator milestone ID for storyline objectives
 
 
+@dataclass
+class Directive:
+    """
+    Structured directive returned by ObjectiveManager / NavigationPlanner.
+    
+    Supports dict-like access (``directive.get(key)``, ``key in directive``)
+    so that action.py's existing consumption code works unchanged during
+    the transition period.  New code should prefer attribute access.
+    
+    Use ``Directive.from_dict(d)`` to convert legacy ``dict`` directives.
+    """
+    # ── Core fields ──
+    action: Optional[str] = None            # NAVIGATE, INTERACT, DIALOGUE, CROSS_BOUNDARY, etc.
+    description: Optional[str] = None       # Human-readable description of the directive
+    
+    # ── Coordinate-based navigation ──
+    goal_coords: Optional[tuple] = None     # (x, y, 'LOCATION') target
+    goal_direction: Optional[str] = None    # 'north', 'south', 'east', 'west'
+    should_interact: Optional[bool] = None  # Press A at destination
+    npc_coords: Optional[tuple] = None      # (npc_x, npc_y) for facing direction
+    avoid_grass: Optional[bool] = None      # A* avoids tall grass
+    press_b_first: Optional[bool] = None    # Press B before navigating (warp settling)
+    
+    # ── Journey / milestone info ──
+    milestone: Optional[str] = None
+    journey_reason: Optional[str] = None
+    journey_complete: Optional[bool] = None
+    journey_progress: Optional[str] = None
+    
+    # ── Portal / boundary crossing ──
+    direction: Optional[str] = None         # Direction for NAVIGATE_DIRECTION / CROSS_BOUNDARY
+    target: Optional[Any] = None            # (x, y) tuple or location string
+    target_location: Optional[str] = None   # Target location name
+    location: Optional[str] = None          # Current location context
+    portal_coords: Optional[tuple] = None   # (x, y) of portal
+    portal_type: Optional[str] = None
+    proximity_radius: Optional[int] = None  # Tiles within which portal activates
+    from_location: Optional[str] = None
+    to_location: Optional[str] = None
+    
+    # ── Stage progress ──
+    stage_index: Optional[int] = None
+    total_stages: Optional[int] = None
+    
+    # ── Transition waiting ──
+    wait_for_transition: Optional[bool] = None
+    expected_location: Optional[str] = None
+    
+    # ── Error / diagnostic ──
+    error: Optional[bool] = None
+    at_destination: Optional[bool] = None
+
+    # ------------------------------------------------------------------
+    # Dict-compatible accessors (backward compat with action.py)
+    # ------------------------------------------------------------------
+
+    def get(self, key: str, default=None):
+        """``directive.get('goal_coords')`` → ``directive.goal_coords``"""
+        val = getattr(self, key, _SENTINEL)
+        if val is _SENTINEL:
+            return default
+        return val if val is not None else default
+
+    def __contains__(self, key: str) -> bool:
+        """``'goal_coords' in directive`` → True when the field is non-None."""
+        val = getattr(self, key, _SENTINEL)
+        return val is not _SENTINEL and val is not None
+
+    def __getitem__(self, key: str):
+        """``directive['goal_coords']`` → ``directive.goal_coords``"""
+        val = getattr(self, key, _SENTINEL)
+        if val is _SENTINEL:
+            raise KeyError(key)
+        return val
+
+    def keys(self):
+        """Return field names with non-None values (dict compatibility)."""
+        from dataclasses import fields as dc_fields
+        return [f.name for f in dc_fields(self) if getattr(self, f.name) is not None]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export as plain dict (non-None fields only)."""
+        from dataclasses import fields as dc_fields
+        return {f.name: getattr(self, f.name) for f in dc_fields(self) if getattr(self, f.name) is not None}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Directive":
+        """Build a Directive from a legacy dict, ignoring unknown keys."""
+        from dataclasses import fields as dc_fields
+        known = {f.name for f in dc_fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# Sentinel for .get() / __contains__ to distinguish "field exists but is None"
+_SENTINEL = object()
+
+
 class ObjectiveManager:
     """
     Lightweight objective management for strategic planning integration.
@@ -144,6 +244,13 @@ class ObjectiveManager:
         self.navigation_planner = NavigationPlanner()
         self._last_planner_location = None
         self._last_planner_coords = None
+        
+        # ── Blocker / Recovery (ported from GoalManager) ──
+        self.blocking_keywords = BLOCKING_KEYWORDS
+        self._recovery_tasks: List[Dict[str, Any]] = []  # Stack of recovery sub-goals
+        self._blocker_state: Optional[Dict[str, Any]] = None  # {reason, context} when blocked
+        self._brain_prev_in_battle: bool = False
+        self._last_logged_dialogue: Optional[str] = None
         
         logger.info(f"🏗️ [OBJECT LIFECYCLE] ObjectiveManager.__init__() called - created new instance with {len(self.objectives)} storyline objectives")
         print(f"🏗️ [OBJECT LIFECYCLE] ObjectiveManager.__init__() called - NEW INSTANCE CREATED")
@@ -1458,6 +1565,178 @@ class ObjectiveManager:
             "completion_rate": len(completed) / len(self.objectives) if self.objectives else 0
         }
     
+    # ====================================================================
+    # BLOCKER / RECOVERY SYSTEM (ported from GoalManager)
+    # ====================================================================
+    # Detects dialogue-based blockers (keyword matching) and battle
+    # transitions, then uses RAG + LLM to generate recovery plans.
+    # ====================================================================
+
+    @property
+    def is_blocked(self) -> bool:
+        """True when a non-battle blocker is active."""
+        return self._blocker_state is not None
+
+    @property
+    def current_brain_directive(self) -> str:
+        """High-level plan string for logging / LLM context."""
+        if self._recovery_tasks:
+            rt = self._recovery_tasks[0]
+            return f"RECOVERY: {rt['task']} (reason: {rt.get('reason', '?')})"
+        # Use active objectives as a lightweight plan summary
+        active = self.get_active_objectives()
+        if active:
+            return f"Current Goal: {active[0].description}"
+        return "Current Goal: All objectives complete"
+
+    def signal_blocker(self, reason: str, context: str):
+        """External trigger to enter BLOCKED state (e.g., battle transition)."""
+        self._handle_blocker(reason=reason, context=context)
+
+    def _handle_blocker(self, reason: str, context: str):
+        """Transition into BLOCKED state (idempotent)."""
+        if self._blocker_state is not None:
+            return  # already blocked
+        print(f"⚠️ [ObjectiveManager] BLOCKER DETECTED: {reason}")
+        print(f"   Context: '{context}'")
+        self._blocker_state = {"reason": reason, "context": context}
+
+    def clear_blocker(self):
+        """Exit BLOCKED state (called after battle end or recovery complete)."""
+        if self._blocker_state:
+            print(f"✅ [ObjectiveManager] Blocker cleared: {self._blocker_state['reason']}")
+        self._blocker_state = None
+
+    def add_recovery_task(self, task_description: str, reason: str = ""):
+        """Push a recovery sub-goal onto the stack."""
+        self._recovery_tasks.insert(0, {
+            "task": task_description,
+            "status": "IN_PROGRESS",
+            "type": "RECOVERY",
+            "reason": reason,
+        })
+        print(f"📋 [ObjectiveManager] Recovery task added: {task_description}")
+
+    def complete_recovery_task(self):
+        """Pop the top recovery task."""
+        if self._recovery_tasks:
+            completed = self._recovery_tasks.pop(0)
+            print(f"✅ [ObjectiveManager] Recovery task done: {completed['task']}")
+
+    def _scan_dialogue_for_blockers(self, perception_output: dict):
+        """Scan VLM perception output for blocking keywords (ported from GoalManager.update)."""
+        visual_data = perception_output.get("visual_data", {})
+        on_screen_text = visual_data.get("on_screen_text", {})
+
+        if isinstance(on_screen_text, str):
+            dialogue = on_screen_text
+        elif isinstance(on_screen_text, dict):
+            dialogue = on_screen_text.get("dialogue") or ""
+        else:
+            dialogue = ""
+
+        if dialogue and isinstance(dialogue, str):
+            dialogue_lower = dialogue.lower()
+            for keyword in self.blocking_keywords:
+                if keyword in dialogue_lower:
+                    self._handle_blocker(
+                        reason=f"NPC Dialogue Keyword: '{keyword}'",
+                        context=dialogue,
+                    )
+                    break
+
+    def update_brain(
+        self,
+        perception_output: dict,
+        state_data: Dict[str, Any],
+        episodic_memory=None,
+        recovery_planner=None,
+    ) -> Optional[list]:
+        """
+        Unified brain update — replaces the scattered logic in Agent.__init__.py.
+
+        Performs:
+          A. Log new dialogue to episodic memory.
+          B. Detect battle start/end transitions → signal blocker → recovery plan.
+          C. Keyword-based blocker detection in dialogue.
+          D. If blocked (non-battle), fire RAG recovery and short-circuit.
+
+        Returns:
+            A short-circuit action list (e.g. ``['A']``) when the brain wants
+            to override the normal pipeline, or *None* to let the pipeline
+            continue.
+        """
+        # ── A. Dialogue → episodic memory ──
+        brain_visual = perception_output.get("visual_data", {})
+        brain_on_screen = brain_visual.get("on_screen_text", {})
+        brain_dialogue = None
+        if isinstance(brain_on_screen, str):
+            brain_dialogue = brain_on_screen
+        elif isinstance(brain_on_screen, dict):
+            brain_dialogue = brain_on_screen.get("dialogue")
+
+        if brain_dialogue and brain_dialogue != self._last_logged_dialogue:
+            if episodic_memory is not None:
+                episodic_memory.log_event(
+                    f"Heard dialogue: '{brain_dialogue}'",
+                    {"type": "dialogue"},
+                )
+            self._last_logged_dialogue = brain_dialogue
+
+        # ── B. Battle transitions ──
+        brain_in_battle = state_data.get("game", {}).get("in_battle", False)
+        brain_location = state_data.get("player", {}).get("location", "Unknown")
+
+        if brain_in_battle and not self._brain_prev_in_battle:
+            # ── BATTLE START ──
+            battle_context = brain_dialogue or f"Entered battle on {brain_location}"
+            if episodic_memory is not None:
+                episodic_memory.log_event(
+                    f"Battle started on {brain_location}: {battle_context}",
+                    {"type": "battle_start", "location": brain_location},
+                )
+            self.signal_blocker(reason="Trainer Battle", context=battle_context)
+            if recovery_planner is not None and not self._recovery_tasks:
+                plan = recovery_planner.generate_recovery_plan(
+                    current_goal=self.get_strategic_plan_description(state_data),
+                    blocker_reason="Trainer Battle",
+                    blocker_context=battle_context,
+                )
+                print(f"💡 [ObjectiveManager] Recovery Plan: {plan['recovery_task']}")
+                self.add_recovery_task(plan["recovery_task"], reason="Trainer Battle")
+
+        elif not brain_in_battle and self._brain_prev_in_battle:
+            # ── BATTLE END ──
+            if episodic_memory is not None:
+                episodic_memory.log_event(
+                    f"Battle ended on {brain_location}. Resumed navigation.",
+                    {"type": "battle_end", "location": brain_location},
+                )
+            self.complete_recovery_task()
+            self.clear_blocker()
+            print(f"✅ [ObjectiveManager] Battle complete. Resuming navigation.")
+
+        self._brain_prev_in_battle = brain_in_battle
+
+        # ── C. Keyword-based blocker detection (non-battle) ──
+        if not brain_in_battle:
+            self._scan_dialogue_for_blockers(perception_output)
+
+        # ── D. Short-circuit if blocked by non-battle blocker ──
+        if not brain_in_battle and self.is_blocked:
+            if recovery_planner is not None and not self._recovery_tasks:
+                print("🤔 [ObjectiveManager] Thinking... Querying Memory & LLM...")
+                plan = recovery_planner.generate_recovery_plan(
+                    current_goal=self.get_strategic_plan_description(state_data),
+                    blocker_reason="Obstacle Detected",
+                    blocker_context=self._blocker_state.get("context", ""),
+                )
+                print(f"💡 [ObjectiveManager] Recovery Plan: {plan['recovery_task']}")
+                self.add_recovery_task(plan["recovery_task"], reason="Obstacle Detected")
+            return ["A"]  # short-circuit: press A to advance dialogue
+
+        return None  # let normal pipeline continue
+
     def _get_navigation_planner_directive(self, state_data: Dict[str, Any], target_location: Optional[str] = None, target_coords: Optional[tuple] = None, journey_reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Get directive from NavigationPlanner for comparison testing.

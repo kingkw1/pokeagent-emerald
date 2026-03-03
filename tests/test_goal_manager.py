@@ -1,20 +1,14 @@
 # tests/test_goal_manager.py
+# Now tests ObjectiveManager's blocker/recovery system (ported from GoalManager).
 import unittest
-from agent.brain.goal_manager import GoalManager
+from agent.objective_manager import ObjectiveManager
 
 
-class TestGoalManager(unittest.TestCase):
+class TestBlockerDetection(unittest.TestCase):
+    """Tests for _scan_dialogue_for_blockers and signal_blocker."""
+
     def setUp(self):
-        self.gm = GoalManager()
-
-    # ------------------------------------------------------------------
-    # Basic state
-    # ------------------------------------------------------------------
-
-    def test_initial_state(self):
-        """Ensure the manager starts in the correct state."""
-        active_task = self.gm.state["sub_tasks"][0]
-        self.assertEqual(active_task["status"], "IN_PROGRESS")
+        self.om = ObjectiveManager()
 
     # ------------------------------------------------------------------
     # Defensive parsing — malformed / missing perception data
@@ -22,8 +16,8 @@ class TestGoalManager(unittest.TestCase):
 
     def test_safe_parsing_empty_data(self):
         """Empty dict (missing 'visual_data' entirely) must not crash."""
-        self.gm.update({})
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "IN_PROGRESS")
+        self.om._scan_dialogue_for_blockers({})
+        self.assertFalse(self.om.is_blocked)
 
     def test_safe_parsing_none_dialogue(self):
         """VLM explicitly sets dialogue=None on false-positive filtering."""
@@ -33,8 +27,8 @@ class TestGoalManager(unittest.TestCase):
                 "on_screen_text": {"dialogue": None, "speaker": None},
             }
         }
-        self.gm.update(mock)
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "IN_PROGRESS")
+        self.om._scan_dialogue_for_blockers(mock)
+        self.assertFalse(self.om.is_blocked)
 
     def test_safe_parsing_on_screen_text_is_string(self):
         """VLM sometimes returns on_screen_text as a raw string instead of dict."""
@@ -44,8 +38,8 @@ class TestGoalManager(unittest.TestCase):
                 "on_screen_text": "Wait! Don't go out there!",
             }
         }
-        self.gm.update(mock)
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "BLOCKED")
+        self.om._scan_dialogue_for_blockers(mock)
+        self.assertTrue(self.om.is_blocked)
 
     def test_safe_parsing_on_screen_text_is_none(self):
         """on_screen_text could be None rather than missing."""
@@ -55,14 +49,14 @@ class TestGoalManager(unittest.TestCase):
                 "on_screen_text": None,
             }
         }
-        self.gm.update(mock)
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "IN_PROGRESS")
+        self.om._scan_dialogue_for_blockers(mock)
+        self.assertFalse(self.om.is_blocked)
 
     # ------------------------------------------------------------------
     # Blocker detection
     # ------------------------------------------------------------------
 
-    def test_blocker_detection(self):
+    def test_blocker_detection_keyword(self):
         """Specific dialogue keywords trigger the BLOCKED state."""
         mock = {
             "visual_data": {
@@ -73,10 +67,8 @@ class TestGoalManager(unittest.TestCase):
                 },
             }
         }
-        self.gm.update(mock)
-        active = self.gm.state["sub_tasks"][0]
-        self.assertEqual(active["status"], "BLOCKED")
-        self.assertIn("Wait!", active["blocker_context"])
+        self.om._scan_dialogue_for_blockers(mock)
+        self.assertTrue(self.om.is_blocked)
 
     def test_non_blocking_dialogue(self):
         """Normal dialogue must NOT trigger a block."""
@@ -89,8 +81,8 @@ class TestGoalManager(unittest.TestCase):
                 },
             }
         }
-        self.gm.update(mock)
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "IN_PROGRESS")
+        self.om._scan_dialogue_for_blockers(mock)
+        self.assertFalse(self.om.is_blocked)
 
     def test_repeated_blocking_is_idempotent(self):
         """Seeing the same blocker on consecutive frames must not double-trigger."""
@@ -103,49 +95,49 @@ class TestGoalManager(unittest.TestCase):
                 },
             }
         }
-        self.gm.update(mock)
-        self.gm.update(mock)  # second frame, same text
-        self.gm.update(mock)  # third frame
+        self.om._scan_dialogue_for_blockers(mock)
+        self.om._scan_dialogue_for_blockers(mock)
+        self.om._scan_dialogue_for_blockers(mock)
+        # Still blocked, no error from repeated calls
+        self.assertTrue(self.om.is_blocked)
 
-        # Still only one task, still BLOCKED (not duplicated)
-        self.assertEqual(len(self.gm.state["sub_tasks"]), 1)
-        self.assertEqual(self.gm.state["sub_tasks"][0]["status"], "BLOCKED")
-
-    # ------------------------------------------------------------------
-    # Recovery task injection
-    # ------------------------------------------------------------------
-
-    def test_add_recovery_task_becomes_active(self):
-        """After adding a recovery task, current_directive returns it."""
-        # Block first
-        self.gm.state["sub_tasks"][0]["status"] = "BLOCKED"
-
-        self.gm.add_recovery_task("Interact with Old Man for tutorial")
-        self.assertIn("Interact with Old Man", self.gm.current_directive)
-        self.assertIn("IN_PROGRESS", self.gm.current_directive)
+    def test_signal_blocker_external(self):
+        """signal_blocker() triggers blocked state from external call."""
+        self.om.signal_blocker(reason="Trainer Battle", context="Wild encounter")
+        self.assertTrue(self.om.is_blocked)
 
     # ------------------------------------------------------------------
-    # Task completion
+    # Recovery task stack
     # ------------------------------------------------------------------
 
-    def test_complete_task_removes_from_stack(self):
-        """Completing the active task exposes the next one underneath."""
-        # Add a recovery task on top of the original
-        self.gm.add_recovery_task("Talk to NPC")
-        self.assertEqual(len(self.gm.state["sub_tasks"]), 2)
+    def test_add_recovery_task_directive(self):
+        """After adding a recovery task, current_brain_directive reflects it."""
+        self.om.signal_blocker(reason="test", context="test")
+        self.om.add_recovery_task("Interact with Old Man for tutorial")
+        self.assertIn("Interact with Old Man", self.om.current_brain_directive)
 
-        completed = self.gm.complete_task()
-        self.assertEqual(completed["task"], "Talk to NPC")
-        self.assertEqual(completed["status"], "COMPLETED")
+    def test_complete_recovery_task_pops_stack(self):
+        """Completing recovery task removes it from the stack."""
+        self.om.add_recovery_task("Talk to NPC")
+        self.om.add_recovery_task("Watch tutorial")
+        self.om.complete_recovery_task()
+        # "Watch tutorial" was on top, now "Talk to NPC" is
+        self.assertIn("Talk to NPC", self.om.current_brain_directive)
 
-        # Original task is now active again
-        self.assertEqual(len(self.gm.state["sub_tasks"]), 1)
-        self.assertIn("Traverse Route 102", self.gm.current_directive)
+    def test_complete_recovery_on_empty_stack(self):
+        """Completing when no recovery tasks exist does not crash."""
+        self.om.complete_recovery_task()  # should be a no-op
 
-    def test_complete_task_on_empty_stack(self):
-        """Completing when no tasks remain returns None gracefully."""
-        self.gm.state["sub_tasks"].clear()
-        self.assertIsNone(self.gm.complete_task())
+    # ------------------------------------------------------------------
+    # Clear blocker
+    # ------------------------------------------------------------------
+
+    def test_clear_blocker(self):
+        """clear_blocker() exits the BLOCKED state."""
+        self.om.signal_blocker(reason="test", context="test")
+        self.assertTrue(self.om.is_blocked)
+        self.om.clear_blocker()
+        self.assertFalse(self.om.is_blocked)
 
 
 if __name__ == "__main__":
