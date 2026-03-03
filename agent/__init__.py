@@ -70,10 +70,7 @@ class Agent:
         model_name = args.model_name if args else "gemini-2.5-flash"
         simple_mode = args.simple if args else False
         
-        # Battle VLM optimization state
-        self._battle_vlm_skip_counter = 0  # How many steps to skip VLM during battle
-        self._battle_perception_cache = None  # Cached perception from last VLM call in battle
-        self._was_in_battle_for_vlm = False  # Track battle transitions
+
         
         # Initialize VLM
         self.vlm = VLM(backend=backend, model_name=model_name)
@@ -163,33 +160,18 @@ class Agent:
                 recent_actions = game_state.get('recent_actions', [])
                 
                 # 1. Perception - understand what's happening
-                # OPTIMIZATION: Skip VLM during active battles (battle bot is deterministic)
-                # Call VLM every 3rd step during battle, use cached perception otherwise
+                # OPTIMIZATION: Skip VLM when in battle and action queue still has items
+                # Battle speed comes from BATCHING (multi-button returns), not from skipping VLM.
+                # The battle bot needs fresh dialogue every step to detect menu state changes
+                # (dialogue → base_menu → animation cycles), so don't skip VLM during battles.
                 in_battle = state_data.get('game', {}).get('in_battle', False)
                 
-                if in_battle and self._was_in_battle_for_vlm and self._battle_perception_cache is not None and self._battle_vlm_skip_counter > 0:
-                    # Skip VLM — battle bot handles combat deterministically
-                    perception_output = self._battle_perception_cache
-                    self._battle_vlm_skip_counter -= 1
-                    print("⚡ [PERCEPTION] Skipping VLM — battle bot handles combat deterministically")
-                else:
-                    # Call VLM normally (not in battle, first battle step, or counter expired)
-                    perception_output = perception_step(
-                        frame, 
-                        state_data, 
-                        self.vlm,
-                        recent_actions=recent_actions
-                    )
-                    
-                    if in_battle:
-                        self._battle_perception_cache = perception_output
-                        self._battle_vlm_skip_counter = 2  # Skip next 2 steps
-                
-                # Track battle state for VLM optimization
-                if not in_battle:
-                    self._battle_perception_cache = None
-                    self._battle_vlm_skip_counter = 0
-                self._was_in_battle_for_vlm = in_battle
+                perception_output = perception_step(
+                    frame, 
+                    state_data, 
+                    self.vlm,
+                    recent_actions=recent_actions
+                )
                 
                 # SAFETY CHECK: Handle None perception output
                 if perception_output is None:
@@ -423,11 +405,6 @@ class Agent:
                 # Handle empty action list (no action needed)
                 if not action_output:
                     return None  # Signal to client that no action is needed this frame
-                
-                # BATTLE VLM OPTIMIZATION: After a batched action (multi-button),
-                # force VLM on the next step to see the result of the sequence
-                if in_battle and isinstance(action_output, list) and len(action_output) > 1:
-                    self._battle_vlm_skip_counter = 0  # Force VLM next step
                 
                 return {'action': action_output}
                 
