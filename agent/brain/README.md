@@ -13,11 +13,11 @@ between perception and navigation). On each frame it:
    (`EpisodicMemory.log_event`).
 2. **Detects battle transitions** by comparing the current `in_battle` flag
    against the previous frame's value.
-3. **On battle start:** writes the event to memory, marks the GoalManager as
-   BLOCKED, performs a **RAG query** (semantic search over all stored memories),
-   and sends the retrieved context + situation to the LLM for a recovery plan.
-   The battle bot then takes over for actual combat — the brain does *not*
-   short-circuit.
+3. **On battle start:** writes the event to memory, marks the ObjectiveManager
+   as BLOCKED, performs a **RAG query** (semantic search over all stored
+   memories), and sends the retrieved context + situation to the LLM for a
+   recovery plan. The battle bot then takes over for actual combat — the brain
+   does *not* short-circuit.
 4. **On battle end:** logs the outcome, clears the BLOCKED/RECOVERY state, and
    lets normal navigation resume.
 5. **Outside of battle:** runs keyword-based blocker detection on NPC dialogue
@@ -33,11 +33,21 @@ between perception and navigation). On each frame it:
   is informed by what the agent has actually experienced — not just a static
   cheat sheet.
 
-## Goal: Where This Should Go
+## Architecture
 
-The brain should become the agent's **central executive** — the layer that
-decides *what to do next* at a strategic level, leaving navigation and combat as
-execution engines. Concretely:
+The brain capabilities were originally split across `GoalManager` and
+`RecoveryPlanner`. As of the **Phase 1: Brain Consolidation**, the GoalManager
+has been fully merged into `ObjectiveManager` (`agent/objective_manager.py`),
+which now serves as the single executive router. The consolidation:
+
+- **Ported** blocker detection, recovery task stack, and `signal_blocker()` into
+  ObjectiveManager.
+- **Ported** the `update_brain()` integration point (dialogue logging, battle
+  transitions, keyword scanning, RAG recovery) into ObjectiveManager.
+- **Deleted** the standalone `goal_manager.py` file.
+
+The remaining brain modules (`EpisodicMemory`, `RecoveryPlanner`) are injected
+into ObjectiveManager via `update_brain(episodic_memory=..., recovery_planner=...)`.
 
 | Capability | Status | Target |
 |------------|--------|--------|
@@ -55,22 +65,22 @@ execution engines. Concretely:
 | File | Role |
 |------|------|
 | `memory.py` | `EpisodicMemory` — ChromaDB wrapper (log, retrieve, clear) |
-| `goal_manager.py` | `GoalManager` — FSM tracking objectives (IN_PROGRESS / BLOCKED / COMPLETED) |
 | `planner.py` | `RecoveryPlanner` — RAG retrieval + LLM prompt construction + response parsing |
 | `PLAN.MD` | Development roadmap with phased milestones |
+
+> **Note:** `goal_manager.py` no longer exists. Its functionality lives in
+> `agent/objective_manager.py` (see `is_blocked`, `signal_blocker()`,
+> `add_recovery_task()`, `complete_recovery_task()`, `update_brain()`).
 
 ## Demo & Inspection Scripts
 
 All runnable from the project root:
 
 ```bash
-# Phase 1: GoalManager + Planner (mock LLM)
-python -m agent.brain.demos.demo_planner
-
-# Phase 2.1: Semantic memory retrieval
+# Semantic memory retrieval demo
 python -m agent.brain.demos.demo_rag_memory
 
-# Phase 2.2: End-to-end RAG flow (mock or --live for Gemini)
+# End-to-end RAG flow (mock or --live for Gemini)
 python -m agent.brain.demos.demo_full_flow
 python -m agent.brain.demos.demo_full_flow --live
 
@@ -81,7 +91,7 @@ python -m agent.brain.demos.inspect_brain
 ## Tests
 
 ```bash
-python -m pytest tests/test_goal_manager.py -v
+python -m pytest tests/test_objective_manager_blocker.py -v
 ```
 
 ---
@@ -110,32 +120,10 @@ unresolved:
 "Get Cut → Beat Gym → Cut Tree" is a good North Star but doesn't define:
 
 - What the dependency graph structure looks like (DAG? linear chain?).
-- How this interacts with the existing `ObjectiveManager` in
-  `agent/objective_manager.py`, which already drives navigation objectives.
-  Building a parallel system risks divergence — the two should be unified or
-  have a clear handoff protocol.
-- **Suggested first step:** Write a design doc that maps the current
-  `ObjectiveManager` milestone system to the `GoalManager` sub-task stack and
-  defines which layer owns what.
+- How this interacts with the ObjectiveManager's milestone system, which already
+  drives navigation objectives. Building a parallel system risks divergence.
 
-### 3. Live integration work isn't captured in PLAN.MD
-
-The following were built beyond the original Phase 1/2 spec and are not
-described in the phase write-ups:
-
-- **Battle transition detection** (`_brain_prev_in_battle` flag, `False → True`
-  / `True → False` handling).
-- **`signal_blocker()`** on `GoalManager` — external trigger that bypasses
-  keyword detection for programmatic blockers.
-- **Pre-seeding system** — idempotent seed-marker check on boot so world
-  knowledge survives restarts without duplication.
-- **Non-short-circuit battle handling** — brain fires RAG on battle start but
-  yields control to battle bot rather than pressing A itself.
-
-These should be documented in PLAN.MD as a "Phase 2.5: Live Integration" section
-so the history of the system is traceable.
-
-### 4. Memory lifecycle: the database grows indefinitely
+### 3. Memory lifecycle: the database grows indefinitely
 
 Every dialogue line and battle event is logged and never evicted. For a
 speedrun (a few hundred steps), this is fine. For extended runs or repeated
@@ -150,17 +138,3 @@ begin polluting retrieval results.
 - **Long-term:** Area-based summarization — when the player leaves a map, merge
   all dialogue/battle events for that map into a single summary entry, reducing
   retrieval noise.
-
-### 5. The Architecture diagram in PLAN.MD is outdated
-
-The "New Flow" section shows:
-
-```
-1.5 Goal Manager → goal_manager.update(perception_output)
-```
-
-The actual implementation is more nuanced — dialogue logging, battle transition
-detection, and conditional keyword matching are three separate steps that each
-run (or are skipped) based on different conditions. The diagram should be
-updated when Phase 3 work begins, at which time the full current flow can be
-documented accurately.

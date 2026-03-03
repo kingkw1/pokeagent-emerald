@@ -36,25 +36,27 @@ Before writing code, we define exactly where this fits into the existing
 5. Action       →  action_step(memory, plan, perception, ..., vlm)
 ```
 
-### New Flow
+### New Flow (Post-Consolidation)
 
 ```
 1.  Perception    →  perception_step(frame, state_data, vlm)
-1.5 Goal Manager  →  goal_manager.update(perception_output)     ← NEW
+1.5 Brain Update  →  objective_manager.update_brain(...)          ← CONSOLIDATED
 2.  Stuck Detect  →  position_history / oscillation check
 3.  Planning      →  planning_step(...) OR recovery_planner(...)  ← MODIFIED
 4.  Memory        →  episodic_memory.log_event(...)               ← UPGRADED (Phase 2)
 5.  Action        →  action_step(memory, plan, perception, ..., vlm)
 ```
 
-**Insertion point:** Between the perception safety check (~line 155) and the
-`should_replan` logic (~line 168) in `agent/__init__.py`.
+> **Note:** The original GoalManager was merged into `ObjectiveManager`
+> (`agent/objective_manager.py`) during the Phase 1 Brain Consolidation.
+> `update_brain()` handles dialogue logging, battle transitions, keyword
+> scanning, and RAG recovery — all in one call.
 
 ### The Input Contract
 
-`GoalManager.update(perception_output)` consumes the VLM output dict. The
-fields live **inside `perception_output['visual_data']`**, not at the top
-level. The correct access paths are:
+`ObjectiveManager.update_brain(perception_output, ...)` consumes the VLM
+output dict. The fields live **inside `perception_output['visual_data']`**,
+not at the top level. The correct access paths are:
 
 | Field                   | Path                                                          | Type          |
 | ----------------------- | ------------------------------------------------------------- | ------------- |
@@ -73,23 +75,23 @@ level. The correct access paths are:
 **Goal:** Implement the logic core. The agent "thinks" about obstacles using an
 LLM, with a static "Cheat Sheet" as the context source.
 
-### 1.1 The `GoalManager` Class
+### 1.1 The `GoalManager` Class → Merged into `ObjectiveManager`
 
--   **Methodology:** A finite state machine tracking `current_objective`.
+> **Status:** GoalManager was implemented, verified, then **consolidated** into
+> `ObjectiveManager` (`agent/objective_manager.py`) during Phase 1 Brain
+> Consolidation. The standalone `goal_manager.py` file has been deleted.
+
+-   **Original design:** A finite state machine tracking `current_objective`.
     States: `IN_PROGRESS`, `BLOCKED`, `COMPLETED`.
 -   **Input parsing:** Extracts dialogue from
     `perception_output['visual_data']['on_screen_text']['dialogue']`.
     Regex/keyword match: `["wait", "stop", "don't go", "dangerous"]`.
     If match found → transition to `BLOCKED`.
--   **Implementation:**
-    -   File: `agent/brain/goal_manager.py` (rewrite existing file)
-    -   Logic:
-        -   Maintains a stack of `sub_tasks`.
-        -   Exposes `update(perception_output)` → returns current state.
-        -   Exposes `get_current_directive()` → returns plan string for the
-            action module.
+-   **Now lives in:** `agent/objective_manager.py`
+    -   `is_blocked` property, `signal_blocker()`, `add_recovery_task()`,
+        `complete_recovery_task()`, `update_brain()`
 -   **Verification:**
-    -   **Test:** `tests/test_goal_manager.py` (11 tests, all passing)
+    -   **Test:** `tests/test_objective_manager_blocker.py` (11 tests, all passing)
     -   **Success:** Feed mock perception:
         ```python
         {"visual_data": {"on_screen_text": {"dialogue": "Wait! Don't go out!"},
@@ -184,9 +186,9 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 ## Immediate Execution Steps
 
-1.  ~~Rewrite `agent/brain/goal_manager.py`~~ ✅
+1.  ~~Rewrite `agent/brain/goal_manager.py`~~ ✅ (now merged into `objective_manager.py`)
 2.  ~~Create `agent/brain/planner.py`~~ ✅
-3.  ~~Write `tests/test_goal_manager.py`~~ ✅ (11 tests)
+3.  ~~Write `tests/test_goal_manager.py`~~ ✅ (11 tests, renamed to `test_objective_manager_blocker.py`)
 4.  ~~Create demo scripts~~ ✅ (moved to `agent/brain/demos/`)
 5.  ~~Integrate brain into `agent/__init__.py`~~ ✅ (battle transition detection)
 6.  Next: Phase 3 — spatial metadata on `log_event()` calls
@@ -197,10 +199,10 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 | File                                     | Phase       | Status          | Purpose                             |
 | ---------------------------------------- | ----------- | --------------- | ----------------------------------- |
-| `agent/brain/goal_manager.py`            | **Phase 1** | ✅ Complete      | State Machine (Logic Core)          |
+| `agent/brain/goal_manager.py`            | **Phase 1** | ❌ Deleted (merged into `objective_manager.py`) | State Machine (Logic Core) |
 | `agent/brain/planner.py`                 | **Phase 1** | ✅ Complete      | LLM-based Recovery Planner (RAG)    |
 | `agent/brain/memory.py`                  | **Phase 2** | ✅ Complete      | VectorDB Wrapper (`EpisodicMemory`) |
-| `tests/test_goal_manager.py`             | **Phase 1** | ✅ 11 tests      | Unit tests for goal tracking        |
+| `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 11 tests      | Unit tests for blocker/recovery     |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
