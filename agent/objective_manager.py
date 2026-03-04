@@ -1735,6 +1735,7 @@ class ObjectiveManager:
                 episodic_memory.log_event(
                     f"Heard dialogue: '{brain_dialogue}'",
                     {"type": "dialogue"},
+                    state_data=state_data,
                 )
             self._last_logged_dialogue = brain_dialogue
 
@@ -1749,6 +1750,7 @@ class ObjectiveManager:
                 episodic_memory.log_event(
                     f"Battle started on {brain_location}: {battle_context}",
                     {"type": "battle_start", "location": brain_location},
+                    state_data=state_data,
                 )
             self.signal_blocker(reason="Trainer Battle", context=battle_context)
             if recovery_planner is not None and not self._recovery_tasks:
@@ -1766,6 +1768,7 @@ class ObjectiveManager:
                 episodic_memory.log_event(
                     f"Battle ended on {brain_location}. Resumed navigation.",
                     {"type": "battle_end", "location": brain_location},
+                    state_data=state_data,
                 )
             self.complete_recovery_task()
             self.clear_blocker()

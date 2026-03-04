@@ -3,9 +3,49 @@ import chromadb
 import uuid
 import time
 import logging
+from typing import Any, Dict, Optional
+
 from chromadb.utils import embedding_functions
 
 logger = logging.getLogger(__name__)
+
+
+def extract_spatial_metadata(state_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract ``(x, y, location)`` from the emulator's ``state_data`` dict.
+
+    Returns a flat dict suitable for merging into ChromaDB metadata:
+
+    .. code-block:: python
+
+        {"pos_x": 5, "pos_y": 12, "location": "ROUTE_102"}
+
+    Missing or ``None`` fields are omitted so ChromaDB never stores
+    ``None`` values (which it rejects).
+    """
+    spatial: Dict[str, Any] = {}
+
+    player = state_data.get("player", {}) if state_data else {}
+    position = player.get("position") or {}
+
+    if isinstance(position, dict):
+        x = position.get("x")
+        y = position.get("y")
+    elif isinstance(position, (list, tuple)) and len(position) >= 2:
+        x, y = position[0], position[1]
+    else:
+        x, y = None, None
+
+    if x is not None:
+        spatial["pos_x"] = int(x)
+    if y is not None:
+        spatial["pos_y"] = int(y)
+
+    location = player.get("location")
+    if location:
+        spatial["location"] = str(location)
+
+    return spatial
+
 
 class EpisodicMemory:
     """
@@ -31,13 +71,27 @@ class EpisodicMemory:
         )
         logger.info(f"[Memory] System Online. Items in DB: {self.collection.count()}")
 
-    def log_event(self, text: str, metadata: dict = None):
-        """
-        Writes a significant event to the VectorDB.
+    def log_event(self, text: str, metadata: dict = None,
+                  state_data: dict = None):
+        """Writes a significant event to the VectorDB.
+
+        Args:
+            text: Human-readable event description.
+            metadata: Caller-supplied metadata dict (copied, not mutated).
+            state_data: Optional emulator ``state_data`` dict. When provided
+                the player's ``(x, y, location)`` are automatically merged
+                into *metadata* (Phase 3 — Spatial Awareness).
         """
         # Copy to avoid mutating the caller's dict
         metadata = dict(metadata) if metadata else {}
-            
+
+        # ── Phase 3: Spatial Awareness ──
+        if state_data is not None:
+            spatial = extract_spatial_metadata(state_data)
+            # Caller-supplied keys win; spatial fills gaps only.
+            for k, v in spatial.items():
+                metadata.setdefault(k, v)
+
         # Ensure timestamp exists
         if "timestamp" not in metadata:
             metadata["timestamp"] = time.time()
@@ -100,6 +154,84 @@ class EpisodicMemory:
         # Format as a bulleted list for the LLM
         context_string = "\n".join([f"- {e['text']}" for e in entries])
         return context_string
+
+    # ── Phase 3: Spatial queries ────────────────────────────────────
+    def retrieve_near(
+        self,
+        query: str,
+        *,
+        location: Optional[str] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        radius: int = 10,
+        n_results: int = 5,
+        max_distance: Optional[float] = None,
+    ) -> list[dict]:
+        """Retrieve memories filtered or ranked by spatial proximity.
+
+        Combines semantic search with optional metadata filtering:
+
+        * **location** — hard-filter via ChromaDB ``where`` clause so only
+          memories from that map are considered.
+        * **x / y / radius** — post-filter: after the semantic query,
+          discard results whose ``pos_x``/``pos_y`` lie outside the L∞
+          (Chebyshev) radius.  Memories without spatial metadata are kept.
+
+        Returns the same ``[{"text", "metadata", "distance"}, ...]``
+        format as ``retrieve_raw``.
+        """
+        where_filter = None
+        if location:
+            where_filter = {"location": location}
+
+        count = self.collection.count()
+        if count == 0:
+            return []
+
+        # Fetch more candidates than requested to allow post-filtering
+        fetch_n = min(n_results * 3, count)
+
+        kwargs: dict = {
+            "query_texts": [query],
+            "n_results": fetch_n,
+        }
+        if where_filter:
+            kwargs["where"] = where_filter
+
+        try:
+            results = self.collection.query(**kwargs)
+        except Exception as e:
+            logger.warning(f"[Memory] Spatial query failed: {e}")
+            return []
+
+        documents = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        distances = results["distances"][0] if results.get("distances") else [None] * len(documents)
+
+        entries = [
+            {"text": doc, "metadata": meta, "distance": dist}
+            for doc, meta, dist in zip(documents, metadatas, distances)
+        ]
+
+        # Optional cosine-distance ceiling
+        if max_distance is not None:
+            entries = [
+                e for e in entries
+                if e["distance"] is None or e["distance"] <= max_distance
+            ]
+
+        # Optional coordinate-radius post-filter (L∞ / Chebyshev)
+        if x is not None and y is not None:
+            def _within_radius(entry: dict) -> bool:
+                meta = entry.get("metadata", {})
+                mx = meta.get("pos_x")
+                my = meta.get("pos_y")
+                if mx is None or my is None:
+                    return True  # Keep memories without coords
+                return abs(mx - x) <= radius and abs(my - y) <= radius
+            entries = [e for e in entries if _within_radius(e)]
+
+        return entries[:n_results]
 
     def clear_memory(self):
         """Debug tool to wipe history (Used for fresh runs/demos)"""

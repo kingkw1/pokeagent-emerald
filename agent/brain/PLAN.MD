@@ -3,8 +3,8 @@
 **Objective:** Build a resilient agent capable of encountering an obstacle,
 logging it, querying its history via RAG, and replanning using an LLM.
 
-**Status:** Phases 1 & 2 are **complete** and integrated into the live agent.
-Phase 3 (spatial awareness) is next.
+**Status:** Phases 1, 2, & 3 are **complete** and integrated into the live agent.
+Phase 4 (Walkthrough RAG) is next.
 
 ### Design Rationale (LLM-First Approach)
 
@@ -161,7 +161,7 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 ---
 
-## 📅 PHASE 3: Spatial Awareness (Stretch — Low Priority)
+## 📅 PHASE 3: Spatial Awareness (Stretch — Low Priority) ✅ COMPLETE
 
 **Goal:** Tie memories to coordinates.
 
@@ -172,6 +172,34 @@ LLM, with a static "Cheat Sheet" as the context source.
     -   Do **not** attempt to update the pathfinding graph dynamically.
     -   Value: We can *show* the spatial data ("Look, I know *where* I got
         blocked") without risking breakage in navigation code.
+
+### 3.1 Implementation Details
+
+-   **`extract_spatial_metadata(state_data)`** — pure helper function in
+    `agent/brain/memory.py`. Extracts `pos_x`, `pos_y`, `location` from the
+    emulator's `state_data` dict.
+-   **`log_event(text, metadata, state_data=None)`** — the existing method
+    gained an optional `state_data` kwarg. When provided, spatial metadata
+    is merged via `setdefault` (caller-supplied keys always win).
+-   **`retrieve_near(query, *, location, x, y, radius, ...)`** — new
+    spatial query method. Combines ChromaDB `where` filtering (by
+    `location`) with post-query coordinate radius filtering (L∞ / Chebyshev).
+    Memories without spatial data are kept by default.
+-   **Wiring:** All three `log_event()` calls in
+    `ObjectiveManager.update_brain()` (dialogue, battle-start, battle-end)
+    now pass `state_data=state_data`.
+-   **Backwards compatible:** Pre-seed calls in `Agent.__init__` (static
+    knowledge rules) and demo scripts omit `state_data` and work unchanged.
+
+### 3.2 Verification
+
+-   **Test:** `tests/test_spatial_memory.py` (14 tests, all passing)
+    -   `TestExtractSpatialMetadata` — 7 tests (normal, zero coords,
+        missing position, None, empty, tuple, missing location)
+    -   `TestLogEventSpatial` — 3 tests (stores coords, backward compat,
+        caller-wins semantics)
+    -   `TestRetrieveNear` — 4 tests (location filter, radius filter,
+        combined, empty DB)
 
 ---
 
@@ -344,7 +372,7 @@ def resolve_location(name: str) -> dict | None:
 3.  ~~Write `tests/test_goal_manager.py`~~ ✅ (11 tests, renamed to `test_objective_manager_blocker.py`)
 4.  ~~Create demo scripts~~ ✅ (moved to `agent/brain/demos/`)
 5.  ~~Integrate brain into `agent/__init__.py`~~ ✅ (battle transition detection)
-6.  Next: Phase 3 — spatial metadata on `log_event()` calls
+6.  ~~Phase 3 — spatial metadata on `log_event()` calls~~ ✅
 7.  Next: Phase 4.1 — build walkthrough knowledge base (`scripts/build_walkthrough_db.py`)
 8.  Next: Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)
 9.  Next: Phase 4.3a — shadow mode comparison (RAG vs milestones)
@@ -357,12 +385,13 @@ def resolve_location(name: str) -> dict | None:
 | ---------------------------------------- | ----------- | --------------- | ----------------------------------- |
 | `agent/brain/goal_manager.py`            | **Phase 1** | ❌ Deleted (merged into `objective_manager.py`) | State Machine (Logic Core) |
 | `agent/brain/planner.py`                 | **Phase 1** | ✅ Complete      | LLM-based Recovery Planner (RAG)    |
-| `agent/brain/memory.py`                  | **Phase 2** | ✅ Complete      | VectorDB Wrapper (`EpisodicMemory`) |
+| `agent/brain/memory.py`                  | **Phase 2+3** | ✅ Complete     | VectorDB Wrapper (`EpisodicMemory` + spatial) |
 | `agent/brain/walkthrough_db.py`          | **Phase 4** | ⬜ Not started   | Walkthrough ChromaDB collection     |
 | `agent/brain/strategic_planner.py`       | **Phase 4** | ⬜ Not started   | RAG-driven strategic navigation     |
 | `agent/brain/location_resolver.py`       | **Phase 4** | ⬜ Not started   | Prose → LOCATION_GRAPH resolver     |
 | `scripts/build_walkthrough_db.py`        | **Phase 4** | ⬜ Not started   | One-time KB build script            |
-| `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 11 tests      | Unit tests for blocker/recovery     |
+| `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 12 tests      | Unit tests for blocker/recovery     |
+| `tests/test_spatial_memory.py`            | **Phase 3** | ✅ 14 tests      | Unit tests for spatial metadata     |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
