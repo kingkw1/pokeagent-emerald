@@ -239,7 +239,7 @@ if in_battle and not self._was_in_battle:
 self._was_in_battle = in_battle
 ```
 
-**State format compatibility note:** Both the live agent and `stable-retro` use the mGBA emulator core, so save states should be compatible. Verify by loading a collected `.state` into the retro env and checking that RAM values (`my_hp`, `enemy_hp`, move data) read correctly before committing to a full training run.
+**State format compatibility note:** The live agent (mGBA standalone) and stable-retro (libretro mGBA core) use **incompatible save state formats**. Raw mGBA states cannot be loaded in stable-retro and vice versa. This means all training states must originate from within stable-retro itself. See [simulation/PLAN.MD §2.1](../../simulation/PLAN.MD) for the full compatibility analysis and alternative collection strategies (enhanced `play_and_save.py` or RAM-snapshot approach).
 
 **Advantages over manual `play_and_save.py`:**
 - No input-mapping issues (Pygame handles all GBA buttons natively)

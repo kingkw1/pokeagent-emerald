@@ -1,137 +1,181 @@
+# Simulation & RL Training — Development Plan
 
-### Phase 1: The "Digital Twin" Infrastructure (Simulation)
-**Goal:** Establish a high-speed, headless training environment using `stable-retro`.
+**Last updated:** 2025-01-21  
+**Status:** Training environment operational, prototype PPO model trained  
+**Detailed RL integration plan:** See [agent/combat/RL_BATTLE_BOT_PLAN.md](../agent/combat/RL_BATTLE_BOT_PLAN.md)
 
-**Step 1.1: Environment Initialization**
-*   **Action:**
-    *   Install `stable-retro`, `stable-baselines3`, and `shimmy`.
-    *   Acquire the correct Pokémon Emerald ROM (sha1 must match `stable-retro` expectations, usually `f3ae088181bf583e55da942a2b44ad1d`).
-    *   Run `python -m retro.import .` to import the ROM.
-*   **VCC:** Run `python -m retro.examples.interactive --game PokemonEmerald-GBA`. The window opens and you can play the game manually.
+---
 
-**Step 1.2: Scenario Definition (The "Save State")**
-*   **Action:**
-    *   Play the game until the very first rival battle (May/Brendan).
-    *   Save state **exactly** as the text "May would like to battle!" finishes and the UI appears.
-    *   Name this state `BattleLevel5`.
-*   **VCC:** A script loads `retro.make(game='PokemonEmerald-GBA', state='BattleLevel5')`, resets the env, and immediately prints "Step 0" without crashing.
+## 1. Current State (What Exists & Works)
 
-**Step 1.3: Sensor Definition (RAM Mapping)**
-*   **Action:**
-    *   Locate the `data.json` file for PokemonEmerald in your `stable-retro` installation.
-    *   Verify or Add these variables (using standard GBA memory maps):
-        *   `enemy_hp`: Address `0x02024448` (Verify this offset for Emerald).
-        *   `my_hp`: Address `0x020241e4` (Verify this offset).
-*   **VCC:** Run a diagnostic script that steps the environment and prints: `{"enemy_hp": 20, "my_hp": 20}`. The numbers must match what is on screen.
+| Component | File | Status |
+|-----------|------|--------|
+| Training environment | `train.py` | ✅ MaskablePPO, SubprocVecEnv (4 parallel), 100k timesteps |
+| Battle wrapper | `train.py` → `EmeraldBattleWrapper` | ✅ 14-dim obs, reward shaping, action masking, menu macro |
+| Game knowledge | `pokedex.py` | ✅ `SPECIES_DATA`, `MOVES_DATA`, `get_effectiveness()` |
+| Manual play client | `play_and_save.py` | ✅ Pygame rendering, keyboard input, gzip state saving |
+| Visual eval | `evaluate.py` | ✅ Load model, replay with Pygame at 60 FPS |
+| Trained model | `models/PPO_Masked/emerald_curriculum_v1.zip` | ✅ Wins early-game battles |
+| ROM integration | `data/PokemonEmerald-GBA/` | ✅ RAM addresses, button config, 20+ save states |
 
-### Phase 2: The "Brain" (Policy Development)
-**Goal:** Train a PPO model to win the specific battle scenario.
-
-**Step 2.1: The Gym Wrapper**
-*   **Action:** Write `EmeraldBattleEnv` (as drafted previously).
-    *   **Input:** Raw RAM dict from Retro.
-    *   **Normalization:** Convert HP (0-20) to Float (0.0-1.0).
-    *   **Reward Function:** `(DamageDealt * 2) - DamageTaken`.
-*   **VCC:** Run `check_env(EmeraldBattleEnv)` from stable-baselines3. It must pass without warnings.
-
-**Step 2.2: Training Loop**
-*   **Action:** Run PPO training for 500,000 steps (should take <1 hour on modern hardware).
-    *   Use `SubprocVecEnv` to run 4-8 environments in parallel.
-*   **VCC:** Tensorboard logs show `ep_rew_mean` increasing. The saved model `emerald_battle_v1.zip` exists.
-
-**Step 2.3: Sim Validation**
-*   **Action:** Load the model and watch it play 10 battles in `render_mode='human'`.
-*   **VCC:** The agent wins >80% of battles against the Level 5 rival.
-
-
-### **Phase 3: The "Smart" Agent****
-**Goal:** Once the baseline HP-based agent is trained, we will incrementally restore complexity to the observation space to enable type-matching and advanced strategy.
-
-**Step 3.1: The "Eye" (Memory Hunting)**
-* **Goal:** Read **Move IDs** (e.g., Water Gun = 55) and **Enemy Species** (e.g., Geodude = 74) from RAM.
-* **Action:**
-* Use `find_memory.py` or standard Gen 3 offsets to locate:
-* `Player_Move_1`, `Player_Move_2`, etc. (Usually `0x20241E4` + offset 12).
-* `Enemy_Species_ID` (Usually `0x2024448`).
-
-
-* **VCC:** The script prints: `Enemy: Torchic (ID 4), Move 1: Scratch (ID 10)`.
-
-**Step 3.2: The "Brain" (Knowledge Injection)**
-
-* **Goal:** Instead of forcing the RL agent to memorize the Type Chart (which takes millions of steps), we give it a "Cheat Sheet."
-* **Action:**
-* Create a `pokedex.py` file with dictionaries: `MOVES_INFO` and `TYPE_CHART`.
-* Update `EmeraldBattleWrapper` to look up the current moves and calculate effectiveness.
-
-
-* **New Observation Space:**
-```python
-[
-  MyHP, EnemyHP, 
-  Move1_Power, Move1_Effectiveness, # e.g., 40, 2.0 (Super Effective)
-  Move2_Power, Move2_Effectiveness,
-  ...
-]
+### Training Observation Vector (14-dim)
 
 ```
+[my_hp, enemy_hp, move1_pp, move1_power, move1_eff, move2_pp, move2_power,
+ move2_eff, move3_pp, move3_power, move3_eff, move4_pp, move4_power, move4_eff]
+```
 
-**Step 3.3: The "Gym" (Mass State Generation)**
+### Curriculum States (5 active)
 
-* **Goal:** *Now* that the agent can see effectiveness, we train it on variety.
-* **Action:**
-* Create 3 distinct Save States:
-1. `State_Grass`: Advantageous matchup (Fire vs Grass).
-2. `State_Rock`: Disadvantageous matchup (Normal vs Rock).
-3. `State_Ghost`: Immunity matchup (Normal vs Ghost).
+`State_Advantage`, `State_Advantage2`, `State_Disadvantage`, `State_Disadvantage2`, `State_Neutral`
 
+Plus ~15 additional states available but not yet in the curriculum:
+`BattleLevel5`, trainer variants (mudkip, nincada, poochyena, wurmple, zigzagoon), `lotad2`, `shroomish`, `general_saves/grinding_phase_1`
 
-#### **3.4 Action Masking (Safety)**
-To prevent the agent from selecting Move 3 when it has 0 PP (which wastes a turn struggling), we will implement **Action Masking**.
-*   **Technique:** Use `ActionMasker` from `sb3-contrib`.
-*   **Logic:** If `pp[i] == 0`, mask Action `i`.
+---
 
+## 2. Known Problems
 
-### Phase 4: The "Driver" (Deployment Bridge)
-**Goal:** Build the interface that allows your Python code to "see" the real mGBA emulator the same way the model sees the simulation.
+### 2.1 Save State Format Incompatibility ⚠️ CRITICAL
 
-**Step 4.1: Clean Slate Setup**
-*   **Action:** Create a new folder `deployment/`. Copy *only* the necessary connection/server files from `sethkartenPokeAgent` (likely `server/`, `pokemon_env/`, and `run.py`). Delete the old `agent/` folder logic.
-*   **VCC:** You can run `python run.py` and it connects to mGBA and takes a screenshot.
+The project uses **two different mGBA emulators** with **incompatible state formats**:
 
-**Step 4.2: The RAM Driver (Parity Check)**
-*   **Action:** Update `pokemon_env/emerald_utils.py` to read the **exact same memory addresses** you used in Step 1.3.
-    *   *Critical:* If Sim used `0x02024448` for EnemyHP, Real must use `0x02024448`.
-*   **VCC:** Run `verify_parity.py`. It connects to a running mGBA battle and prints `Real World Sensor Read: HP=20/20`.
+| | Main Agent (live) | Training (simulation) |
+|--|---|---|
+| **Library** | `mgba.core` (standalone Python bindings) | `stable-retro` (libretro mGBA core) |
+| **Save method** | `core.save_raw_state()` → raw bytes | `env.em.get_state()` → gzip-compressed libretro serialization |
+| **File format** | Uncompressed binary | gzip(libretro internal format) |
+| **Load method** | `core.load_raw_state(bytes)` | `env.em.set_state(gzip_bytes)` |
 
-**Step 4.3: The Inference Engine**
-*   **Action:** Create `agent/battle_bot.py`.
-    *   Class `BattleBot`: Loads `.zip` model.
-    *   Method `get_move(my_hp, enemy_hp)`: Returns button press.
-*   **VCC:** A unit test loads the zip, inputs `(10, 0)` (low HP, enemy dead), and asserts the output is valid (not an error).
+**These formats are NOT cross-compatible.** A state saved from the main emulator cannot be loaded in stable-retro, and vice versa. This blocks any plan that assumes "collect states from the live agent, train in stable-retro."
 
-### Phase 5: System Integration (The Hierarchical Agent)
-**Goal:** Integrate the Battle Bot as a sub-routine of the main VLM agent.
+**Consequence for data collection:** All training states must originate from within the `stable-retro` environment — either via `play_and_save.py` or by programmatic state manipulation.
 
-**Step 5.1: The Hierarchical Controller**
-*   **Action:** Create a simple `main_agent.py` loop:
-    ```python
-    while True:
-        # 1. Perception (Strategic)
-        state_description = vlm.analyze_screenshot()
-        
-        # 2. Router
-        if "BATTLE" in state_description:
-             # Handover to Tactical Layer
-             run_battle_routine() 
-        else:
-             # Stay in Strategic Layer
-             vlm.decide_navigation()
-    ```
-*   **VCC:** Logs show "Transitioning to Battle Mode" when a battle starts.
+### 2.2 Start Button in stable-retro
 
-**Step 5.2: The Battle Sub-Routine**
-*   **Action:** Implement `run_battle_routine()`:
-    *   Loop: Read RAM $\to$ `BattleBot.predict()` $\to$ Send Input $\to$ Sleep(0.1s).
-    *   Break condition: RAM shows Enemy HP = 0 or text detection sees "Won".
-*   **VCC:** Full End-to-End Test. You start the script, walk into the rival, the battle triggers, the RL agent takes over, wins, and hands control back to the VLM.
+The GBA Start button (index 3 in the 12-button array) is mapped correctly in both `metadata.json` and `play_and_save.py`:
+```
+buttons = [0] * 12
+if keys[pygame.K_RETURN]: buttons[3] = 1  # START is Index 3
+```
+
+`env.unwrapped.buttons` confirms: `['B', None, 'SELECT', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'A', None, 'L', 'R']`
+
+Despite the mapping appearing correct, Start may not respond in certain game states (title screen, specific dialogue loops). The `force_button_test(env, 3, screen, "START")` debug function exists for diagnosis — it holds the button for 60 frames. If this function works but keyboard input doesn't, the issue is Pygame event timing; if it also fails, the problem is in the libretro core's input handling for that game state.
+
+**Status:** Needs targeted diagnosis. Not a blocker for battles (Start is not used in battle menus), but blocks progression from title screen / in-game save menus.
+
+### 2.3 Observation Bridge to Live Agent
+
+The RL agent observation builder (`rl_agent.py._make_observation()`) is a **stub** returning `np.zeros(14)`. This is the primary blocker for wiring the trained model into the live agent. Full details in [RL_BATTLE_BOT_PLAN.md Phase A](../agent/combat/RL_BATTLE_BOT_PLAN.md).
+
+---
+
+## 3. Forward Plan
+
+### Phase S1: Start Button Diagnosis
+
+**Goal:** Determine whether Start works in stable-retro and document the conditions.
+
+**Steps:**
+1. Load `BattleLevel5` state (mid-battle, Start not needed) — verify training works. ✅ Done.
+2. Load a state that IS at a Start-requiring screen (title, or overworld where Start opens menu).
+3. Run `force_button_test(env, 3, ...)` and observe the result.
+4. If it works: the issue is Pygame key-hold timing. Fix: hold Start for multiple frames on key-down.
+5. If it doesn't: patch the libretro core button mapping locally or file upstream issue.
+
+**Severity:** Medium. All existing training states bypass the title screen, so this doesn't block training — only state creation from cold boot.
+
+### Phase S2: Data Collection Rig
+
+**Goal:** Automate battle state harvesting during human play.
+
+Since save states can only be used inside their native emulator, collection must happen inside stable-retro:
+
+**Option A: Enhanced `play_and_save.py` (Recommended)**
+
+Add an auto-save hook that triggers on battle start:
+```python
+# In main loop after env.step():
+in_battle = info.get("in_battle", 0)  # needs RAM address in data.json
+if in_battle and not was_in_battle:
+    content = env.em.get_state()
+    save_name = f"battle_{timestamp}.state"
+    with gzip.open(save_path, 'wb') as f:
+        f.write(content)
+was_in_battle = in_battle
+```
+
+**Prerequisite:** Add `in_battle` RAM address to `data/PokemonEmerald-GBA/data.json`. The Gen 3 battle flag is at `gBattleTypeFlags` (`0x02022B4C`) — non-zero during battle.
+
+**Option B: RAM-Snapshot Approach (Format-agnostic fallback)**
+
+If stable-retro input issues block comfortable play:
+1. Play in the main Pygame client (all inputs work reliably)
+2. Monitor `in_battle` via RAM
+3. When battle starts, dump RAM values to JSON:
+   ```json
+   {"my_species": 258, "my_hp": 42, "enemy_species": 261, "enemy_hp": 19,
+    "moves": [33, 45, 0, 0], "move_pp": [35, 20, 0, 0]}
+   ```
+4. In stable-retro, load any generic battle state, then `env.data.write_value(addr, val)` to overwrite RAM with captured values
+5. Train on the reconstructed state
+
+More fragile but decouples collection from state format.
+
+### Phase S3: Curriculum Expansion
+
+**Goal:** Grow from 5 training states to 20+ covering Gyms 1–3.
+
+| Tier | Scenarios | Key Challenge |
+|------|-----------|---------------|
+| Existing | 5 states (Advantage/Disadvantage/Neutral) | Basic type effectiveness |
+| Tier 1 | Route 104–116 trainers | Multi-move opponents, diverse species |
+| Tier 2 | Gym 1 (Roxanne) | Rock types, Geodude + Nosepass, higher HP |
+| Tier 3 | Gym 2 (Brawly) | Fighting types, Bulk Up stat boosting |
+| Tier 4 | Gym 3 (Wattson) | Electric types, Voltorb Self-Destruct |
+
+**Process per tier:**
+1. Collect states via S2 rig (human plays to that point in stable-retro)
+2. Add state names to `TRAIN_STATES` in `train.py`
+3. Re-train with increased `TOTAL_TIMESTEPS` (scale ~proportionally with state count)
+4. Evaluate on held-out states to measure generalization
+
+### Phase S4: Training Improvements
+
+| Improvement | Impact | Effort |
+|-------------|--------|--------|
+| Increase timesteps (100k → 500k–1M) | Higher win rate, better generalization | Low |
+| Increase parallel envs (4 → 8) | ~2x training throughput | Low |
+| Add HP conservation reward bonus | More efficient play | Low |
+| Add player/opponent level to obs | Handle level disparity | Medium (retrains model) |
+| Add status condition tracking | Poison/Paralyze awareness | Medium (new RAM reads + obs dims) |
+| Self-play opponent randomization | Reduce overfitting to ROM AI | High |
+
+---
+
+## 4. File Inventory
+
+```
+simulation/
+├── train.py                # PPO training loop, EmeraldBattleWrapper, SubprocVecEnv
+├── evaluate.py             # Visual evaluation with Pygame rendering
+├── play_and_save.py        # Manual play in stable-retro, keyboard input, state saving
+├── pokedex.py              # SPECIES_DATA, MOVES_DATA, TYPE_CHART, get_effectiveness()
+├── PLAN.MD                 # This document
+├── README.md               # Quick-start guide
+└── data/
+    └── PokemonEmerald-GBA/
+        ├── data.json       # RAM addresses (my_hp, enemy_hp, moves, species)
+        ├── metadata.json   # Button layout: [B, Y, SELECT, START, UP, DOWN, LEFT, RIGHT, A, X, L, R]
+        ├── scenario.json   # Reward/done conditions (currently empty)
+        ├── rom.sha         # ROM integrity hash
+        ├── *.state         # Training save states (gzip format, stable-retro native)
+        └── general_saves/  # Overworld states for progression
+```
+
+---
+
+## Historical Note
+
+The original version of this document (pre-2025-01) described setting up stable-retro from scratch (env init, RAM hunting, first training loop, deployment bridge, system integration). All of those foundational steps are **complete**. This rewrite reflects the current state and forward plan.

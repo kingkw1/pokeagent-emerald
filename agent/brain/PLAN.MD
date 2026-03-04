@@ -161,7 +161,7 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 ---
 
-## 📅 PHASE 3: Spatial Awareness (Stretch — High Risk)
+## 📅 PHASE 3: Spatial Awareness (Stretch — Low Priority)
 
 **Goal:** Tie memories to coordinates.
 
@@ -175,7 +175,160 @@ LLM, with a static "Cheat Sheet" as the context source.
 
 ---
 
-## 📅 PHASE 4: Recursive Sub-Goaling (North Star)
+## 📅 PHASE 4: Walkthrough RAG — Proactive Strategic Planner
+
+**Goal:** Replace the hardcoded `MILESTONE_PROGRESSION` (40+ milestones, covers
+Littleroot → Rustboro Gym) with a dynamic, walkthrough-driven planner that can
+navigate the **entire game** by querying embedded walkthrough text.
+
+**Status:** Design phase. Blocked by: nothing. Can start independently.
+
+### 4.0 Design Rationale
+
+The current `MILESTONE_PROGRESSION` in `objective_manager.py` is a static list of
+27 milestones with handcrafted `target_location`, `target_coords`, and `special`
+flags. It works reliably through Gym 1 but:
+- Doesn't scale — each new location requires manual coordinate entry
+- Hardcodes the "one correct path" — no adaptability to game state
+- Covers only ~5% of the game
+
+The Walkthrough RAG approach preserves the existing navigation stack (A\*, BFS,
+`LOCATION_GRAPH`) and only changes **where destination targets come from** — a
+static list vs. an LLM interpreting walkthrough text.
+
+### 4.1 Knowledge Base Preparation
+
+**Source:** Bulbapedia Pokémon Emerald walkthrough (10+ parts, full game coverage).
+
+**Fetching:** Use the MediaWiki raw API to get clean wikitext:
+```
+https://bulbapedia.bulbagarden.net/w/index.php?title=Walkthrough:Pokémon_Emerald/Part_1&action=raw
+```
+
+**Chunking strategy:** The wikitext has natural structure:
+- `==Location Name==` headings (Littleroot Town, Route 101, Oldale Town, etc.)
+- `===Sub-Event===` headings (Save the Professor!, Birch's Lab, Rival Battle 1, etc.)
+
+Each `==` heading becomes one chunk. Metadata per chunk:
+```python
+{
+    "location": "Route 101",           # Extracted from heading
+    "part": 1,                          # Walkthrough part number
+    "section_order": 3,                 # Sequential position within the part
+    "has_battle": True,                 # Detected from trainer/battle tables
+    "items": ["None"],                  # Item list if present
+}
+```
+
+**Preprocessing:**
+1. Strip MediaWiki templates (`{{...}}`), tables, and image refs
+2. Keep prose text, item lists, trainer data, and event sequences
+3. Resolve location names to `LOCATION_GRAPH` keys via fuzzy match:
+   - `"Littleroot Town"` → `"LITTLEROOT_TOWN"`
+   - `"Route 101"` → `"ROUTE_101"`
+   - `"Petalburg City"` → `"PETALBURG_CITY"`
+
+**Storage:** Dedicated ChromaDB collection `strategy_guide` (separate from the
+existing `episodic_memory` collection used for recovery planning).
+
+**Implementation:**
+- File: `agent/brain/walkthrough_db.py` (new)
+- One-time build script: `scripts/build_walkthrough_db.py`
+- Embeds ~100-150 chunks covering the full game
+
+### 4.2 Strategic Planner Method
+
+**File:** `agent/brain/strategic_planner.py` (new)
+
+**Trigger:** Called when the current milestone/directive is completed OR the
+agent enters a location not covered by any active directive.
+
+**Query → Directive pipeline:**
+```
+1. Query:  "I am in {current_location}. I have {badge_count} badges.
+            My party: {pokemon_summary}. What should I do next?"
+
+2. Retrieve: Top-3 chunks from strategy_guide collection,
+             filtered by location proximity and section_order
+
+3. LLM call: "Given this walkthrough context, what is the next location
+              the player should travel to, and what key actions should
+              they take there?"
+              
+              Output format: {"target_location": "ROUTE_101",
+                              "description": "Walk north through tall grass to Oldale Town",
+                              "priority_actions": ["heal at Pokemon Center", "buy Poke Balls"]}
+
+4. Resolve: Fuzzy-match target_location → LOCATION_GRAPH key → coordinates
+            Generate a Directive object compatible with get_next_action_directive()
+```
+
+**Critical design decision:** The LLM outputs a **location name only**, never
+coordinates. A resolver function maps the location name to `LOCATION_GRAPH` to
+get exact coordinates. This prevents hallucinated coordinates.
+
+### 4.3 Transition Plan (Milestones → RAG)
+
+**Phase 4.3a — Shadow mode:** Run the RAG planner alongside milestones. Log
+both outputs. Compare: does the RAG planner suggest the same next-location as
+the milestone progression? Track agreement rate.
+
+**Phase 4.3b — RAG-primary with milestone fallback:** The RAG planner drives
+navigation. If its output doesn't resolve to a valid `LOCATION_GRAPH` key,
+fall back to the next milestone in `MILESTONE_PROGRESSION`.
+
+**Phase 4.3c — RAG-only:** Remove the milestone list once agreement rate
+exceeds 95% for the first 27 milestones (Littleroot → Rustboro).
+`MILESTONE_PROGRESSION` moves to a test fixture for regression testing.
+
+### 4.4 Location Name Resolver
+
+The bridge between walkthrough prose and the navigation system:
+
+```python
+# agent/brain/location_resolver.py (new)
+from difflib import get_close_matches
+from agent.location_graph import LOCATION_GRAPH
+
+LOCATION_ALIASES = {
+    "Littleroot Town": "LITTLEROOT_TOWN",
+    "Route 101": "ROUTE_101",
+    "Oldale Town": "OLDALE_TOWN",
+    "Route 103": "ROUTE_103",
+    "Route 102": "ROUTE_102",
+    "Petalburg City": "PETALBURG_CITY",
+    "Route 104": "ROUTE_104",
+    "Petalburg Woods": "PETALBURG_WOODS",
+    "Rustboro City": "RUSTBORO_CITY",
+    # ... extends as walkthrough coverage grows
+}
+
+def resolve_location(name: str) -> dict | None:
+    """Map a prose location name to LOCATION_GRAPH entry with coordinates."""
+    # Direct alias match
+    key = LOCATION_ALIASES.get(name)
+    if not key:
+        # Fuzzy match against alias keys
+        matches = get_close_matches(name, LOCATION_ALIASES.keys(), n=1, cutoff=0.7)
+        key = LOCATION_ALIASES[matches[0]] if matches else None
+    if key and key in LOCATION_GRAPH:
+        return {"key": key, **LOCATION_GRAPH[key]}
+    return None
+```
+
+### 4.5 Verification Criteria
+
+| Test | Expected |
+|------|----------|
+| `build_walkthrough_db.py` completes without error | ~100-150 chunks embedded |
+| Query "I am in Littleroot Town" returns Littleroot/Route 101 chunks | Top-3 relevant |
+| `resolve_location("Route 101")` returns `ROUTE_101` with coords | Exact match |
+| Shadow mode: RAG agrees with milestones 0–26 | ≥90% agreement |
+| LLM never outputs raw coordinates | Only location names in response |
+
+---
+
+## 📅 PHASE 5: Recursive Sub-Goaling (North Star)
 
 **Goal:** Multi-step dependency chains (Get Cut → Beat Gym → Cut Tree).
 
@@ -192,6 +345,9 @@ LLM, with a static "Cheat Sheet" as the context source.
 4.  ~~Create demo scripts~~ ✅ (moved to `agent/brain/demos/`)
 5.  ~~Integrate brain into `agent/__init__.py`~~ ✅ (battle transition detection)
 6.  Next: Phase 3 — spatial metadata on `log_event()` calls
+7.  Next: Phase 4.1 — build walkthrough knowledge base (`scripts/build_walkthrough_db.py`)
+8.  Next: Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)
+9.  Next: Phase 4.3a — shadow mode comparison (RAG vs milestones)
 
 ---
 
@@ -202,6 +358,10 @@ LLM, with a static "Cheat Sheet" as the context source.
 | `agent/brain/goal_manager.py`            | **Phase 1** | ❌ Deleted (merged into `objective_manager.py`) | State Machine (Logic Core) |
 | `agent/brain/planner.py`                 | **Phase 1** | ✅ Complete      | LLM-based Recovery Planner (RAG)    |
 | `agent/brain/memory.py`                  | **Phase 2** | ✅ Complete      | VectorDB Wrapper (`EpisodicMemory`) |
+| `agent/brain/walkthrough_db.py`          | **Phase 4** | ⬜ Not started   | Walkthrough ChromaDB collection     |
+| `agent/brain/strategic_planner.py`       | **Phase 4** | ⬜ Not started   | RAG-driven strategic navigation     |
+| `agent/brain/location_resolver.py`       | **Phase 4** | ⬜ Not started   | Prose → LOCATION_GRAPH resolver     |
+| `scripts/build_walkthrough_db.py`        | **Phase 4** | ⬜ Not started   | One-time KB build script            |
 | `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 11 tests      | Unit tests for blocker/recovery     |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
