@@ -46,6 +46,8 @@ from .simple import SimpleAgent, get_simple_agent, simple_mode_processing_multip
 from .opener_bot import OpenerBot, get_opener_bot
 from .brain.memory import EpisodicMemory
 from .brain.planner import RecoveryPlanner
+from .brain.strategic_planner import StrategicPlanner
+from .brain.walkthrough_db import WalkthroughDB
 from .objective_manager import ObjectiveManager
 
 # Set up module logging
@@ -93,7 +95,19 @@ class Agent:
             
             # 🧠 Brain initialization (Memory + ObjectiveManager + Planner)
             self.episodic_memory = EpisodicMemory(db_path="./memory_db")
-            self.objective_manager = ObjectiveManager()
+            
+            # Phase 4.3a: Shadow-mode RAG planner (runs alongside milestones)
+            self.walkthrough_db = WalkthroughDB(db_path="./memory_db")
+            if self.walkthrough_db.count() > 0:
+                self.strategic_planner = StrategicPlanner(
+                    vlm=self.vlm, walkthrough_db=self.walkthrough_db, verbose=False
+                )
+                print(f"   🧠 Strategic Planner: ACTIVE ({self.walkthrough_db.count()} walkthrough chunks)")
+            else:
+                self.strategic_planner = None
+                print(f"   🧠 Strategic Planner: INACTIVE (run scripts/build_walkthrough_db.py first)")
+            
+            self.objective_manager = ObjectiveManager(strategic_planner=self.strategic_planner)
             self.planner = RecoveryPlanner(vlm=self.vlm, memory=self.episodic_memory, verbose=True)
             
             # Pre-seed knowledge for mid-game save states
@@ -315,6 +329,20 @@ class Agent:
                 # GUARD: Skip during battles — player position is static in battle, so
                 # the detector would always fire after 6 steps of combat.
                 in_battle_now = state_data.get('game', {}).get('in_battle', False)
+
+                # ── Post-battle grace: clear stale position history ──
+                # During battle the player position is frozen, so the history
+                # contains pre-battle coordinates.  Comparing those with the
+                # first post-battle position would cause a false oscillation
+                # trigger.  Reset history on the battle→overworld transition.
+                if not hasattr(self, '_was_in_battle_for_stuck'):
+                    self._was_in_battle_for_stuck = False
+                if self._was_in_battle_for_stuck and not in_battle_now:
+                    logger.info("[STUCK DETECTION] Battle ended — clearing position history (post-battle grace)")
+                    print("🔄 [STUCK DETECTION] Battle ended — resetting position history")
+                    self.position_history = [current_position]
+                self._was_in_battle_for_stuck = in_battle_now
+
                 if not in_battle_now and len(self.position_history) >= 6:
                     # Check if last 6 positions contain only 2 unique positions
                     recent_positions = self.position_history[-6:]
@@ -389,6 +417,16 @@ class Agent:
                 self.context['memory'] = memory_output
                 
                 # 4. Action - choose button press
+                # Inject completed milestone IDs so battle_bot can detect
+                # Birch rescue vs post-rescue wild battles without needing
+                # a direct reference to the ObjectiveManager.
+                milestones = state_data.get('milestones', {})
+                completed_ids = [
+                    m_id for m_id, m in milestones.items()
+                    if isinstance(m, dict) and m.get('completed')
+                ]
+                state_data.setdefault('game', {})['milestones_completed'] = completed_ids
+
                 action_output = action_step(
                     self.context.get('memory', ''),
                     planning_output,

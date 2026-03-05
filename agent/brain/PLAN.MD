@@ -4,7 +4,7 @@
 logging it, querying its history via RAG, and replanning using an LLM.
 
 **Status:** Phases 1, 2, & 3 are **complete** and integrated into the live agent.
-Phase 4 (Walkthrough RAG) is next.
+Phase 4 (Walkthrough RAG) is **in progress** — 4.1–4.3b complete, 4.3c next.
 
 ### Design Rationale (LLM-First Approach)
 
@@ -209,7 +209,7 @@ LLM, with a static "Cheat Sheet" as the context source.
 Littleroot → Rustboro Gym) with a dynamic, walkthrough-driven planner that can
 navigate the **entire game** by querying embedded walkthrough text.
 
-**Status:** Phase 4.1–4.2 **complete**. Phase 4.3a (shadow mode) is next.
+**Status:** Phase 4.1–4.3b **complete**. Phase 4.3c (RAG-only) is next.
 
 ### 4.0 Design Rationale
 
@@ -297,13 +297,49 @@ get exact coordinates. This prevents hallucinated coordinates.
 
 ### 4.3 Transition Plan (Milestones → RAG)
 
-**Phase 4.3a — Shadow mode:** Run the RAG planner alongside milestones. Log
-both outputs. Compare: does the RAG planner suggest the same next-location as
-the milestone progression? Track agreement rate.
+**Phase 4.3a — Shadow mode:** ✅ **COMPLETE.** Run the RAG planner alongside milestones. Log
+both outputs to `llm_logs/shadow_comparison.jsonl`. Compare: does the RAG planner
+suggest the same next-location as the milestone progression? Track agreement rate.
 
-**Phase 4.3b — RAG-primary with milestone fallback:** The RAG planner drives
+**Implementation details (4.3a):**
+-   `ObjectiveManager.__init__()` accepts an optional `strategic_planner` kwarg.
+-   `get_next_action_directive()` wraps the existing milestone logic via
+    `_get_next_action_directive_inner()`. After computing the milestone directive,
+    `_run_shadow_comparison()` fires the RAG planner and logs a comparison.
+-   **Throttling:** Shadow fires every 20 agent steps (avoids LLM spam).
+-   **Skips:** Battles and active dialogue are excluded.
+-   **Read-only:** The milestone directive is never altered — shadow is logging only.
+-   **Stats:** `get_shadow_stats()` returns agreement rate, totals, etc.
+-   **Log format:** JSONL with `timestamp`, `location`, `coords`, `badges`,
+    `last_milestone`, `milestone_target`, `rag_target`, `rag_display_name`,
+    `rag_description`, `rag_priority_actions`, `rag_goal_coords`, `agree`,
+    `agreement_rate`, `comparisons_so_far`.
+-   **Wiring:** `Agent.__init__` creates `WalkthroughDB` → `StrategicPlanner` →
+    passes it to `ObjectiveManager(strategic_planner=...)`. If the walkthrough DB
+    is empty (not built yet), shadow mode is silently disabled.
+-   **Tests:** `tests/test_shadow_mode.py` — 20 tests covering init, throttling,
+    skips, agreement tracking, JSONL logging, directive passthrough, target extraction.
+
+**Phase 4.3b — RAG-primary with milestone fallback:** ✅ **COMPLETE.** The RAG planner drives
 navigation. If its output doesn't resolve to a valid `LOCATION_GRAPH` key,
 fall back to the next milestone in `MILESTONE_PROGRESSION`.
+
+**Implementation details (4.3b):**
+-   `_query_rag_target(state_data)` queries the StrategicPlanner and returns a
+    dict with `target_location`, `target_coords`, `description`, etc.
+-   In the NAVIGATION HANDLING section of `_get_next_action_directive_inner()`,
+    the RAG result is tried first.  If it resolves, `final_target` and
+    `final_coords` are overridden.  Otherwise milestone values are kept.
+-   Special cases (dialogue, gym, Pokémon Center, rival battle, waypoints) fire
+    **before** RAG and return early — they are never overridden by RAG.
+-   Tracking: `_rag_override_count`, `_milestone_fallback_count`,
+    `_last_directive_source` ("rag" or "milestone").
+-   Shadow log now includes `directive_source` field.
+-   `get_shadow_stats()` returns `rag_overrides` and `milestone_fallbacks`.
+-   **Tests:** `tests/test_shadow_mode.py` — 30 tests covering 4.3a + 4.3b
+    (`TestQueryRagTarget`, `TestRagPrimaryCounters`, `TestDirectiveSourceTracking`).
+-   **Bug fix:** Tests no longer pollute `llm_logs/shadow_comparison.jsonl`
+    (all test classes redirect `_shadow_log_path` to a temp directory).
 
 **Phase 4.3c — RAG-only:** Remove the milestone list once agreement rate
 exceeds 95% for the first 27 milestones (Littleroot → Rustboro).
@@ -375,7 +411,9 @@ def resolve_location(name: str) -> dict | None:
 6.  ~~Phase 3 — spatial metadata on `log_event()` calls~~ ✅
 7.  ~~Phase 4.1 — build walkthrough knowledge base (`scripts/build_walkthrough_db.py`)~~ ✅
 8.  ~~Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)~~ ✅
-9.  Next: Phase 4.3a — shadow mode comparison (RAG vs milestones)
+9.  ~~Phase 4.3a — shadow mode comparison (RAG vs milestones)~~ ✅
+10. ~~Phase 4.3b — RAG-primary with milestone fallback~~ ✅
+11. Next: Phase 4.3c — RAG-only (remove milestone list once ≥95% agreement)
 
 ---
 
@@ -393,6 +431,7 @@ def resolve_location(name: str) -> dict | None:
 | `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 12 tests      | Unit tests for blocker/recovery     |
 | `tests/test_spatial_memory.py`            | **Phase 3** | ✅ 14 tests      | Unit tests for spatial metadata     |
 | `tests/test_walkthrough_rag.py`           | **Phase 4** | ✅ 52 tests      | Unit tests for walkthrough RAG      |
+| `tests/test_shadow_mode.py`               | **Phase 4.3a+b** | ✅ 30 tests | Unit tests for shadow-mode + RAG-primary |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |

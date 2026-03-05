@@ -150,6 +150,16 @@ def chunk_wikitext(raw: str, part_number: int) -> List[Dict[str, Any]]:
 
 
 # ============================================================================
+# Supplemental navigation chunks for early-game gaps
+# ============================================================================
+# The Bulbapedia walkthrough focuses on items/encounters for early routes
+# and omits explicit "go here next" guidance.  These hand-written chunks
+# cover the critical Route 101 → Oldale → Route 103 → rival battle →
+# Route 102 → Petalburg progression so the RAG retriever returns relevant
+# context even at the start of the game.
+# ============================================================================
+
+# ============================================================================
 # WalkthroughDB class
 # ============================================================================
 

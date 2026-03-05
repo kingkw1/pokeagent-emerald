@@ -108,8 +108,10 @@ class BattleBot:
     # Everything not in the above list - Water, Ground, Rock, Normal, Dark, Psychic, Fighting
     ABSORB_EFFECTIVE = {
         'ZIGZAGOON',    # Normal
+        'LINOONE',      # Normal (Zigzagoon evolution)
         'WINGULL',      # Water/Flying (Water makes it effective despite Flying)
         'POOCHYENA',    # Dark
+        'MIGHTYENA',    # Dark (Poochyena evolution)
         'LOTAD',        # Water/Grass (Water makes it effective despite Grass)
         'NINCADA',      # Bug/Ground (Ground makes it effective despite Bug)
         'GEODUDE',      # Rock/Ground (SUPER EFFECTIVE)
@@ -121,9 +123,11 @@ class BattleBot:
         'MAGIKARP',     # Water
         'MUDKIP',       # Water/Ground
         'SLAKOTH',      # Normal
+        'VIGOROTH',     # Normal (Slakoth evolution)
         'MAKUHITA',     # Fighting
         'BARBOACH',     # Water/Ground (SUPER EFFECTIVE)
         'WHISMUR',      # Normal
+        'LOUDRED',      # Normal (Whismur evolution)
         'NUMEL',        # Fire/Ground (Ground makes it effective despite Fire)
     }
 
@@ -669,41 +673,41 @@ class BattleBot:
                 print(f"✅ [MENU STATE] FIGHT_MENU - selecting move via entities")
                 return "fight_menu"
         
-        # Check for dialogue indicators (battle intro/outro, move effects, etc.)
-        dialogue_indicators = [
-            "wild",           # "Wild POOCHYENA appeared!"
-            "appeared",       # Wild Pokemon appear
-            "go!",            # "Go! TREECKO!"
-            "sent out",       # "Trainer sent out..."
-            "used",           # "POOCHYENA used TACKLE!"
-            "fainted",        # "Foe POOCHYENA fainted!"
-            "got away",       # "Got away safely!"
-            "can't escape",   # "Can't escape!" (trainer battle)
-            "couldn't get",   # "Couldn't get away!" (failed wild escape)
-            "gained",         # EXP gained
-            "grew to",        # Level up
-            "learned",        # Learned new move
-            "effective",      # "It's not very effective..." / "It's super effective!"
-            "critical",       # "A critical hit!"
-            "hit",            # "A critical hit!" / "It's a one-hit KO!"
-            "missed",         # "Attack missed!"
-            "hurt",           # "It hurt itself in confusion!"
-            "no effect",      # "It had no effect!"
-        ]
-        
-        if any(indicator in dialogue_lower for indicator in dialogue_indicators):
-            logger.info(f"🔍 [MENU STATE] DIALOGUE detected: '{dialogue_text[:60]}'")
-            print(f"� [MENU STATE] DIALOGUE - pressing A to continue")
-            return "dialogue"
-        
         # Check for bag menu
         if "cancel" in dialogue_lower or "close bag" in dialogue_lower:
             logger.info(f"🔍 [MENU STATE] BAG_MENU detected: '{dialogue_text[:60]}'")
             return "bag_menu"
         
-        # Unknown state - return unknown instead of guessing
-        logger.warning(f"❓ [MENU STATE] UNKNOWN: dialogue='{dialogue_text[:60] if dialogue_text else 'EMPTY'}'")
-        print(f"❓ [MENU STATE] UNKNOWN - pressing A as fallback")
+        # Check menu_title field (VLM puts party/bag titles here, not in dialogue)
+        menu_title = on_screen_text.get('menu_title', '') or ''
+        menu_title_lower = menu_title.lower()
+        
+        # Detect Pokemon party screen: "Choose POKéMON or CANCEL."
+        if 'pok' in menu_title_lower and ('choose' in menu_title_lower or 'cancel' in menu_title_lower):
+            logger.info(f"🔍 [MENU STATE] PARTY_MENU detected from menu_title: '{menu_title}'")
+            print(f"📋 [MENU STATE] PARTY_MENU - pressing B to go back")
+            return "party_menu"
+        
+        # Detect any sub-menu via screen_context = "menu" during battle
+        screen_context = visual_data.get('screen_context', '')
+        if screen_context == 'menu':
+            logger.info(f"🔍 [MENU STATE] SUB_MENU detected: screen_context='menu', title='{menu_title}'")
+            print(f"📋 [MENU STATE] SUB_MENU (screen_context=menu) - pressing B to go back")
+            return "party_menu"  # Treat any sub-menu as party_menu → press B
+        
+        # DEFAULT: If we have ANY text and none of the specific menus matched,
+        # it's battle narration (move effects, fainted, exp gained, etc.).
+        # This avoids maintaining a fragile whitelist of every possible
+        # battle message the game can produce.
+        if dialogue_text:
+            logger.info(f"🔍 [MENU STATE] DIALOGUE (default) detected: '{dialogue_text[:60]}'")
+            print(f"💬 [MENU STATE] DIALOGUE (default) - pressing A to continue")
+            return "dialogue"
+        
+        # Truly no text at all — VLM returned empty/null dialogue.
+        # This usually means a battle animation is playing.
+        logger.warning(f"❓ [MENU STATE] UNKNOWN: no dialogue text, title='{menu_title[:40] if menu_title else 'EMPTY'}'")
+        print(f"❓ [MENU STATE] UNKNOWN - no text visible")
         return "unknown"
     
     def _extract_species_from_visible_entities(self, visual_data: Dict[str, Any], state_data: Dict[str, Any] = None) -> str:
@@ -1364,6 +1368,21 @@ class BattleBot:
                 logger.info("🆘 [BIRCH RESCUE] Dialogue says 'Wild' but staying in TRAINER mode - this is the scripted rescue battle!")
                 print("🆘 [BIRCH RESCUE] Ignoring 'Wild' text - this is the Birch rescue battle (must FIGHT)")
             
+            # ── BATTLE EXIT DETECTION ──
+            # Recognise dialogue that means the battle is already over:
+            #   • "Got away safely!" → wild escape succeeded
+            #   • "whited out" / "blacked out" → player lost
+            # When any of these appear the game is transitioning back to the
+            # overworld.  We must ONLY advance dialogue (B/B) — never send
+            # menu-navigation inputs (DOWN→RIGHT→A for RUN) because those
+            # would execute on the overworld and displace the player.
+            _BATTLE_EXIT_PHRASES = ["got away safely", "got away", "whited out", "blacked out"]
+            if any(phrase in dialogue_lower for phrase in _BATTLE_EXIT_PHRASES):
+                logger.info(f"🏁 [BATTLE EXIT] Battle-ending dialogue detected: '{dialogue_text[:50]}'")
+                print(f"🏁 [BATTLE EXIT] '{dialogue_text[:40]}' — advancing to overworld")
+                self._wild_battle_dialogue_turns = 0  # Reset so next battle starts fresh
+                return "ADVANCE_BATTLE_DIALOGUE"
+
             # Handle dialogue states - just advance with A
             # BUT: In wild battles, force base_menu assumption after seeing intro dialogue
             # (VLM often hallucinates after "Go! TREECKO!" preventing us from detecting base_menu)
@@ -1417,11 +1436,11 @@ class BattleBot:
                     print("🏃 [BATTLE BOT] Exiting fight menu")
                     return "PRESS_B"
                 
-                elif menu_state == "bag_menu":
-                    # Accidentally entered bag menu - press B to go back
+                elif menu_state == "bag_menu" or menu_state == "party_menu":
+                    # Accidentally entered bag/party menu - press B to go back
                     self._unknown_state_count = 0  # Reset counter
-                    logger.info("🏃 [BATTLE BOT] In bag menu - pressing B to return")
-                    print("🏃 [BATTLE BOT] Exiting bag menu")
+                    logger.info(f"🏃 [BATTLE BOT] In {menu_state} - pressing B to return")
+                    print(f"🏃 [BATTLE BOT] Exiting {menu_state}")
                     return "PRESS_B"
                 
                 else:
@@ -1565,11 +1584,12 @@ class BattleBot:
                         self._pending_move = "USE_MOVE_POUND"
                         return "USE_MOVE_POUND"
                 
-                elif menu_state == "bag_menu":
-                    # Accidentally entered bag - go back
-                    logger.info("⚔️ [BATTLE BOT] In bag menu - pressing B to return")
-                    print("⏪ [BATTLE BOT] Exiting bag menu")
+                elif menu_state == "bag_menu" or menu_state == "party_menu":
+                    # Accidentally entered bag/party - go back
+                    logger.info(f"⚔️ [BATTLE BOT] In {menu_state} - pressing B to return")
+                    print(f"⏪ [BATTLE BOT] Exiting {menu_state}")
                     self._unknown_state_count = 0  # Reset counter
+                    self._pending_move = None  # Clear pending move — re-decide at base menu
                     return "PRESS_B"
                 
                 elif menu_state == "dialogue":

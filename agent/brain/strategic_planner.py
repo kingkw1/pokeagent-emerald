@@ -121,8 +121,28 @@ class StrategicPlanner:
         - ``goal_coords`` — ``(x, y, 'LOCATION')`` tuple if resolvable
         - ``source`` — ``"walkthrough_rag"`` (for shadow-mode comparison)
         """
-        # 1. Retrieve walkthrough context
-        context_text = self._retrieve_context(current_location)
+        # 1. Retrieve walkthrough context (enriched with progress info)
+        context_text = self._retrieve_context(
+            current_location,
+            last_milestone=last_milestone,
+            badge_count=badge_count,
+        )
+
+        # 1b. Short-circuit if RAG has no good matches.  When the KB
+        #     has nothing relevant (all chunks below the distance
+        #     threshold), asking the LLM with empty context just produces
+        #     hallucinated targets.  Return target_location=None so the
+        #     caller falls through to the milestone-based fallback.
+        if not context_text:
+            print("🧠 [STRATEGIC PLANNER] No relevant walkthrough context — deferring to milestone.")
+            return {
+                "target_location": None,
+                "target_display_name": None,
+                "description": "No relevant walkthrough context available.",
+                "priority_actions": [],
+                "goal_coords": None,
+                "source": "walkthrough_rag",
+            }
 
         # 2. Build prompt
         display_loc = get_display_name(current_location) if current_location else "Unknown"
@@ -133,6 +153,21 @@ class StrategicPlanner:
             pokemon_summary=pokemon_summary,
             last_milestone=last_milestone,
         )
+
+        # DEBUG: Show full RAG context and prompt
+        print(f"\n🧠 [STRATEGIC PLANNER DEBUG] ==========================================")
+        print(f"🧠 [SP DEBUG] Query location: {current_location} (display: {display_loc})")
+        print(f"🧠 [SP DEBUG] last_milestone: {last_milestone}")
+        print(f"🧠 [SP DEBUG] RAG context length: {len(context_text)} chars")
+        if context_text:
+            # Show first 500 chars of context
+            preview = context_text[:500]
+            print(f"🧠 [SP DEBUG] RAG context preview:\n{preview}")
+            if len(context_text) > 500:
+                print(f"🧠 [SP DEBUG] ... ({len(context_text) - 500} more chars)")
+        else:
+            print(f"🧠 [SP DEBUG] RAG context: EMPTY")
+        print(f"🧠 [SP DEBUG] ==========================================\n")
 
         if self.verbose:
             print("\n" + "=" * 60)
@@ -147,12 +182,15 @@ class StrategicPlanner:
         # 3. LLM call
         full_prompt = f"{_SYSTEM_PROMPT}\n\n{prompt}"
         raw_response = self._call_llm(full_prompt)
+        print(f"🧠 [SP DEBUG] LLM raw response:\n{raw_response}")
 
         # 4. Parse response
         plan = self._parse_response(raw_response)
+        print(f"🧠 [SP DEBUG] Parsed plan: {plan}")
 
         # 5. Resolve location → LOCATION_GRAPH key + coords
         resolved = self._resolve_target(plan.get("target_location"))
+        print(f"🧠 [SP DEBUG] LLM said target_location='{plan.get('target_location')}' → resolved={resolved}")
 
         result: Dict[str, Any] = {
             "target_location": resolved["key"] if resolved else None,
@@ -207,24 +245,73 @@ class StrategicPlanner:
     # RAG retrieval
     # ------------------------------------------------------------------
 
-    def _retrieve_context(self, current_location: str) -> str:
-        """Query WalkthroughDB for relevant chunks."""
+    # Maximum acceptable embedding distance — chunks further away are
+    # semantically irrelevant and would confuse the LLM.
+    # Tuned empirically: with the enriched query, good matches are typically
+    # <0.35 and supplemental navigation chunks land around 0.45-0.47.
+    # At 0.50 we keep useful context while filtering truly irrelevant late-game
+    # chunks (Route 106/118/115 at 0.49+).
+    _DISTANCE_THRESHOLD: float = 0.50
+
+    def _retrieve_context(
+        self,
+        current_location: str,
+        last_milestone: str = "None",
+        badge_count: int = 0,
+    ) -> str:
+        """Query WalkthroughDB for relevant chunks.
+
+        The query is enriched with progress info (``last_milestone``,
+        ``badge_count``) so that the embedding search favours chunks
+        relevant to the player's current progression, not just location
+        name similarity.
+
+        Chunks with embedding distance > ``_DISTANCE_THRESHOLD`` are
+        discarded to avoid feeding irrelevant context to the LLM.
+        """
         if not self.walkthrough_db:
             return ""
 
         display_name = get_display_name(current_location) if current_location else "the current area"
         query = (
-            f"I am in {display_name}. What should I do next? "
-            f"Where should I go?"
+            f"I am in {display_name} with {badge_count} badges. "
+            f"Last completed milestone: {last_milestone}. "
+            f"What should I do next? Where should I go?"
         )
+        print(f"🧠 [RAG RETRIEVAL DEBUG] Query: '{query}'")
 
-        results = self.walkthrough_db.query(query, n_results=3)
+        # Over-fetch so we can discard low-quality results
+        results = self.walkthrough_db.query(query, n_results=6)
+        print(f"🧠 [RAG RETRIEVAL DEBUG] Got {len(results) if results else 0} raw chunks")
 
         if not results:
             return ""
 
-        context_parts = []
+        # Filter by distance threshold — keep only semantically close chunks
+        filtered: list = []
         for i, entry in enumerate(results, 1):
+            meta = entry.get("metadata", {})
+            loc_label = meta.get("location", "Unknown")
+            dist = entry.get("distance")
+            is_close = dist is not None and dist <= self._DISTANCE_THRESHOLD
+            status = "✅ KEPT" if is_close else "❌ DROPPED"
+            print(f"🧠 [RAG RETRIEVAL DEBUG] Chunk {i}: {status} "
+                  f"location='{loc_label}', part={meta.get('part', '?')}, "
+                  f"distance={dist}, "
+                  f"text_preview='{entry['text'][:80]}...'")
+            if is_close:
+                filtered.append(entry)
+
+        print(f"🧠 [RAG RETRIEVAL DEBUG] After filtering: {len(filtered)}/{len(results)} chunks kept (threshold={self._DISTANCE_THRESHOLD})")
+
+        # Take at most 3 of the best results
+        filtered = filtered[:3]
+
+        if not filtered:
+            return ""
+
+        context_parts = []
+        for entry in filtered:
             meta = entry.get("metadata", {})
             loc_label = meta.get("location", "Unknown")
             context_parts.append(

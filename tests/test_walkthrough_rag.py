@@ -321,16 +321,31 @@ class TestStrategicPlannerDirective(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.db = WalkthroughDB(db_path=self.tmp_dir)
-        # Seed with walkthrough data
+        # Seed with walkthrough data — chunks must be semantically close
+        # to their query locations so they pass the distance threshold.
+        # The enriched RAG query is: "I am in <location> with N badges.
+        # Last completed milestone: X. What should I do next?"
+        # Chunks need enough context for the embedding model to score
+        # them below the 0.50 distance threshold.
         self.db.add_chunk(
-            "Walk north from Littleroot Town through Route 101 to reach Oldale Town. "
-            "Battle wild Pokémon in the tall grass for experience.",
-            {"location": "Route 101", "part": 1, "section_order": 1},
+            "Littleroot Town\n\n"
+            "Littleroot Town is the starting town in Pokemon Emerald. "
+            "You begin your adventure here with 0 badges. "
+            "After choosing your starter Pokemon from Professor Birch, "
+            "you should head north from Littleroot Town through Route 101 "
+            "to reach Oldale Town. This is the first thing you should do "
+            "next after starting the game in Littleroot Town.",
+            {"location": "Littleroot Town", "part": 1, "section_order": 1},
         )
         self.db.add_chunk(
-            "In Oldale Town, heal at the Pokemon Center. Then head west through "
-            "Route 102 toward Petalburg City. Battle trainers along the way.",
-            {"location": "Oldale Town", "part": 1, "section_order": 2},
+            "Route 102\n\n"
+            "When you are in Route 102 with 0 badges, you should head west "
+            "to reach Petalburg City. What should you do next in Route 102? "
+            "Go west. Battle trainers along the way through Route 102 "
+            "to gain experience. After arriving in Petalburg City, visit the "
+            "gym to meet your father Norman. Route 102 is the path from "
+            "Oldale Town to Petalburg City.",
+            {"location": "Route 102", "part": 1, "section_order": 2},
         )
         # No VLM → mock fallback
         self.planner = StrategicPlanner(vlm=None, walkthrough_db=self.db)
@@ -378,6 +393,18 @@ class TestStrategicPlannerDirective(unittest.TestCase):
         result = planner.get_next_directive(current_location="ROUTE_102")
         self.assertEqual(result["target_location"], "PETALBURG_CITY")
         self.assertIn("goal_coords", result)
+
+    def test_empty_context_defers_to_milestone(self):
+        """When all chunks are filtered out, planner returns None target (milestone fallback)."""
+        # Query a location with no relevant chunks in the DB
+        result = self.planner.get_next_directive(
+            current_location="RUSTBORO_CITY",
+            badge_count=0,
+            last_milestone="STARTER_CHOSEN",
+        )
+        # No LLM call should happen — target_location should be None
+        self.assertIsNone(result["target_location"])
+        self.assertEqual(result["source"], "walkthrough_rag")
 
 
 class TestShadowCompare(unittest.TestCase):

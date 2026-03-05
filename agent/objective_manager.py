@@ -5,7 +5,9 @@ Lightweight objective management system extracted from SimpleAgent for use in th
 This module provides milestone-driven strategic planning without the complex state management overhead.
 """
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -40,7 +42,7 @@ MILESTONE_PROGRESSION = [
     # [8-10] SPLIT 03: Getting starter
     {"milestone": "ROUTE_101", "target_location": "ROUTE_101", "description": "Find Prof. Birch on Route 101"},
     {"milestone": "STARTER_CHOSEN", "target_location": None, "description": "Choose starter Pokemon"},
-    {"milestone": "BIRCH_LAB_VISITED", "target_location": None, "description": "Visit Birch's Lab"},
+    {"milestone": "BIRCH_LAB_VISITED", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Visit Birch's Lab"},
     
     # [11-14] SPLIT 03: Rival battle sequence & Return to lab for Pokedex
     {"milestone": "OLDALE_TOWN", "target_location": "OLDALE_TOWN", "description": "Travel to Oldale Town"},
@@ -220,8 +222,17 @@ class ObjectiveManager:
     without complex state management dependencies.
     """
     
-    def __init__(self):
-        """Initialize with core storyline objectives"""
+    def __init__(self, strategic_planner=None):
+        """Initialize with core storyline objectives.
+
+        Args:
+            strategic_planner: Optional ``StrategicPlanner`` instance.  When
+                provided, enables **RAG-primary navigation** (Phase 4.3b):
+                the walkthrough RAG planner determines the next target location,
+                falling back to ``MILESTONE_PROGRESSION`` only when the RAG result
+                does not resolve to a valid ``LOCATION_GRAPH`` key.
+                Shadow-mode comparison logging (Phase 4.3a) also runs.
+        """
         self.objectives: List[Objective] = []
         self._initialize_storyline_objectives()
         
@@ -252,9 +263,26 @@ class ObjectiveManager:
         self._brain_prev_in_battle: bool = False
         self._last_logged_dialogue: Optional[str] = None
         
+        # ── Phase 4.3a/b: RAG-based strategic planning ──
+        self.strategic_planner = strategic_planner
+        self._shadow_log_path = os.path.join("llm_logs", "shadow_comparison.jsonl")
+        self._shadow_step_count: int = 0
+        self._shadow_agree_count: int = 0
+        self._shadow_total_count: int = 0
+        self._last_rag_target: Optional[str] = None       # Cached RAG target for current step
+        self._last_directive_source: str = "milestone"     # "rag" or "milestone"
+        self._rag_override_count: int = 0                  # Times RAG drove navigation
+        self._milestone_fallback_count: int = 0            # Times milestone fallback was used
+        
+        # RAG result cache — avoid re-querying LLM when location + milestone unchanged
+        self._rag_cache_key: Optional[tuple] = None        # (location, last_milestone)
+        self._rag_cache_result: Optional[Dict[str, Any]] = None
+        
         logger.info(f"🏗️ [OBJECT LIFECYCLE] ObjectiveManager.__init__() called - created new instance with {len(self.objectives)} storyline objectives")
         print(f"🏗️ [OBJECT LIFECYCLE] ObjectiveManager.__init__() called - NEW INSTANCE CREATED")
         print(f"🗺️ [NAV PLANNER] NavigationPlanner initialized for comparison testing")
+        if strategic_planner:
+            print(f"🧠 [RAG PRIMARY] StrategicPlanner attached — RAG-primary navigation ACTIVE (Phase 4.3b)")
     
     def _initialize_storyline_objectives(self):
         """Initialize the main storyline objectives for Pokémon Emerald progression"""
@@ -626,6 +654,23 @@ class ObjectiveManager:
         return None
     
     def get_next_action_directive(self, state_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Get specific action directive based on current milestone state.
+        
+        When a ``StrategicPlanner`` is attached (Phase 4.3b), the RAG planner
+        determines navigation targets.  Falls back to milestones when the RAG
+        result is invalid.  Shadow-mode comparison logging (Phase 4.3a) still
+        runs for observability.
+        """
+        directive = self._get_next_action_directive_inner(state_data)
+
+        # Phase 4.3a: shadow comparison logging (never changes directive)
+        if self.strategic_planner:
+            self._run_shadow_comparison(state_data, directive)
+
+        return directive
+
+    def _get_next_action_directive_inner(self, state_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Get specific action directive based on current milestone state.
         
@@ -1544,17 +1589,62 @@ class ObjectiveManager:
             return None
         
         # =====================================================================
-        # LOOK-AHEAD: Plan through pass-through locations to final destination
+        # PHASE 4.3b: RAG-PRIMARY NAVIGATION TARGET
         # =====================================================================
-        # Some milestones are just waypoints (e.g., PETALBURG_WOODS) - we should
-        # plan to the final destination (e.g., ROUTE_104_NORTH) instead
+        # When a StrategicPlanner is attached, ask the walkthrough RAG for the
+        # next navigation target.  If it resolves to a valid LOCATION_GRAPH
+        # key, use it.  Otherwise fall back to MILESTONE_PROGRESSION target.
+        #
+        # Special-case handling above (gym, Pokémon Center, rival, waypoints)
+        # fires BEFORE this block — those return early and are never overridden.
         # =====================================================================
         final_target = target_location
         final_coords = target_coords
         final_description = description
+        self._last_directive_source = "milestone"  # Default
         
-        # Check if this is a pass-through location by looking at next few milestones
-        if milestone_id == "PETALBURG_WOODS":
+        print(f"🔮 [NAV DEBUG] Before RAG query: milestone final_target={final_target}, final_coords={final_coords}")
+        rag_result = self._query_rag_target(state_data)
+        print(f"🔮 [NAV DEBUG] _query_rag_target returned: {rag_result}")
+        if rag_result and rag_result.get("target_location"):
+            rag_loc = rag_result["target_location"]
+            print(f"🔮 [NAV DEBUG] RAG resolved location: {rag_loc}, milestone target: {target_location}, match={rag_loc == target_location}")
+            # Only override if RAG target differs from milestone target
+            # (if they agree, milestone coords are usually more precise)
+            if rag_loc != target_location:
+                print(f"🔮 [NAV DEBUG] *** RAG OVERRIDE *** {target_location} → {rag_loc}")
+                final_target = rag_loc
+                final_coords = rag_result.get("target_coords")
+                final_description = rag_result.get("description", description)
+                self._last_directive_source = "rag"
+                self._rag_override_count += 1
+                logger.info(
+                    f"🔮 [RAG PRIMARY] Overriding milestone target "
+                    f"{target_location} → {rag_loc} ({rag_result.get('display_name')})"
+                )
+                print(
+                    f"🔮 [RAG PRIMARY] Using RAG target: {rag_loc} "
+                    f"(milestone was {target_location})"
+                )
+            else:
+                self._last_directive_source = "rag"  # RAG agreed
+                self._rag_override_count += 1
+                logger.info(f"🔮 [RAG PRIMARY] RAG agrees with milestone: {target_location}")
+                print(f"🔮 [NAV DEBUG] RAG agrees with milestone: {target_location}")
+        else:
+            self._milestone_fallback_count += 1
+            logger.info(f"🔮 [RAG FALLBACK] Using milestone target: {target_location}")
+            print(f"🔮 [NAV DEBUG] RAG returned nothing, falling back to milestone: {target_location}")
+        
+        # =====================================================================
+        # LOOK-AHEAD: Plan through pass-through locations to final destination
+        # =====================================================================
+        # Some milestones are just waypoints (e.g., PETALBURG_WOODS) - we should
+        # plan to the final destination (e.g., ROUTE_104_NORTH) instead
+        # NOTE: Only applies when using milestone target (RAG naturally resolves
+        # to the final destination).
+        # =====================================================================
+        if self._last_directive_source == "milestone" and milestone_id == "PETALBURG_WOODS":
             # PETALBURG_WOODS is milestone 20, look ahead to 22 (ROUTE_104_NORTH)
             # Skip 21 (TEAM_AQUA_GRUNT_DEFEATED) since it's a battle, not navigation
             logger.info(f"🔍 [LOOK-AHEAD] PETALBURG_WOODS is pass-through, checking next navigation milestone...")
@@ -1620,6 +1710,291 @@ class ObjectiveManager:
             "completion_rate": len(completed) / len(self.objectives) if self.objectives else 0
         }
     
+    # ====================================================================
+    # PHASE 4.3b: RAG-PRIMARY NAVIGATION
+    # ====================================================================
+    # When a StrategicPlanner is attached, the RAG planner determines the
+    # next navigation target.  If the RAG result doesn't resolve to a valid
+    # LOCATION_GRAPH key, fall back to MILESTONE_PROGRESSION.
+    # ====================================================================
+
+    def _query_rag_target(self, state_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Query the StrategicPlanner for a RAG-based navigation target.
+
+        Returns a dict with ``target_location``, ``target_coords``,
+        ``description``, ``display_name``, ``priority_actions`` if the RAG
+        result resolves to a valid LOCATION_GRAPH key.  Returns ``None``
+        if the planner is unavailable, or the result doesn't resolve.
+        """
+        if not self.strategic_planner:
+            return None
+
+        try:
+            player_data = state_data.get("player", {})
+            current_location = player_data.get("location", "Unknown").upper()
+            game_data = state_data.get("game", {})
+
+            # Badge count
+            badge_count = (
+                bin(game_data.get("badges", 0)).count("1")
+                if game_data.get("badges")
+                else 0
+            )
+
+            # Pokemon summary
+            party = player_data.get("party", [])
+            if party:
+                pokemon_summary = ", ".join(
+                    f"{p.get('species_name', '?')} Lv{p.get('level', '?')}"
+                    for p in party[:3]
+                )
+            else:
+                pokemon_summary = "Unknown"
+
+            # Last milestone
+            milestones = state_data.get("milestones", {})
+            last_milestone = "None"
+            highest_idx = get_highest_milestone_index(milestones)
+            if highest_idx >= 0:
+                last_milestone = MILESTONE_PROGRESSION[highest_idx]["milestone"]
+
+            # ── Cache check: skip LLM if location + milestone unchanged ──
+            cache_key = (current_location, last_milestone)
+            if cache_key == self._rag_cache_key and self._rag_cache_result is not None:
+                print(f"🔮 [RAG CACHE HIT] Reusing cached result for ({current_location}, {last_milestone})")
+                return self._rag_cache_result
+
+            print(f"🔮 [RAG DEBUG] Querying StrategicPlanner...")
+            print(f"🔮 [RAG DEBUG]   current_location = {current_location}")
+            print(f"🔮 [RAG DEBUG]   badge_count      = {badge_count}")
+            print(f"🔮 [RAG DEBUG]   pokemon_summary   = {pokemon_summary}")
+            print(f"🔮 [RAG DEBUG]   last_milestone    = {last_milestone}")
+
+            rag_result = self.strategic_planner.get_next_directive(
+                current_location=current_location,
+                badge_count=badge_count,
+                pokemon_summary=pokemon_summary,
+                last_milestone=last_milestone,
+                state_data=state_data,
+            )
+
+            print(f"🔮 [RAG DEBUG] Full rag_result = {rag_result}")
+
+            target_location = rag_result.get("target_location")
+            if not target_location:
+                logger.info("🔮 [RAG] No target_location in RAG result — falling back to milestone")
+                print(f"🔮 [RAG DEBUG] No target_location in result — falling back to milestone")
+                return None
+
+            # Build result with coords if available
+            result = {
+                "target_location": target_location,
+                "target_coords": None,
+                "description": rag_result.get("description", "Continue exploring."),
+                "display_name": rag_result.get("target_display_name", target_location),
+                "priority_actions": rag_result.get("priority_actions", []),
+            }
+
+            # Extract goal_coords → target_coords (just x,y without location key)
+            gc = rag_result.get("goal_coords")
+            if gc and len(gc) >= 2:
+                result["target_coords"] = (gc[0], gc[1])
+
+            logger.info(
+                f"🔮 [RAG] target={target_location} "
+                f"({result['display_name']}), coords={result['target_coords']}"
+            )
+            print(f"🔮 [RAG DEBUG] Returning: target={target_location}, "
+                  f"display={result['display_name']}, coords={result['target_coords']}")
+
+            # ── Store in cache ──
+            self._rag_cache_key = cache_key
+            self._rag_cache_result = result
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"🔮 [RAG] Query failed: {e}")
+            return None
+
+    # ====================================================================
+    # PHASE 4.3a: SHADOW-MODE RAG COMPARISON (logging)
+    # ====================================================================
+    # Shadow logging still runs for observability.  Now also records
+    # whether RAG or milestone was the actual directive source.
+    # ====================================================================
+
+    def _run_shadow_comparison(
+        self,
+        state_data: Dict[str, Any],
+        milestone_directive: Optional[Dict[str, Any]],
+    ) -> None:
+        """Fire the RAG planner and log a comparison with the milestone directive.
+
+        This method is called at the end of ``get_next_action_directive()``
+        (only when ``self.strategic_planner`` is set).  It never modifies the
+        returned directive — it only logs.
+        """
+        if not self.strategic_planner:
+            return
+
+        self._shadow_step_count += 1
+
+        # Throttle: only compare once every 20 steps to avoid LLM spam
+        if self._shadow_step_count % 20 != 1:
+            return
+
+        try:
+            # Extract game state for the RAG query
+            player_data = state_data.get("player", {})
+            current_location = player_data.get("location", "Unknown").upper()
+            position = player_data.get("position", {})
+            current_x = position.get("x", 0)
+            current_y = position.get("y", 0)
+            game_data = state_data.get("game", {})
+            in_battle = game_data.get("in_battle", False)
+
+            # Don't shadow-compare during battles or dialogue
+            if in_battle:
+                return
+            screen_context = state_data.get("screen_context", "")
+            if screen_context == "dialogue":
+                return
+
+            # Badge count
+            badge_count = bin(game_data.get("badges", 0)).count("1") if game_data.get("badges") else 0
+
+            # Pokemon summary
+            party = player_data.get("party", [])
+            if party:
+                pokemon_summary = ", ".join(
+                    f"{p.get('species_name', '?')} Lv{p.get('level', '?')}"
+                    for p in party[:3]
+                )
+            else:
+                pokemon_summary = "Unknown"
+
+            # Last milestone
+            milestones = state_data.get("milestones", {})
+            last_milestone = "None"
+            highest_idx = get_highest_milestone_index(milestones)
+            if highest_idx >= 0:
+                last_milestone = MILESTONE_PROGRESSION[highest_idx]["milestone"]
+
+            # Extract milestone target from the directive
+            # Priority: milestone (final destination) > target_location > goal_coords[2]
+            # NOTE: goal_coords[2] is the *intermediate waypoint* the nav planner
+            # is routing through, NOT the final destination.  The 'milestone' key
+            # holds the actual target (e.g. ROUTE_103) while goal_coords might
+            # say ROUTE_102 because the agent is still traversing that route.
+            milestone_target = None
+            if milestone_directive:
+                milestone_target = (
+                    milestone_directive.get("milestone")
+                    or milestone_directive.get("target_location")
+                )
+                # Only fall back to goal_coords location if nothing better
+                if not milestone_target:
+                    gc = milestone_directive.get("goal_coords")
+                    if gc and len(gc) >= 3 and isinstance(gc[2], str):
+                        milestone_target = gc[2]
+                # Last resort: description text
+                if not milestone_target:
+                    milestone_target = milestone_directive.get("description", "")
+
+            # Fire RAG planner
+            rag_result = self.strategic_planner.get_next_directive(
+                current_location=current_location,
+                badge_count=badge_count,
+                pokemon_summary=pokemon_summary,
+                last_milestone=last_milestone,
+                state_data=state_data,
+            )
+
+            rag_target = rag_result.get("target_location")
+
+            # Compare
+            comparison = self.strategic_planner.shadow_compare(milestone_target, rag_target)
+
+            # Update counters
+            self._shadow_total_count += 1
+            if comparison["agree"]:
+                self._shadow_agree_count += 1
+
+            agreement_rate = (
+                self._shadow_agree_count / self._shadow_total_count * 100
+                if self._shadow_total_count > 0
+                else 0.0
+            )
+
+            # Build log entry
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "step": self._shadow_step_count,
+                "location": current_location,
+                "coords": [current_x, current_y],
+                "badges": badge_count,
+                "last_milestone": last_milestone,
+                "milestone_target": milestone_target,
+                "rag_target": rag_target,
+                "rag_display_name": rag_result.get("target_display_name"),
+                "rag_description": rag_result.get("description"),
+                "rag_priority_actions": rag_result.get("priority_actions", []),
+                "rag_goal_coords": (
+                    list(rag_result["goal_coords"]) if rag_result.get("goal_coords") else None
+                ),
+                "agree": comparison["agree"],
+                "agreement_rate": round(agreement_rate, 1),
+                "comparisons_so_far": self._shadow_total_count,
+                "directive_source": self._last_directive_source,
+            }
+
+            # Log to console
+            agree_symbol = "✅" if comparison["agree"] else "❌"
+            logger.info(
+                f"🔮 [SHADOW] {agree_symbol} milestone={milestone_target} vs "
+                f"rag={rag_target} | rate={agreement_rate:.0f}% "
+                f"({self._shadow_agree_count}/{self._shadow_total_count})"
+            )
+            print(
+                f"🔮 [SHADOW] {agree_symbol} Milestone: {milestone_target} | "
+                f"RAG: {rag_target} ({rag_result.get('target_display_name', '?')}) | "
+                f"Agreement: {agreement_rate:.0f}% "
+                f"({self._shadow_agree_count}/{self._shadow_total_count})"
+            )
+
+            # Log to JSONL file
+            self._write_shadow_log(log_entry)
+
+        except Exception as exc:
+            logger.warning(f"🔮 [SHADOW] Comparison failed: {exc}", exc_info=True)
+
+    def _write_shadow_log(self, entry: Dict[str, Any]) -> None:
+        """Append a shadow-comparison entry to the JSONL log file."""
+        try:
+            os.makedirs(os.path.dirname(self._shadow_log_path), exist_ok=True)
+            with open(self._shadow_log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            logger.warning(f"[SHADOW] Failed to write log: {exc}")
+
+    def get_shadow_stats(self) -> Dict[str, Any]:
+        """Return current shadow-mode agreement and RAG-primary statistics."""
+        rate = (
+            self._shadow_agree_count / self._shadow_total_count * 100
+            if self._shadow_total_count > 0
+            else 0.0
+        )
+        return {
+            "total_comparisons": self._shadow_total_count,
+            "agreements": self._shadow_agree_count,
+            "disagreements": self._shadow_total_count - self._shadow_agree_count,
+            "agreement_rate": round(rate, 1),
+            "steps_processed": self._shadow_step_count,
+            "rag_overrides": self._rag_override_count,
+            "milestone_fallbacks": self._milestone_fallback_count,
+        }
+
     # ====================================================================
     # BLOCKER / RECOVERY SYSTEM (ported from GoalManager)
     # ====================================================================
