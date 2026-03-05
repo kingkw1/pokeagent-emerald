@@ -160,7 +160,6 @@ class OCRDialogueDetector:
                     return simple_text.strip()
                 
                 logger.warning("[OCR BYPASS] Simple threshold failed, falling through to color mask")
-                print(f"⚠️ [OCR BYPASS] Simple methods failed, trying color mask")
             
             # STEP 2: Primary dialogue box area (most common) - use tighter text coordinates
             dialogue_text = self._extract_text_from_region(

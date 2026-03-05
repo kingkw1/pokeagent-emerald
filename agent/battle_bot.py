@@ -172,7 +172,7 @@ class BattleBot:
         player_data = state_data.get('player', {})
         
         # 🔍 DEBUG: Track battle state transitions
-        print(f"🔍 [BATTLE BOT SHOULD_HANDLE] in_battle={in_battle}, was_in_battle_last_step={self._was_in_battle_last_step}, _is_birch_rescue_battle={self._is_birch_rescue_battle}")
+        logger.debug(f"[BATTLE BOT] should_handle: in_battle={in_battle}, was={self._was_in_battle_last_step}, birch={self._is_birch_rescue_battle}")
         
         # 🔍 TILE TRACKING: Update last overworld tile BEFORE checking battle state
         # This ensures we capture the tile from the step BEFORE battle started
@@ -325,22 +325,8 @@ class BattleBot:
             # Detailed logging for debugging
             matching_milestones = [m for m in post_rescue_milestones if m in milestones_completed]
             
-            logger.info(f"=" * 80)
-            logger.info(f"🥊 [BATTLE START] New battle detected!")
-            logger.info(f"   _last_overworld_tile: '{self._last_overworld_tile}'")
-            logger.info(f"   _battle_start_tile: '{self._battle_start_tile}'")
-            logger.info(f"   current_tile_behavior (in battle): '{player_data.get('current_tile_behavior', 'N/A')}'")
-            logger.info(f"   has_pokedex: {has_pokedex}")
-            logger.info(f"   All milestones completed: {milestones_completed}")
-            logger.info(f"   Post-rescue milestones we check: {post_rescue_milestones}")
-            logger.info(f"   Matching post-rescue milestones: {matching_milestones}")
-            logger.info(f"   has_post_rescue_milestone: {has_post_rescue_milestone}")
-            logger.info(f"   Is Birch rescue battle: {self._is_birch_rescue_battle}")
-            logger.info(f"=" * 80)
-            print(f"🥊 [BATTLE START DEBUG] has_pokedex: {has_pokedex}")
-            print(f"🥊 [BATTLE START DEBUG] Milestones: {milestones_completed}")
-            print(f"🥊 [BATTLE START DEBUG] Matching: {matching_milestones}")
-            print(f"🥊 [BATTLE START DEBUG] Is Birch rescue: {self._is_birch_rescue_battle}")
+            logger.debug(f"🥊 [BATTLE START] tile='{self._battle_start_tile}', pokedex={has_pokedex}, birch={self._is_birch_rescue_battle}, milestones={matching_milestones}")
+            print(f"🥊 [BATTLE START] tile='{self._battle_start_tile}' birch={self._is_birch_rescue_battle}")
             
             # Log if we have no tile info (shouldn't happen, but good to catch)
             if self._battle_start_tile == 'UNKNOWN':
@@ -479,8 +465,8 @@ class BattleBot:
         dialogue_text = on_screen_text.get('raw_dialogue', '') or on_screen_text.get('dialogue', '')
         
         # DEBUG: Always print what we got from perception
-        print(f"🔍 [BATTLE TYPE DEBUG] dialogue_text from perception: '{dialogue_text}'")
-        print(f"🔍 [BATTLE TYPE DEBUG] on_screen_text dict: {on_screen_text}")
+        logger.debug(f"[BATTLE TYPE] perception dialogue: '{dialogue_text[:60] if dialogue_text else 'EMPTY'}'")
+        logger.debug(f"[BATTLE TYPE] on_screen_text keys: {list(on_screen_text.keys())}")
         
         # Add to dialogue history (keep last 10 messages for Pokemon switch detection)
         # CRITICAL: Track ALL dialogue to detect when trainers switch Pokemon
@@ -505,7 +491,7 @@ class BattleBot:
         logger.info(f"   Current dialogue: '{dialogue_text[:50] if dialogue_text else '(empty)'}...'")
         logger.info(f"   Dialogue history: {self._dialogue_history}")
         logger.info(f"   Combined (lowercase): '{all_dialogue[:100]}...'")
-        print(f"🔍 [BATTLE TYPE DEBUG] all_dialogue: '{all_dialogue[:100]}'")
+        logger.debug(f"[BATTLE TYPE] all_dialogue: '{all_dialogue[:100]}'")
         
         # Trainer battle indicators (these OVERRIDE everything - terrain AND memory flags)
         trainer_keywords = [
@@ -524,8 +510,7 @@ class BattleBot:
         
         # CHECK WILD FIRST - most definitive indicator
         has_wild_evidence = any(keyword in all_dialogue for keyword in wild_keywords)
-        print(f"🔍 [BATTLE TYPE DEBUG] Checking wild keywords: {wild_keywords}")
-        print(f"🔍 [BATTLE TYPE DEBUG] has_wild_evidence: {has_wild_evidence}")
+        logger.debug(f"[BATTLE TYPE] wild_keywords={wild_keywords}, has_wild={has_wild_evidence}")
         
         if has_wild_evidence:
             self._current_battle_type = BattleType.WILD
@@ -542,7 +527,7 @@ class BattleBot:
             matching_keywords = [kw for kw in trainer_keywords if kw in all_dialogue]
             logger.info(f"✅ [BATTLE TYPE] Trainer keywords matched: {matching_keywords}")
             logger.info(f"   All dialogue: '{all_dialogue[:100]}...'")
-            print(f"🔍 [BATTLE TYPE DEBUG] Trainer keywords matched: {matching_keywords}")
+            logger.debug(f"[BATTLE TYPE] Trainer keywords matched: {matching_keywords}")
         
         if has_trainer_evidence:
             self._current_battle_type = BattleType.TRAINER
@@ -628,7 +613,7 @@ class BattleBot:
         
         # DEBUG: Log what we're checking
         logger.info(f"🔍 [MENU DETECT] VLM dialogue_text='{dialogue_text[:80] if dialogue_text else 'EMPTY'}...'")
-        print(f"🔍 [MENU DETECT] dialogue='{dialogue_text[:30] if dialogue_text else 'EMPTY'}'")
+        logger.debug(f"[MENU DETECT] dialogue='{dialogue_text[:50] if dialogue_text else 'EMPTY'}'")
         
         # Check for base battle menu prompt FIRST (most reliable)
         # Matches: "What will TREECKO do?" or "What will I do with TREECKO?" (VLM variations)
@@ -831,8 +816,7 @@ class BattleBot:
         We normalize all dialogue by replacing newlines with spaces before pattern matching.
         """
         logger.info(f"🔍 [SPECIES EXTRACT] Searching dialogue history ({len(self._dialogue_history)} entries)")
-        print(f"🔍 [SPECIES EXTRACT] Dialogue history: {[d[:40] for d in self._dialogue_history]}")
-        print(f"🔍 [SPECIES EXTRACT] Cached opponent: '{self._opponent_species_from_dialogue}'")
+        logger.debug(f"[SPECIES EXTRACT] history={[d[:30] for d in self._dialogue_history]}, cached='{self._opponent_species_from_dialogue}'")
         
         # CRITICAL: Check the most recent 3 dialogue entries FIRST for Pokemon switches
         # This ensures we detect when trainers send out new Pokemon (e.g., Zigzagoon → Shroomish)
@@ -856,12 +840,11 @@ class BattleBot:
                     
                     # Update cache with new Pokemon
                     if species_name != self._opponent_species_from_dialogue:
-                        logger.info(f"🔄 [SPECIES SWITCH] Opponent changed: '{self._opponent_species_from_dialogue}' → '{species_name}'")
-                        print(f"🔄 [SPECIES SWITCH] Opponent changed: '{self._opponent_species_from_dialogue}' → '{species_name}'")
+                        logger.info(f"🔄 [SPECIES SWITCH] '{self._opponent_species_from_dialogue}' → '{species_name}'")
+                        print(f"🔄 [SPECIES SWITCH] {self._opponent_species_from_dialogue} → {species_name}")
                     
                     self._opponent_species_from_dialogue = species_name
-                    logger.info(f"✅ [SPECIES] Current opponent: '{species_name}'")
-                    print(f"✅ [SPECIES] Found opponent: {species_name}")
+                    logger.debug(f"[SPECIES] Current opponent: '{species_name}'")
                     return species_name
                 except Exception as e:
                     logger.warning(f"⚠️ [SPECIES] Failed to parse 'sent out' dialogue: {e}")
@@ -894,8 +877,7 @@ class BattleBot:
                     # Take first word (species name)
                     species_name = species.split()[0] if species.split() else 'Unknown'
                     
-                    logger.info(f"✅ [SPECIES] Extracted: '{species_name}' from '{dialogue_entry}'")
-                    print(f"✅ [SPECIES] Found opponent: {species_name}")
+                    logger.info(f"✅ [SPECIES] Extracted: '{species_name}'")
                     
                     # Fix common VLM misspellings
                     species_name = self._fix_species_name(species_name)
@@ -921,8 +903,7 @@ class BattleBot:
                     # Take first word (species name)
                     species_name = species.split()[0] if species.split() else 'Unknown'
                     
-                    logger.info(f"✅ [SPECIES] Extracted (no 'out'): '{species_name}' from '{dialogue_entry}'")
-                    print(f"✅ [SPECIES] Found opponent: {species_name}")
+                    logger.info(f"✅ [SPECIES] Extracted (no 'out'): '{species_name}'")
                     
                     # Fix common VLM misspellings
                     species_name = self._fix_species_name(species_name)
@@ -943,8 +924,7 @@ class BattleBot:
                     parts = dialogue_normalized.lower().split('wild')[1].split('appeared')[0]
                     species_name = parts.strip(' !.').upper()
                     
-                    logger.info(f"✅ [SPECIES] Extracted wild: '{species_name}' from '{dialogue_entry}'")
-                    print(f"✅ [SPECIES] Found wild: {species_name}")
+                    logger.info(f"✅ [SPECIES] Extracted wild: '{species_name}'")
                     
                     # Fix common VLM misspellings
                     species_name = self._fix_species_name(species_name)
@@ -1024,23 +1004,19 @@ class BattleBot:
             mem_types = opponent_pokemon.get('types', [])
             if mem_types:
                 opp_types = mem_types
-                logger.info(f"🧠 [MEMORY READER] Opponent types from RAM: {opp_types}")
-                print(f"🧠 [MEMORY] Types: {opp_types}")
+                logger.debug(f"[MEMORY READER] Opponent types from RAM: {opp_types}")
         
         # PRIORITY 1: VLM visible_entities (visually confirmed, most current)
         opp_species = self._extract_species_from_visible_entities(visual_data, state_data)
         if opp_species != 'Unknown':
-            logger.info(f"👁️ [SPECIES] VLM identified opponent: '{opp_species}'")
-            print(f"👁️ [SPECIES] VLM: {opp_species}")
+            logger.info(f"👁️ [SPECIES] VLM: '{opp_species}'")
         
         # PRIORITY 2: Dialogue history ("sent out X", "Wild X appeared")
         if opp_species == 'Unknown':
-            logger.info("⚠️ [SPECIES] VLM didn't find opponent — checking dialogue")
-            print("⚠️ [SPECIES] Not in visible_entities — checking dialogue")
+            logger.debug("⚠️ [SPECIES] VLM didn't find opponent — checking dialogue")
             opp_species = self._extract_opponent_species_from_dialogue()
             if opp_species != 'Unknown':
-                logger.info(f"💬 [SPECIES] Dialogue identified opponent: '{opp_species}'")
-                print(f"💬 [SPECIES] Dialogue: {opp_species}")
+                logger.info(f"💬 [SPECIES] Dialogue: '{opp_species}'")
         
         # PRIORITY 3 (LAST RESORT): RAM opponent_pokemon.species
         # RAM is known to return wrong species (e.g. TAILLOW when battling POOCHYENA)
@@ -1054,12 +1030,10 @@ class BattleBot:
         
         # Update dialogue cache if we found a species from VLM that differs
         if opp_species != 'Unknown' and self._opponent_species_from_dialogue != opp_species:
-            logger.info(f"🔄 [SPECIES UPDATE] Updating cache: '{self._opponent_species_from_dialogue}' → '{opp_species}'")
-            print(f"🔄 [SPECIES UPDATE] {self._opponent_species_from_dialogue} → {opp_species}")
+            logger.info(f"🔄 [SPECIES UPDATE] cache: '{self._opponent_species_from_dialogue}' → '{opp_species}'")
             self._opponent_species_from_dialogue = opp_species
         
-        logger.info(f"🔍 [SPECIES] Final: '{opp_species}' types={opp_types}")
-        print(f"🔍 [SPECIES] Opponent = '{opp_species}' types={opp_types}")
+        logger.debug(f"[SPECIES] Final: '{opp_species}' types={opp_types}")
         return opp_species, opp_types
     
     # Grass-type move effectiveness by defender type
@@ -1088,8 +1062,7 @@ class BattleBot:
         if not normalized_types:
             return None
         
-        logger.info(f"🔍 [TYPE CHECK] Opponent types: {normalized_types}")
-        print(f"🔍 [TYPE CHECK] Opponent types: {normalized_types}")
+        logger.debug(f"[TYPE CHECK] Opponent types: {normalized_types}")
         
         has_super_effective = any(t in self.GRASS_SUPER_EFFECTIVE_TYPES for t in normalized_types)
         has_not_effective = any(t in self.GRASS_NOT_EFFECTIVE_TYPES for t in normalized_types)
@@ -1097,18 +1070,15 @@ class BattleBot:
         if has_super_effective:
             # At least one type is weak to Grass - use Absorb even if other type resists
             # (e.g., Water/Flying Wingull: Water weakness outweighs Flying resistance → neutral)
-            logger.info(f"🌿 [TYPE CHECK] Super effective! Types {normalized_types} include Grass weakness → ABSORB")
-            print(f"🌿 [TYPE CHECK] Super effective vs {normalized_types} → ABSORB")
+            logger.info(f"🌿 [TYPE CHECK] Super effective vs {normalized_types} → ABSORB")
             return True
         elif has_not_effective:
             # No type is weak but at least one resists - don't use Absorb
-            logger.info(f"🥊 [TYPE CHECK] Not effective! Types {normalized_types} resist Grass → POUND")
-            print(f"🥊 [TYPE CHECK] Resisted by {normalized_types} → POUND")
+            logger.info(f"🥊 [TYPE CHECK] Resisted by {normalized_types} → POUND")
             return False
         else:
             # Neutral matchup (e.g., Normal, Psychic, Fighting) - use Absorb for HP drain
-            logger.info(f"🌿 [TYPE CHECK] Neutral matchup vs {normalized_types} → ABSORB (HP drain)")
-            print(f"🌿 [TYPE CHECK] Neutral vs {normalized_types} → ABSORB (HP drain)")
+            logger.info(f"🌿 [TYPE CHECK] Neutral vs {normalized_types} → ABSORB (HP drain)")
             return True
     
     def _should_use_absorb(self, species: str, player_pokemon: Dict[str, Any] = None, opponent_types: list = None) -> bool:
@@ -1127,35 +1097,26 @@ class BattleBot:
         Returns:
             True if should use Absorb, False if should use Pound
         """
-        logger.info(f"=" * 60)
-        logger.info(f"🔍 [MOVE SELECT] _should_use_absorb() called with species='{species}'")
-        print(f"=" * 50)
-        print(f"🔍 [ANALYZING] Species = '{species}'")
+        logger.debug(f"[MOVE SELECT] _should_use_absorb(species='{species}')")
         
         # Check if player Pokemon has learned Absorb (level 6+)
         if player_pokemon:
             player_level = player_pokemon.get('level', 0)
-            logger.info(f"🔍 [LEVEL CHECK] Player Pokemon level: {player_level}")
-            print(f"🔍 [LEVEL CHECK] Player level: {player_level}")
+            logger.debug(f"[LEVEL CHECK] Player level: {player_level}")
             
             if player_level < 6:
                 logger.warning(f"⚠️ [MOVE SELECT] Player level {player_level} < 6 - Absorb not learned yet!")
-                print(f"⚠️ [MOVE SELECT] Level {player_level} < 6 → No Absorb yet → POUND")
-                logger.info(f"=" * 60)
-                print(f"=" * 50)
+                print(f"⚠️ [MOVE SELECT] Level {player_level} < 6 → POUND")
                 return False
             else:
-                logger.info(f"✅ [LEVEL CHECK] Level {player_level} >= 6 - Absorb available")
-                print(f"✅ [LEVEL CHECK] Level {player_level} - Absorb learned!")
+                logger.debug(f"[LEVEL CHECK] Level {player_level} >= 6 - Absorb available")
             
             # Check if Absorb has PP remaining
             # Absorb is typically move slot 2 for Treecko (Pound is slot 1)
             moves = player_pokemon.get('moves', [])
             move_pp = player_pokemon.get('move_pp', [])
             
-            logger.info(f"🔍 [PP CHECK] Moves: {moves}")
-            logger.info(f"🔍 [PP CHECK] Move PP: {move_pp}")
-            print(f"🔍 [PP CHECK] Moves: {moves}, PP: {move_pp}")
+            logger.debug(f"[PP CHECK] Moves: {moves}, PP: {move_pp}")
             
             # Find Absorb in move list
             absorb_index = -1
@@ -1166,29 +1127,21 @@ class BattleBot:
             
             if absorb_index >= 0 and absorb_index < len(move_pp):
                 absorb_pp = move_pp[absorb_index]
-                logger.info(f"🔍 [PP CHECK] Found ABSORB at index {absorb_index}, PP = {absorb_pp}")
-                print(f"🔍 [PP CHECK] ABSORB PP: {absorb_pp}")
+                logger.debug(f"[PP CHECK] ABSORB at index {absorb_index}, PP={absorb_pp}")
                 
                 if absorb_pp == 0:
                     logger.warning(f"⚠️ [MOVE SELECT] ABSORB has 0 PP - cannot use!")
                     print(f"⚠️ [MOVE SELECT] ABSORB depleted (0 PP) → POUND")
-                    logger.info(f"=" * 60)
-                    print(f"=" * 50)
                     return False
                 else:
-                    logger.info(f"✅ [PP CHECK] ABSORB has {absorb_pp} PP remaining")
-                    print(f"✅ [PP CHECK] ABSORB PP: {absorb_pp} (available!)")
+                    logger.debug(f"[PP CHECK] ABSORB has {absorb_pp} PP remaining")
             else:
                 logger.warning(f"⚠️ [PP CHECK] Could not find ABSORB in move list (index={absorb_index}, moves={moves})")
-                print(f"⚠️ [PP CHECK] ABSORB not found in moves - using POUND")
-                logger.info(f"=" * 60)
-                print(f"=" * 50)
+                print(f"⚠️ [PP CHECK] ABSORB not found → POUND")
                 return False
         else:
             logger.warning("⚠️ [LEVEL CHECK] No player_pokemon data - cannot verify Absorb availability")
-            print("⚠️ [LEVEL CHECK] No player data - assuming Absorb not available")
-            logger.info(f"=" * 60)
-            print(f"=" * 50)
+            print("⚠️ [LEVEL CHECK] No player data → POUND")
             return False
         
         if not species or species == 'Unknown':
@@ -1197,68 +1150,44 @@ class BattleBot:
                 type_decision = self._should_use_absorb_by_types(opponent_types)
                 if type_decision is not None:
                     logger.info(f"🔍 [MOVE SELECT] Species unknown but have types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
-                    print(f"🔍 [MOVE SELECT] Unknown species, but types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
-                    logger.info(f"=" * 60)
-                    print(f"=" * 50)
+                    print(f"🔍 [MOVE SELECT] Unknown species, types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
                     return type_decision
             # No species AND no types - default to ABSORB (HP drain benefit outweighs risk)
             logger.warning("⚠️ [MOVE SELECT] No opponent species or types - defaulting to ABSORB (HP drain)")
-            print(f"🌿 [MOVE SELECT] No info → ABSORB (HP drain is always useful)")
-            logger.info(f"=" * 60)
-            print(f"=" * 50)
+            print(f"🌿 [MOVE SELECT] No info → ABSORB (HP drain)")
             return True
         
         # Normalize species name (uppercase, strip whitespace)
         species_normalized = species.upper().strip()
-        logger.info(f"🔍 [MOVE SELECT] Normalized: '{species}' → '{species_normalized}'")
-        logger.info(f"🔍 [MOVE SELECT] Checking against type-effectiveness lists...")
-        print(f"🔍 [NORMALIZED] '{species}' → '{species_normalized}'")
+        logger.debug(f"[MOVE SELECT] Normalized: '{species}' → '{species_normalized}'")
         
         # Check if in "not effective" list (use Pound instead)
-        logger.info(f"🔍 [MOVE SELECT] Checking ABSORB_NOT_EFFECTIVE list: {self.ABSORB_NOT_EFFECTIVE}")
-        print(f"🔍 [CHECK 1] Is '{species_normalized}' in NOT_EFFECTIVE list?")
+        logger.debug(f"[MOVE SELECT] Checking NOT_EFFECTIVE list: {self.ABSORB_NOT_EFFECTIVE}")
         
         if species_normalized in self.ABSORB_NOT_EFFECTIVE:
-            logger.info(f"🟡 [MOVE SELECT] ✅ MATCH! {species_normalized} in ABSORB_NOT_EFFECTIVE list → Use POUND")
-            logger.info(f"   Reason: This Pokemon resists Grass-type moves")
-            print(f"🥊 [RESULT] YES! {species_normalized} resists Grass → POUND")
-            logger.info(f"=" * 60)
-            print(f"=" * 50)
+            logger.info(f"🥊 [MOVE SELECT] {species_normalized} resists Grass → POUND")
+            print(f"🥊 [MOVE SELECT] {species_normalized} resists Grass → POUND")
             return False
-        else:
-            logger.info(f"🔍 [MOVE SELECT] ❌ NOT in ABSORB_NOT_EFFECTIVE list")
-            print(f"🔍 [CHECK 1] NO - not in NOT_EFFECTIVE list")
         
         # Check if in "effective" list (use Absorb)
-        logger.info(f"🔍 [MOVE SELECT] Checking ABSORB_EFFECTIVE list: {self.ABSORB_EFFECTIVE}")
-        print(f"🔍 [CHECK 2] Is '{species_normalized}' in EFFECTIVE list?")
+        logger.debug(f"[MOVE SELECT] Checking EFFECTIVE list: {self.ABSORB_EFFECTIVE}")
         
         if species_normalized in self.ABSORB_EFFECTIVE:
-            logger.info(f"🟢 [MOVE SELECT] ✅ MATCH! {species_normalized} in ABSORB_EFFECTIVE list → Use ABSORB")
-            logger.info(f"   Reason: Absorb is effective against this Pokemon + HP drain")
-            print(f"🌿 [RESULT] YES! {species_normalized} weak to Grass → ABSORB (heal!)")
-            logger.info(f"=" * 60)
-            print(f"=" * 50)
+            logger.info(f"🌿 [MOVE SELECT] {species_normalized} weak to Grass → ABSORB")
+            print(f"🌿 [MOVE SELECT] {species_normalized} weak to Grass → ABSORB")
             return True
-        else:
-            logger.info(f"🔍 [MOVE SELECT] ❌ NOT in ABSORB_EFFECTIVE list")
-            print(f"🔍 [CHECK 2] NO - not in EFFECTIVE list")
         
         # Unknown Pokemon - try type-based decision first, then default to Absorb
         logger.warning(f"⚠️ [MOVE SELECT] Unknown Pokemon '{species_normalized}' - not in either list")
         if opponent_types:
             type_decision = self._should_use_absorb_by_types(opponent_types)
             if type_decision is not None:
-                logger.info(f"🔍 [MOVE SELECT] '{species_normalized}' not in lists, but types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
+                logger.info(f"🔍 [MOVE SELECT] '{species_normalized}' types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
                 print(f"🔍 [MOVE SELECT] '{species_normalized}' types {opponent_types} → {'ABSORB' if type_decision else 'POUND'}")
-                logger.info(f"=" * 60)
-                print(f"=" * 50)
                 return type_decision
-        logger.warning(f"   ABSORB_NOT_EFFECTIVE ({len(self.ABSORB_NOT_EFFECTIVE)} species): {self.ABSORB_NOT_EFFECTIVE}")
-        logger.warning(f"   ABSORB_EFFECTIVE ({len(self.ABSORB_EFFECTIVE)} species): {self.ABSORB_EFFECTIVE}")
-        print(f"🌿 [RESULT] Unknown Pokemon '{species_normalized}' → ABSORB (default: HP drain!)")
-        logger.info(f"=" * 60)
-        print(f"=" * 50)
+        logger.debug(f"ABSORB_NOT_EFFECTIVE: {self.ABSORB_NOT_EFFECTIVE}")
+        logger.debug(f"ABSORB_EFFECTIVE: {self.ABSORB_EFFECTIVE}")
+        print(f"🌿 [MOVE SELECT] Unknown '{species_normalized}' → ABSORB (default)")
         return True  # Default to Absorb for HP recovery
     
     def get_action(self, state_data: Dict[str, Any]) -> Optional[str]:
@@ -1314,28 +1243,26 @@ class BattleBot:
                             # Look for opponent-side Pokemon
                             if entity_type == 'pokemon' and ('opponent' in position or 'foe' in position):
                                 detected_opponent = entity_name
-                                logger.info(f"🔍 [EARLY DETECT] Found opponent Pokemon in visible_entities: {entity_name}")
-                                print(f"🔍 [EARLY DETECT] Opponent: {entity_name}")
+                                logger.debug(f"[EARLY DETECT] Opponent entity: {entity_name}")
                                 break
                             elif entity_type == 'pokemon' and entity_name and entity_name not in {'TREECKO', 'TORCHIC', 'MUDKIP'}:
                                 # No position field, but it's a Pokemon that's not ours
                                 detected_opponent = entity_name
-                                logger.info(f"🔍 [EARLY DETECT] Found non-player Pokemon: {entity_name}")
-                                print(f"🔍 [EARLY DETECT] Opponent: {entity_name}")
+                                logger.debug(f"[EARLY DETECT] Non-player entity: {entity_name}")
                                 break
                         elif isinstance(entity, str):
                             # Simple string entity
                             entity_upper = entity.upper().strip()
                             if entity_upper and entity_upper not in {'TREECKO', 'TORCHIC', 'MUDKIP', 'PLAYER', 'TRAINER'}:
                                 detected_opponent = entity_upper
-                                logger.info(f"🔍 [EARLY DETECT] Found Pokemon string: {entity_upper}")
-                                print(f"🔍 [EARLY DETECT] Opponent: {entity_upper}")
+                                logger.debug(f"[EARLY DETECT] String entity: {entity_upper}")
                                 break
                     
                     # Update opponent tracking if we found one
+                    if detected_opponent:
+                        detected_opponent = self._fix_species_name(detected_opponent)
                     if detected_opponent and detected_opponent != self._current_opponent:
                         logger.info(f"🆕 [OPPONENT UPDATE] {self._current_opponent or 'None'} → {detected_opponent}")
-                        print(f"🆕 [OPPONENT] Detected: {detected_opponent}")
                         self._current_opponent = detected_opponent
                         # Also update dialogue cache to match
                         self._opponent_species_from_dialogue = detected_opponent
@@ -1356,7 +1283,7 @@ class BattleBot:
             # Never lock on WILD - allow WILD → TRAINER upgrade at any time
             # (Reason: WILD is default/fallback, TRAINER requires explicit evidence)
             if not self._battle_type_locked:
-                logger.info("🔍 [BATTLE BOT] Battle type not locked yet - re-checking...")
+                logger.debug("[BATTLE BOT] Battle type not locked - re-checking...")
                 latest_battle_type = self._detect_battle_type(state_data)
                 
                 # Always update the current type (unless locked)
@@ -1586,7 +1513,7 @@ class BattleBot:
                     logger.info(f"📜 [DIALOGUE HISTORY] {len(self._dialogue_history)} entries:")
                     for i, d in enumerate(self._dialogue_history):
                         logger.info(f"   [{i}] {d[:80]}")
-                    print(f"📜 [DIALOGUE] Last 3: {[d[:30] for d in self._dialogue_history[-3:]]}")
+                    logger.debug(f"[DIALOGUE] Last 3: {[d[:30] for d in self._dialogue_history[-3:]]}")
                     
                     # Check if opponent changed (trainer switched Pokemon)
                     if self._current_opponent != opp_species:
@@ -1599,11 +1526,10 @@ class BattleBot:
                     
                     # Type-effectiveness based move selection
                     logger.info(f"🎯 [MOVE DECISION] Determining move for opponent: '{opp_species}' types={opp_types_from_memory}")
-                    print(f"🎯 [DECIDING] Should we use Absorb vs '{opp_species}' (types={opp_types_from_memory})?")
+                    logger.debug(f"[DECIDING] Absorb vs '{opp_species}' types={opp_types_from_memory}?")
                     
                     use_absorb = self._should_use_absorb(opp_species, player_pokemon, opp_types_from_memory)
-                    logger.info(f"🎯 [MOVE DECISION] _should_use_absorb('{opp_species}') = {use_absorb}")
-                    print(f"🎯 [DECISION] Use Absorb? {use_absorb}")
+                    logger.debug(f"[MOVE DECISION] _should_use_absorb('{opp_species}') = {use_absorb}")
                     
                     if use_absorb:
                         logger.info(f"🌿 [BATTLE BOT] Using ABSORB vs {opp_species} (effective + HP drain)")

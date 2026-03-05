@@ -73,9 +73,7 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
         visual_dialogue_active: VLM's visual detection of dialogue box (85.7% accurate, no time cost)
         objective_manager: ObjectiveManager instance (passed directly from Agent)
     """
-    print("=" * 80)
-    print("🎯 [ACTION_STEP] CALLED - Starting action decision process")
-    print("=" * 80)
+    logger.debug("[ACTION_STEP] Called")
     
     # Decrement TTLs for dynamically blocked tiles
     stuck_handler.decrement_blocked_tile_ttls()
@@ -385,8 +383,7 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
             from agent.planning import planning_step
             obj_manager = getattr(planning_step, 'objective_manager', None)
         
-        logger.info(f"🔍 [DIRECTIVE DEBUG] objective_manager resolved: {obj_manager is not None}")
-        print(f"🔍 [DIRECTIVE DEBUG] objective_manager resolved: {obj_manager is not None}")
+        logger.debug(f"[DIRECTIVE] objective_manager resolved: {obj_manager is not None}")
         
         if obj_manager is not None:
             
@@ -400,13 +397,7 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
             # Add visual_dialogue_active to state_data so objective_manager can access it
             state_data['visual_dialogue_active'] = visual_dialogue_active
             
-            logger.info(f"🔍 [DIRECTIVE DEBUG] Before get_next_action_directive:")
-            logger.info(f"  - Location: {player_loc}")
-            logger.info(f"  - Money: {money}")
-            logger.info(f"  - In battle: {in_battle}")
-            logger.info(f"  - Screen context: {screen_context}")
-            logger.info(f"  - Visual dialogue active: {visual_dialogue_active}")
-            print(f"🔍 [DIRECTIVE DEBUG] Location: {player_loc}, Money: {money}, In battle: {in_battle}, Screen: {screen_context}, Dialogue: {visual_dialogue_active}")
+            logger.debug(f"[DIRECTIVE] loc={player_loc} money={money} battle={in_battle} screen={screen_context} dialogue={visual_dialogue_active}")
             
             directive = obj_manager.get_next_action_directive(state_data)
             
@@ -415,8 +406,7 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
                 from agent.objective_manager import Directive
                 directive = Directive.from_dict(directive)
             
-            logger.info(f"🔍 [DIRECTIVE DEBUG] Directive returned: {directive}")
-            print(f"🔍 [DIRECTIVE DEBUG] Directive returned: {directive}")
+            logger.debug(f"[DIRECTIVE] returned: {directive}")
             
             # PRIORITY CHECK: If we detected a warp jump, press B to settle position first
             # This prevents navigation from executing before the game position stabilizes

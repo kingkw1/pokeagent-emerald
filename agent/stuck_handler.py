@@ -54,12 +54,12 @@ def decrement_blocked_tile_ttls():
     """Decrement TTLs for dynamically blocked tiles, remove expired ones."""
     expired_tiles = [k for k, v in _dynamically_blocked_tiles.items() if v <= 0]
     for k in expired_tiles:
-        print(f"🔓 [DYNAMIC BLOCK] Tile {k[:2]} on {k[2]} unblocked (TTL expired)")
+        logger.info(f"[DYNAMIC BLOCK] Tile {k[:2]} on {k[2]} unblocked (TTL expired)")
         del _dynamically_blocked_tiles[k]
     for k in _dynamically_blocked_tiles:
         _dynamically_blocked_tiles[k] -= 1
     if _dynamically_blocked_tiles:
-        print(f"🚫 [DYNAMIC BLOCK] Currently blocked tiles: {[(k[:2], v) for k, v in _dynamically_blocked_tiles.items()]}")
+        logger.debug(f"[DYNAMIC BLOCK] Currently blocked tiles: {[(k[:2], v) for k, v in _dynamically_blocked_tiles.items()]}")
 
 
 def update_position_tracking(current_x, current_y, location):
@@ -166,15 +166,13 @@ def check_stuck(state_data, recent_actions, visual_dialogue_active,
             last_action_was_direction = last_action in ['UP', 'DOWN', 'LEFT', 'RIGHT']
 
         if _stuck_counter > 0:
-            print(f"🔄 [STUCK DEBUG] visual_dialogue={visual_dialogue_active}, in_battle={in_battle}, current_pos={current_pos}")
-            print(f"🔄 [STUCK DEBUG] _last_position={_last_position}, last_action_was_direction={last_action_was_direction}")
-            print(f"🔄 [STUCK DEBUG] recent_actions[-1]={recent_actions[-1] if recent_actions else 'None'}")
-            print(f"🔄 [STUCK DEBUG] _stuck_counter={_stuck_counter}")
+            logger.debug(f"[STUCK DEBUG] visual_dialogue={visual_dialogue_active}, battle={in_battle}, pos={current_pos}")
+            logger.debug(f"[STUCK DEBUG] last_pos={_last_position}, last_dir={last_action_was_direction}, counter={_stuck_counter}")
 
         # Check if we're NOT in dialogue and NOT in battle
         if not visual_dialogue_active and not in_battle and current_pos is not None:
             if _stuck_counter > 0:
-                print(f"🔄 [STUCK DEBUG] Conditions met: not in dialogue, not in battle, has position")
+                logger.debug(f"[STUCK DEBUG] Conditions met: not in dialogue, not in battle, has position")
 
             if _last_position == current_pos and last_action_was_direction:
                 # We tried to move but didn't - increment stuck counter
@@ -196,21 +194,20 @@ def check_stuck(state_data, recent_actions, visual_dialogue_active,
 
                         if blocked_key not in _dynamically_blocked_tiles:
                             _dynamically_blocked_tiles[blocked_key] = 200
-                            print(f"🚫 [DYNAMIC BLOCK] Marked tile ({blocked_x}, {blocked_y}) on {location} as blocked (NPC/obstacle)")
-                            print(f"   Agent at ({current_x}, {current_y}), tried {stuck_dir}")
-                            logger.info(f"🚫 [DYNAMIC BLOCK] Blocked ({blocked_x}, {blocked_y}) on {location} - stuck {_stuck_counter}x going {stuck_dir}")
+                            print(f"🚫 [DYNAMIC BLOCK] Blocked ({blocked_x}, {blocked_y}) on {location} — stuck {_stuck_counter}x going {stuck_dir}")
+                            logger.info(f"[DYNAMIC BLOCK] Blocked ({blocked_x}, {blocked_y}) on {location} - stuck {_stuck_counter}x going {stuck_dir}")
                             _stuck_counter = 0
                             _last_stuck_direction = None
                             # DON'T press A - fall through to let pathfinding re-route
                         else:
-                            print(f"🔄 [STUCK DETECTION] Tile already blocked, trying A for hidden dialogue...")
+                            logger.debug(f"[STUCK DETECTION] Tile already blocked, trying A for hidden dialogue")
                             _stuck_counter = 0
                             _last_stuck_direction = None
                             logger.info(f"🔄 [STUCK RECOVERY] Tile already blocked, pressing A for hidden dialogue")
                             _last_position = current_pos
                             return ['A']
                     else:
-                        print(f"🔄 [STUCK DETECTION] Can't determine blocked tile, pressing A...")
+                        logger.debug("[STUCK DETECTION] Can't determine blocked tile, pressing A")
                         _stuck_counter = 0
                         _last_stuck_direction = None
                         _last_position = current_pos
@@ -236,16 +233,15 @@ def check_stuck(state_data, recent_actions, visual_dialogue_active,
 
                     if blocked_key not in _dynamically_blocked_tiles:
                         _dynamically_blocked_tiles[blocked_key] = 200
-                        print(f"🚫 [DYNAMIC BLOCK] NPC at ({blocked_x}, {blocked_y}) on {location} — blocking tile")
-                        print(f"   Agent at ({current_x}, {current_y}), walked {_last_stuck_direction} into NPC dialogue")
-                        logger.info(f"🚫 [DYNAMIC BLOCK] NPC dialogue block ({blocked_x}, {blocked_y}) on {location} - walked {_last_stuck_direction}")
+                        print(f"🚫 [DYNAMIC BLOCK] NPC at ({blocked_x}, {blocked_y}) on {location} — walked {_last_stuck_direction}")
+                        logger.info(f"[DYNAMIC BLOCK] NPC dialogue block ({blocked_x}, {blocked_y}) on {location} - walked {_last_stuck_direction}")
                     else:
-                        print(f"🔄 [STUCK DETECTION] NPC tile ({blocked_x}, {blocked_y}) already blocked, continuing dialogue...")
+                        logger.debug(f"[STUCK DETECTION] NPC tile ({blocked_x}, {blocked_y}) already blocked, continuing dialogue")
             elif _stuck_counter > 0 and (visual_dialogue_active or in_battle):
-                print(f"🔄 [STUCK DETECTION] In dialogue/battle (not NPC stuck) - resetting stuck counter")
+                logger.debug(f"[STUCK DETECTION] In dialogue/battle - resetting stuck counter")
                 _stuck_counter = 0
                 _last_stuck_direction = None
-            print(f"🔄 [STUCK DEBUG] Conditions NOT met: dialogue={visual_dialogue_active}, battle={in_battle}, pos={current_pos}")
+            logger.debug(f"[STUCK DEBUG] dialogue={visual_dialogue_active}, battle={in_battle}, pos={current_pos}")
 
         # Update last position for next iteration
         _last_position = current_pos

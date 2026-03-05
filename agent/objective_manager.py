@@ -544,8 +544,7 @@ class ObjectiveManager:
         was_in_battle = self._previous_state.get('in_battle', False)
         
         # DEBUG: Log every state check
-        logger.info(f"🔍 [STATE TRACKING] in_battle={in_battle}, was_in_battle={was_in_battle}")
-        print(f"🔍 [STATE TRACKING] in_battle={in_battle}, was_in_battle={was_in_battle}")
+        logger.debug(f"[STATE TRACKING] in_battle={in_battle}, was_in_battle={was_in_battle}")
         
         # Detect rival battle completion: was in battle at rival position → now not in battle
         if was_in_battle and not in_battle:
@@ -685,8 +684,7 @@ class ObjectiveManager:
                 'milestone': 'OLDALE_TOWN'  # Expected milestone after completion
             }
         """
-        logger.info(f"🔍 [OBJECTIVE_MANAGER DEBUG] get_next_action_directive() CALLED")
-        print(f"🔍 [OBJECTIVE_MANAGER] get_next_action_directive() CALLED")
+        logger.debug("[OBJECTIVE_MANAGER] get_next_action_directive() called")
         
         # =====================================================================
         # PRIORITY 0: EXECUTE RECOVERY TASKS FROM SLOW BRAIN (RAG + LLM)
@@ -977,14 +975,13 @@ class ObjectiveManager:
         # =====================================================================
         
         # DEBUG: Always log this check
-        logger.info(f"🔍 [POKECENTER DEBUG] graph_location='{graph_location}', current_location='{current_location}'")
-        print(f"🔍 [POKECENTER DEBUG] graph_location='{graph_location}', current_location='{current_location}'")
+        logger.debug(f"[POKECENTER] graph_location='{graph_location}', current_location='{current_location}'")
         
         # CRITICAL: Check both outside Pokemon Center (RUSTBORO_CITY) AND inside (RUSTBORO_CITY_POKEMON_CENTER_1F)
         in_rustboro_city = graph_location == 'RUSTBORO_CITY'
         in_pokecenter = graph_location == 'RUSTBORO_CITY_POKEMON_CENTER_1F'
         
-        print(f"🔍 [POKECENTER DEBUG] in_rustboro_city={in_rustboro_city}, in_pokecenter={in_pokecenter}")
+        logger.debug(f"[POKECENTER] in_rustboro_city={in_rustboro_city}, in_pokecenter={in_pokecenter}")
         
         if in_rustboro_city or in_pokecenter:
             rustboro_complete = is_milestone_complete('RUSTBORO_CITY')
@@ -1016,17 +1013,9 @@ class ObjectiveManager:
                 needs_healing = False
                 healing_reasons = []
                 
-                # DEBUG: Show where we got the party data from
-                print(f"\n🔍 [POKECENTER] Fetching party from state_data['player']['party']")
-                print(f"🔍 [POKECENTER] Party length: {len(party) if party else 0}")
-                if party and len(party) > 0:
-                    print(f"🔍 [POKECENTER] First Pokemon: {party[0].get('species_name', 'UNKNOWN') if isinstance(party[0], dict) else party[0]}")
+                logger.debug(f"[POKECENTER] Party length: {len(party) if party else 0}")
                 
                 if party:
-                    print(f"\n{'=' * 60}")
-                    print(f"🔍 [POKEMON HP/PP CHECK] Checking {len(party)} Pokemon")
-                    print(f"{'=' * 60}")
-                    
                     for i, pokemon in enumerate(party):
                         # Pokemon is a dictionary, not an object
                         species = pokemon.get('species_name', 'UNKNOWN')
@@ -1039,46 +1028,27 @@ class ObjectiveManager:
                         moves = pokemon.get('moves', [])  # Move names
                         
                         # DEBUG: Show raw data
-                        logger.info(f"🔍 [POKEMON {i+1}] species={species}, hp={current_hp}/{max_hp}, moves={moves}, pp={move_pp}")
-                        
-                        print(f"\n  Pokemon #{i+1}: {species}")
-                        print(f"    HP: {current_hp}/{max_hp} ({hp_percent:.1f}%)")
-                        print(f"    Moves: {moves}")
-                        print(f"    Move PP: {move_pp}")
+                        logger.debug(f"[POKEMON {i+1}] {species} HP={current_hp}/{max_hp}, moves={moves}, pp={move_pp}")
                         
                         # Check HP
                         if current_hp < max_hp:
                             needs_healing = True
                             reason = f"{species} HP: {current_hp}/{max_hp} ({hp_percent:.1f}%)"
                             healing_reasons.append(reason)
-                            print(f"    ⚠️ HP NOT FULL - needs healing!")
-                        else:
-                            print(f"    ✅ HP at 100%")
                         
                         # Check PP for all moves
                         # Note: We don't have max PP in the data, so we can't check PP percentage
                         # We'll assume any move with 0 PP needs healing
-                        print(f"    Move PP Status:")
                         for move_idx, (move_name, current_pp) in enumerate(zip(moves, move_pp)):
                             if move_name and move_name != 'NONE':
                                 if current_pp == 0:
                                     needs_healing = True
                                     reason = f"{species} {move_name}: PP depleted (0 PP)"
                                     healing_reasons.append(reason)
-                                    print(f"      {move_name}: {current_pp} PP ⚠️ DEPLETED!")
-                                else:
-                                    print(f"      {move_name}: {current_pp} PP ✅")
                     
-                    print(f"{'=' * 60}\n")
-                
                 logger.info(f"🏥 [POKECENTER] needs_healing={needs_healing}, reasons: {healing_reasons}")
-                print(f"🏥 [POKECENTER] Healing needed: {needs_healing}")
-                if healing_reasons:
-                    print(f"🏥 [POKECENTER] Reasons:")
-                    for reason in healing_reasons:
-                        print(f"  - {reason}")
-                else:
-                    print(f"✅ [POKECENTER] All Pokemon at full HP with moves available!")
+                if needs_healing:
+                    print(f"🏥 [POKECENTER] Healing needed: {healing_reasons}")
                 
                 # CRITICAL: Exit Pokemon Center after healing is complete
                 # Healing complete + inside Pokemon Center = time to leave
@@ -1603,16 +1573,16 @@ class ObjectiveManager:
         final_description = description
         self._last_directive_source = "milestone"  # Default
         
-        print(f"🔮 [NAV DEBUG] Before RAG query: milestone final_target={final_target}, final_coords={final_coords}")
+        logger.debug(f"[NAV] Before RAG: milestone_target={final_target}")
         rag_result = self._query_rag_target(state_data)
-        print(f"🔮 [NAV DEBUG] _query_rag_target returned: {rag_result}")
+        logger.debug(f"[NAV] RAG returned: {rag_result}")
         if rag_result and rag_result.get("target_location"):
             rag_loc = rag_result["target_location"]
-            print(f"🔮 [NAV DEBUG] RAG resolved location: {rag_loc}, milestone target: {target_location}, match={rag_loc == target_location}")
+            logger.debug(f"[NAV] RAG={rag_loc}, milestone={target_location}, match={rag_loc == target_location}")
             # Only override if RAG target differs from milestone target
             # (if they agree, milestone coords are usually more precise)
             if rag_loc != target_location:
-                print(f"🔮 [NAV DEBUG] *** RAG OVERRIDE *** {target_location} → {rag_loc}")
+                logger.debug(f"[NAV] RAG OVERRIDE: {target_location} → {rag_loc}")
                 final_target = rag_loc
                 final_coords = rag_result.get("target_coords")
                 final_description = rag_result.get("description", description)
@@ -1629,12 +1599,10 @@ class ObjectiveManager:
             else:
                 self._last_directive_source = "rag"  # RAG agreed
                 self._rag_override_count += 1
-                logger.info(f"🔮 [RAG PRIMARY] RAG agrees with milestone: {target_location}")
-                print(f"🔮 [NAV DEBUG] RAG agrees with milestone: {target_location}")
+                logger.info(f"🔮 [RAG] agrees with milestone: {target_location}")
         else:
             self._milestone_fallback_count += 1
             logger.info(f"🔮 [RAG FALLBACK] Using milestone target: {target_location}")
-            print(f"🔮 [NAV DEBUG] RAG returned nothing, falling back to milestone: {target_location}")
         
         # =====================================================================
         # LOOK-AHEAD: Plan through pass-through locations to final destination
@@ -1764,11 +1732,7 @@ class ObjectiveManager:
                 print(f"🔮 [RAG CACHE HIT] Reusing cached result for ({current_location}, {last_milestone})")
                 return self._rag_cache_result
 
-            print(f"🔮 [RAG DEBUG] Querying StrategicPlanner...")
-            print(f"🔮 [RAG DEBUG]   current_location = {current_location}")
-            print(f"🔮 [RAG DEBUG]   badge_count      = {badge_count}")
-            print(f"🔮 [RAG DEBUG]   pokemon_summary   = {pokemon_summary}")
-            print(f"🔮 [RAG DEBUG]   last_milestone    = {last_milestone}")
+            logger.debug(f"[RAG] Querying: loc={current_location}, badges={badge_count}, milestone={last_milestone}")
 
             rag_result = self.strategic_planner.get_next_directive(
                 current_location=current_location,
@@ -1778,12 +1742,11 @@ class ObjectiveManager:
                 state_data=state_data,
             )
 
-            print(f"🔮 [RAG DEBUG] Full rag_result = {rag_result}")
+            logger.debug(f"[RAG] Full result: {rag_result}")
 
             target_location = rag_result.get("target_location")
             if not target_location:
                 logger.info("🔮 [RAG] No target_location in RAG result — falling back to milestone")
-                print(f"🔮 [RAG DEBUG] No target_location in result — falling back to milestone")
                 return None
 
             # Build result with coords if available
@@ -1804,8 +1767,6 @@ class ObjectiveManager:
                 f"🔮 [RAG] target={target_location} "
                 f"({result['display_name']}), coords={result['target_coords']}"
             )
-            print(f"🔮 [RAG DEBUG] Returning: target={target_location}, "
-                  f"display={result['display_name']}, coords={result['target_coords']}")
 
             # ── Store in cache ──
             self._rag_cache_key = cache_key

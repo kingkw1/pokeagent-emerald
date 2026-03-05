@@ -154,43 +154,28 @@ class StrategicPlanner:
             last_milestone=last_milestone,
         )
 
-        # DEBUG: Show full RAG context and prompt
-        print(f"\n🧠 [STRATEGIC PLANNER DEBUG] ==========================================")
-        print(f"🧠 [SP DEBUG] Query location: {current_location} (display: {display_loc})")
-        print(f"🧠 [SP DEBUG] last_milestone: {last_milestone}")
-        print(f"🧠 [SP DEBUG] RAG context length: {len(context_text)} chars")
+        # DEBUG: Full RAG context and prompt (demoted to logger.debug)
+        logger.debug(f"[SP] Query: location={current_location} ({display_loc}), milestone={last_milestone}, context={len(context_text)} chars")
         if context_text:
-            # Show first 500 chars of context
-            preview = context_text[:500]
-            print(f"🧠 [SP DEBUG] RAG context preview:\n{preview}")
-            if len(context_text) > 500:
-                print(f"🧠 [SP DEBUG] ... ({len(context_text) - 500} more chars)")
-        else:
-            print(f"🧠 [SP DEBUG] RAG context: EMPTY")
-        print(f"🧠 [SP DEBUG] ==========================================\n")
+            logger.debug(f"[SP] Context preview: {context_text[:300]}")
 
         if self.verbose:
-            print("\n" + "=" * 60)
-            print(f"🗺️  [STRATEGIC PLANNER] Current: {display_loc}")
-            print(f"📚 [RAG] Context ({len(context_text)} chars):")
-            for line in (context_text or "").split("\n")[:10]:
-                print(f"   {line}")
-            if context_text and context_text.count("\n") > 10:
-                print(f"   ... ({context_text.count(chr(10)) - 10} more lines)")
-            print("=" * 60)
+            logger.debug(f"[SP VERBOSE] Current: {display_loc}, context: {len(context_text)} chars")
 
         # 3. LLM call
         full_prompt = f"{_SYSTEM_PROMPT}\n\n{prompt}"
         raw_response = self._call_llm(full_prompt)
-        print(f"🧠 [SP DEBUG] LLM raw response:\n{raw_response}")
+        logger.debug(f"[SP] LLM raw response: {raw_response}")
 
         # 4. Parse response
         plan = self._parse_response(raw_response)
-        print(f"🧠 [SP DEBUG] Parsed plan: {plan}")
+        logger.debug(f"[SP] Parsed plan: {plan}")
 
         # 5. Resolve location → LOCATION_GRAPH key + coords
         resolved = self._resolve_target(plan.get("target_location"))
-        print(f"🧠 [SP DEBUG] LLM said target_location='{plan.get('target_location')}' → resolved={resolved}")
+        target_key = resolved['key'] if resolved else None
+        print(f"🧠 [RAG] LLM target: '{plan.get('target_location')}' → {target_key}")
+        logger.debug(f"[SP] Resolved: {resolved}")
 
         result: Dict[str, Any] = {
             "target_location": resolved["key"] if resolved else None,
@@ -211,11 +196,7 @@ class StrategicPlanner:
                 result["goal_coords"] = coords
 
         if self.verbose:
-            print(f"🎯 [STRATEGIC PLANNER] Target: {result.get('target_location')} "
-                  f"({result.get('target_display_name')})")
-            if result.get("goal_coords"):
-                print(f"📍 [STRATEGIC PLANNER] Coords: {result['goal_coords']}")
-            print(f"📝 [STRATEGIC PLANNER] {result['description']}")
+            logger.debug(f"[SP VERBOSE] Target: {result.get('target_location')} ({result.get('target_display_name')}), coords={result.get('goal_coords')}")
 
         return result
 
@@ -278,11 +259,11 @@ class StrategicPlanner:
             f"Last completed milestone: {last_milestone}. "
             f"What should I do next? Where should I go?"
         )
-        print(f"🧠 [RAG RETRIEVAL DEBUG] Query: '{query}'")
+        logger.debug(f"[RAG] Query: '{query}'")
 
         # Over-fetch so we can discard low-quality results
         results = self.walkthrough_db.query(query, n_results=6)
-        print(f"🧠 [RAG RETRIEVAL DEBUG] Got {len(results) if results else 0} raw chunks")
+        logger.debug(f"[RAG] Got {len(results) if results else 0} raw chunks")
 
         if not results:
             return ""
@@ -294,15 +275,12 @@ class StrategicPlanner:
             loc_label = meta.get("location", "Unknown")
             dist = entry.get("distance")
             is_close = dist is not None and dist <= self._DISTANCE_THRESHOLD
-            status = "✅ KEPT" if is_close else "❌ DROPPED"
-            print(f"🧠 [RAG RETRIEVAL DEBUG] Chunk {i}: {status} "
-                  f"location='{loc_label}', part={meta.get('part', '?')}, "
-                  f"distance={dist}, "
-                  f"text_preview='{entry['text'][:80]}...'")
+            status = "KEPT" if is_close else "DROP"
+            logger.debug(f"[RAG] Chunk {i}: {status} loc='{loc_label}' dist={dist:.3f}")
             if is_close:
                 filtered.append(entry)
 
-        print(f"🧠 [RAG RETRIEVAL DEBUG] After filtering: {len(filtered)}/{len(results)} chunks kept (threshold={self._DISTANCE_THRESHOLD})")
+        logger.debug(f"[RAG] Kept {len(filtered)}/{len(results)} chunks (threshold={self._DISTANCE_THRESHOLD})")
 
         # Take at most 3 of the best results
         filtered = filtered[:3]

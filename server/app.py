@@ -432,7 +432,7 @@ def step_environment(actions_pressed):
                         should_update = True
                         env._last_player_coords = current_coords
                         env._last_map_info = current_map_info
-                        print(f"📍 Position change detected: {current_coords}, map: {current_map_info}")
+                        logger.debug(f"Position change: {current_coords}, map: {current_map_info}")
                         logger.debug(f"Map stitcher update triggered by position change: {current_coords}, map: {current_map_info}")
                     
                     # Always update on area transitions (already detected above)
@@ -444,17 +444,16 @@ def step_environment(actions_pressed):
                     # Update map stitcher directly when position changes
                     if should_update:
                         # @TODO should do location change warps here too
-                        print(f"🗺️ Triggering map stitcher update for position change")
+                        logger.debug("Triggering map stitcher update")
                         # Call map stitcher update directly without full map reading
                         tiles = env.memory_reader.read_map_around_player(radius=7)
                         if tiles:
-                            print(f"🗺️ Got {len(tiles)} tiles, updating map stitcher")
+                            logger.debug(f"Got {len(tiles)} tiles, updating map stitcher")
                             state = {"map": {}}  # Basic state for stitcher
                             env.memory_reader._update_map_stitcher(tiles, state)
-                            logger.debug("Map stitcher updated for position change")
-                            print(f"✅ Map stitcher update completed")
+                            logger.debug("Map stitcher updated")
                         else:
-                            print(f"❌ No tiles found for map stitcher update")
+                            logger.debug("No tiles found for map stitcher update")
                         
                 except Exception as e:
                     logger.error(f"Failed to update map stitcher during movement: {e}")
@@ -523,7 +522,7 @@ def game_loop(manual_mode=False):
                     current_action = None
                     release_frames_remaining = ACTION_RELEASE_DELAY
                     action_completed = True  # Mark action as completed
-                    print(f"✅ Action completed: step_count will increment")
+                    logger.debug("Action completed: step_count will increment")
             elif release_frames_remaining > 0:
                 # Release delay (no button pressed)
                 actions_pressed = []
@@ -537,7 +536,7 @@ def game_loop(manual_mode=False):
                 # Get current FPS for estimation
                 current_fps_for_calc = env.get_current_fps(fps) if env else fps
                 estimated_time = queue_len * (ACTION_HOLD_FRAMES + ACTION_RELEASE_DELAY) / current_fps_for_calc
-                print(f"🎮 Server processing action: {current_action}, Queue remaining: {queue_len} actions (~{estimated_time:.1f}s)")
+                logger.debug(f"Server processing action: {current_action}, queue={queue_len}")
             else:
                 # No action to process
                 actions_pressed = []
@@ -554,7 +553,7 @@ def game_loop(manual_mode=False):
         if action_completed:
             with step_lock:
                 step_count += 1
-                print(f"📈 Step count incremented to: {step_count}")
+                logger.debug(f"Step count: {step_count}")
         
         # Performance monitoring - log actual FPS every 5 seconds
         global last_fps_log, frame_count_since_log
@@ -710,10 +709,10 @@ async def take_action(request: ActionRequest):
         # Add all actions to the queue (handle both single actions and lists)
         if request.buttons:
             # Add ALL actions to the queue - let the game loop handle execution
-            print(f"📡 Server received actions: {request.buttons}")
-            print(f"📋 Action queue before extend: {action_queue}")
+            logger.debug(f"Server received actions: {request.buttons}")
+            logger.debug(f"Action queue before extend: {action_queue}")
             action_queue.extend(request.buttons)
-            print(f"📋 Action queue after extend: {action_queue}")
+            logger.debug(f"Action queue after extend: {action_queue}")
             
             # Track button presses for recent actions display
             current_time = time.time()
@@ -1034,7 +1033,7 @@ async def get_comprehensive_state():
                     print(f"❌ [SERVER A* BOUNDS] No bounds found for {current_location} (map_id={current_map_id:04X})")
                     logger.warning(f"⚠️ [SERVER A*] No matching area found for {current_location}")
                 else:
-                    print(f"✅ [SERVER A* BOUNDS] Final bounds for {current_location}: {bounds}")
+                    logger.debug(f"[SERVER A* BOUNDS] Final bounds for {current_location}: {bounds}")
                 
                 logger.info(f"🗺️ [SERVER A*] Sending grid with {len(grid_serializable)} tiles, bounds={bounds}")
                 
@@ -1087,14 +1086,10 @@ async def get_comprehensive_state():
                                 })
                             
                             state["portal_connections"] = map_id_connections
-                            print(f"🗺️ SERVER: Added portal connections to state: {map_id_connections}")
-                            print(f"🗺️ SERVER: State now has keys: {list(state.keys())}")
-                            logger.debug(f"Loaded portal connections for {len(map_id_connections) if map_id_connections else 0} maps from persistent storage")
+                            logger.debug(f"Loaded portal connections: {len(map_id_connections) if map_id_connections else 0} maps")
                         else:
-                            print(f"🗺️ SERVER: No warp connections found in map data")
                             logger.debug("No warp connections found in map stitcher data")
                 else:
-                    print(f"🗺️ SERVER: Cache file not found at {cache_file}")
                     logger.debug(f"Map stitcher cache file not found: {cache_file}")
             except Exception as e:
                 import traceback

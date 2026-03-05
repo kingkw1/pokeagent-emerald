@@ -145,15 +145,15 @@ class Agent:
         Returns:
             dict: Contains 'action' and optionally 'reasoning'
         """
-        print(f"🔍 [AGENT.STEP] simple_mode={self.simple_mode}")
+        logger.debug(f"[AGENT.STEP] simple_mode={self.simple_mode}")
         
         if self.simple_mode:
             # Simple mode - delegate to SimpleAgent
-            print(f"🔍 [AGENT.STEP] Delegating to SimpleAgent")
+            logger.debug("[AGENT.STEP] Delegating to SimpleAgent")
             return self.simple_agent.step(game_state)
         else:
             # Four-module processing
-            print(f"🔍 [AGENT.STEP] Using four-module processing")
+            logger.debug("[AGENT.STEP] Using four-module processing")
             try:
                 # Extract the frame and state data from game_state
                 frame = game_state.get('frame')
@@ -229,7 +229,7 @@ class Agent:
                     vlm_dialogue_text = visual_data.get('on_screen_text', {}).get('dialogue', '')
                     vlm_has_dialogue = bool(vlm_dialogue_text and vlm_dialogue_text.strip())
                     
-                    print(f"🔍 [DIALOGUE DETECTION] text_box_visible={text_box_visible}, screen_context='{screen_context}'")
+                    logger.debug(f"[DIALOGUE] text_box_visible={text_box_visible}, screen_context='{screen_context}'")
                     
                     # Primary: Trust VLM's text_box_visible flag
                     if text_box_visible is not None:
@@ -260,7 +260,7 @@ class Agent:
                     if visual_dialogue_active and not ocr_has_dialogue:
                         if agent_is_stuck:
                             # Agent can't move — VLM is probably right about dialogue
-                            print(f"🔍 [DIALOGUE DETECTION] VLM says dialogue, OCR disagrees, but agent is STUCK ({self._pos_unchanged_count} steps) — trusting VLM")
+                            logger.debug(f"[DIALOGUE] VLM+dialogue, OCR disagrees, agent STUCK ({self._pos_unchanged_count} steps) — trusting VLM")
                             # Reset hallucination counter since this looks real
                             if hasattr(self, '_vlm_dialogue_no_ocr_count'):
                                 self._vlm_dialogue_no_ocr_count = 0
@@ -270,10 +270,10 @@ class Agent:
                                 self._vlm_dialogue_no_ocr_count = 0
                             self._vlm_dialogue_no_ocr_count += 1
                             if self._vlm_dialogue_no_ocr_count >= 2:
-                                print(f"⚠️ [DIALOGUE DETECTION] VLM says dialogue but OCR found nothing for {self._vlm_dialogue_no_ocr_count} consecutive steps (agent NOT stuck) - likely hallucination, overriding to False")
+                                print(f"⚠️ [DIALOGUE] VLM hallucination ({self._vlm_dialogue_no_ocr_count}x, not stuck) — overriding to False")
                                 visual_dialogue_active = False
                             else:
-                                print(f"🔍 [DIALOGUE DETECTION] VLM says dialogue, OCR disagrees ({self._vlm_dialogue_no_ocr_count}/2 - not overriding yet)")
+                                logger.debug(f"[DIALOGUE] VLM/OCR disagree ({self._vlm_dialogue_no_ocr_count}/2)")
                         elif screen_context == 'overworld':
                             # VLM says overworld + text_box_visible + has text, but OCR found nothing
                             # and agent is NOT stuck — probably hallucination
@@ -281,10 +281,10 @@ class Agent:
                                 self._vlm_dialogue_no_ocr_count = 0
                             self._vlm_dialogue_no_ocr_count += 1
                             if self._vlm_dialogue_no_ocr_count >= 3:
-                                print(f"⚠️ [DIALOGUE DETECTION] VLM overworld + text_box_visible but OCR found nothing for {self._vlm_dialogue_no_ocr_count} steps (agent NOT stuck) - likely hallucination, overriding to False")
+                                print(f"⚠️ [DIALOGUE] VLM overworld hallucination ({self._vlm_dialogue_no_ocr_count}x) — overriding to False")
                                 visual_dialogue_active = False
                             else:
-                                print(f"🔍 [DIALOGUE DETECTION] VLM overworld + text_box_visible, OCR disagrees ({self._vlm_dialogue_no_ocr_count}/3)")
+                                logger.debug(f"[DIALOGUE] VLM overworld+textbox, OCR disagrees ({self._vlm_dialogue_no_ocr_count}/3)")
                         else:
                             # VLM has dialogue text and screen_context is 'dialogue' — probably real
                             if hasattr(self, '_vlm_dialogue_no_ocr_count'):
@@ -294,7 +294,7 @@ class Agent:
                         if hasattr(self, '_vlm_dialogue_no_ocr_count'):
                             self._vlm_dialogue_no_ocr_count = 0
                     
-                    print(f"🔍 [DIALOGUE DETECTION] Result: visual_dialogue_active={visual_dialogue_active}")
+                    logger.debug(f"[DIALOGUE] Result: visual_dialogue_active={visual_dialogue_active}")
                 
                 self.context['visual_dialogue_active'] = visual_dialogue_active
                 logger.info(f"[AGENT] Visual dialogue detection: {visual_dialogue_active}")
