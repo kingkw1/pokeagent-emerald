@@ -341,9 +341,219 @@ fall back to the next milestone in `MILESTONE_PROGRESSION`.
 -   **Bug fix:** Tests no longer pollute `llm_logs/shadow_comparison.jsonl`
     (all test classes redirect `_shadow_log_path` to a temp directory).
 
-**Phase 4.3c — RAG-only:** Remove the milestone list once agreement rate
-exceeds 95% for the first 27 milestones (Littleroot → Rustboro).
-`MILESTONE_PROGRESSION` moves to a test fixture for regression testing.
+**Phase 4.3c — RAG-only (revised criteria):** Remove the milestone list once
+behavioural evaluation confirms the RAG planner can guide the agent through the
+Littleroot → Rustboro corridor without regression. The original "≥95% agreement
+rate" metric has been **retired** — shadow comparison showed 0% agreement in live
+tests, but investigation revealed this was caused by stale milestone data in save
+states, not RAG errors. The RAG planner was actually producing **correct** targets.
+
+New success criteria for 4.3c:
+1. End-to-end run from `route102_hackathon.state` reaches Rustboro City (RAG-only navigation).
+2. No regression in route completion time vs. milestone-only runs.
+3. `MILESTONE_PROGRESSION` moves to `tests/fixtures/` for regression testing.
+
+Milestones are retained as a **silent fallback** (Phase 4.3b architecture) — they
+are never removed entirely, only demoted from primary to last-resort when RAG
+output fails to resolve.
+
+---
+
+## 📅 PHASE 4.4: Local NPC Navigation (Two-Phase Pathfinding)
+
+**Goal:** Enable the agent to navigate *to* specific NPCs based on walkthrough
+instructions (e.g., "Talk to May", "Battle the Rival") without hardcoded
+`npc_coords` in `MILESTONE_PROGRESSION`. Currently, NPC interactions require
+hand-tuned coordinates (e.g., `(10, 3)` for May on Route 103). This phase
+replaces those with a dynamic system that **finds NPCs at runtime**.
+
+**Status:** Not started. Prerequisite: Phase 4.3b (complete).
+
+### The Problem
+
+The directive system (`directive_nav.py`) already supports `npc_coords` and
+`should_interact` — but these coordinates are **statically defined** in
+milestones. When the walkthrough RAG says "Battle the rival on Route 103", the
+agent currently has no way to determine *where* the rival is standing.
+
+Special cases in `objective_manager.py` still hardcode NPC positions:
+```python
+# Line ~1250 in objective_manager.py
+target_coords = (9, 3)
+npc_coords = (10, 3)  # May's static position on Route 103
+```
+
+These hardcoded coordinates break if the NPC has moved (walking NPCs) or if the
+game spawns NPCs dynamically (story triggers, new maps).
+
+### Architecture: Three-Tier NPC Detection
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                 NPC Navigation Pipeline                       │
+│                                                              │
+│  Walkthrough RAG says: "Battle the rival on Route 103"       │
+│                    ↓                                         │
+│  ┌────────────────────────────────────┐                      │
+│  │ Tier 1: gObjectEvents (Memory)     │ ← Deterministic,    │
+│  │   Parse 16×68-byte struct array    │   zero latency,     │
+│  │   at 0x02037230. Returns all       │   sub-ms.           │
+│  │   active NPC map coords.           │                      │
+│  └──────────────┬─────────────────────┘                      │
+│                 ↓                                            │
+│  ┌────────────────────────────────────┐                      │
+│  │ Tier 2: VLM Semantic ID            │ ← Match walkthrough │
+│  │   Compare "the rival" against      │   text to NPC list. │
+│  │   visible_entities from VLM.       │   ~2s latency       │
+│  │   Maps NPC *name* → memory slot.   │   (batched w/       │
+│  │                                    │   perception).      │
+│  └──────────────┬─────────────────────┘                      │
+│                 ↓ (fallback only)                            │
+│  ┌────────────────────────────────────┐                      │
+│  │ Tier 3: VLM Bounding Box           │ ← For NPCs not in  │
+│  │   Ask VLM for pixel bbox of the    │   gObjectEvents     │
+│  │   target NPC sprite. Convert       │   (script-spawned,  │
+│  │   pixel → tile coordinates.        │   cutscene actors). │
+│  │   240×160 screen / 16px tile.      │   ~2s extra VLM.    │
+│  └────────────────────────────────────┘                      │
+│                    ↓                                         │
+│  Result: (npc_x, npc_y) → feed into directive_nav.py        │
+│          goal_coords + npc_coords + should_interact          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 4.4a — Fix `gObjectEvents` Parsing (Memory Reader)
+
+**Goal:** Produce a reliable, tested method that reads all 16 ObjectEvent slots
+from `0x02037230` and returns a clean list of active NPC map coordinates.
+
+**Current state of code:** `memory_reader.py` has **five separate methods** that
+attempt to read NPC positions from `gObjectEvents`:
+- `read_object_events()` (line ~3812) — orchestrator with 4 sub-strategies
+- `_read_runtime_object_events()` (line ~3860) — EWRAM probing
+- `_read_gsprites_npcs()` (line ~3960) — sprite → map coord conversion
+- `_read_legacy_gobject_events()` (line ~4043) — simple struct read
+- `_read_gobject_walking_positions()` (line ~4254) — currentCoords-based
+
+None of these are fully reliable. The struct offsets need validation against the
+pokeemerald decompilation source.
+
+**Implementation plan:**
+1. Write a standalone test (`tests/test_npc_detection.py`) that loads
+   `tests/save_states/rival_battle_save.state` into the emulator and asserts:
+   - Player (slot 0) is at `(5, 3)` on `ROUTE_103`
+   - At least one other active NPC exists within Manhattan distance ≤ 8
+   - That NPC has `graphics_id` consistent with May's overworld sprite
+2. Consolidate the five methods into one canonical `read_active_npcs()` method
+   with struct offsets validated against pokeemerald:
+   ```
+   ObjectEvent (68 bytes):
+     +0x00  flags (u32) — bit 0 = active
+     +0x01  objEventId (u8)
+     +0x02  localId (u8)
+     +0x03  graphicsId (u8)
+     +0x04  movementType (u8)
+     +0x05  trainerType (u8)
+     +0x10  currentCoords.x (s16)
+     +0x12  currentCoords.y (s16)
+     +0x14  previousCoords.x (s16)
+     +0x16  previousCoords.y (s16)
+   ```
+3. Deprecate the four legacy methods (keep as private, mark with `# DEPRECATED`).
+4. Add a `GRAPHICS_IDS` lookup for common NPCs (player, rival, gym leaders) —
+   start minimal (just what we need for the test case).
+
+**Verification:**
+- `tests/test_npc_detection.py` — load `rival_battle_save.state`, assert rival
+  NPC detected at approximately `(10, 3)` with correct `graphics_id`.
+- Run against 3+ save states to confirm no false positives.
+
+### 4.4b — VLM Semantic Identification Layer
+
+**Goal:** When the walkthrough says "Talk to May" or "Battle the rival", identify
+*which* of the detected NPCs matches that description.
+
+**Current state:** `perception.py` already extracts `visible_entities` from VLM
+output — a list of named entities with approximate screen positions. The
+strategic planner already returns `description` text that often names NPCs
+(e.g., "Go north and challenge your rival May").
+
+**Implementation plan:**
+1. Add a `target_npc` field to the directive returned by `strategic_planner.py`:
+   ```python
+   {"target_location": "ROUTE_103",
+    "description": "Battle rival May on Route 103",
+    "target_npc": "MAY",           # ← NEW
+    "priority_actions": ["battle"]}
+   ```
+2. In `objective_manager.py`, when a directive has `target_npc`:
+   a. Call `read_active_npcs()` to get all NPC positions from memory.
+   b. If only one NPC in range (excluding player) → use it directly.
+   c. If multiple NPCs → use `visible_entities` from VLM to match:
+      - Compare `target_npc` against entity names (fuzzy match).
+      - Cross-reference screen position with memory NPC positions.
+   d. Emit `npc_coords=(x, y)` and `should_interact=True` in the directive.
+3. Modify `_handle_goal_coords()` in `directive_nav.py` to accept dynamically
+   resolved `npc_coords` (no code change needed — it already does).
+4. Remove hardcoded `npc_coords` from `RIVAL_BATTLE_1` special case.
+
+**Verification:**
+- Load `rival_battle_save.state`, run agent for ≤ 20 steps.
+- Agent should: detect NPC → walk right toward May → press A to interact.
+- No hardcoded coordinates used in the directive chain.
+
+### 4.4c — VLM Bounding Box Fallback
+
+**Goal:** Handle NPCs that don't appear in `gObjectEvents` (script-spawned
+cutscene actors, NPCs that load after a map event fires).
+
+**Implementation plan:**
+1. Add an optional VLM prompt: "Draw a bounding box around the character
+   named {target_npc}". Response: `{"bbox": [x1, y1, x2, y2]}` in pixels.
+2. Convert pixel center to tile coordinates:
+   ```python
+   # GBA screen: 240×160 pixels, 15×10 visible tiles at 16px each
+   # Camera offset from player position in the center
+   tile_x = player_x + (pixel_center_x - 120) // 16
+   tile_y = player_y + (pixel_center_y - 80) // 16
+   ```
+3. Feed the resulting `(tile_x, tile_y)` into the standard `npc_coords` path.
+4. This is a **fallback only** — Tier 1 (memory) and Tier 2 (semantic ID) are
+   tried first. Tier 3 fires only when no NPC was found in `gObjectEvents`.
+
+**Verification:**
+- Unit test with a mock VLM returning a known bbox for a visible NPC.
+- End-to-end test on a save state where an NPC appears after a cutscene trigger.
+
+### Manual Testing Procedure
+
+**Canonical test save:** `tests/save_states/rival_battle_save.state`
+- **Map:** ROUTE_103
+- **Player:** Position (5, 3), facing right
+- **Party:** TREECKO Lv.7, HP 23/23
+- **Rival NPC (May):** ~5 tiles to the right, approximately at (10, 3)
+- **Expected behaviour:** Agent walks right → reaches May → presses A → battle starts
+
+**Steps to run manually:**
+```bash
+# Start the server with the test save state
+python run.py --load-state tests/save_states/rival_battle_save.state --agent-auto
+
+# Or for manual observation:
+python run.py --load-state tests/save_states/rival_battle_save.state --manual
+```
+
+**What to verify:**
+1. Console shows NPC detected via `read_active_npcs()` with coords near `(10, 3)`.
+2. Directive includes `npc_coords` resolved dynamically (not from milestone data).
+3. Agent navigates right along y=3 without wandering.
+4. Agent faces NPC and presses A within ≤ 15 steps.
+5. Battle transition fires (if working) — not a hard requirement for 4.4a alone.
+
+**Additional save states for regression:**
+- `enter_petalburg_city_save.state` — Multiple NPCs on screen, verify correct targeting.
+- `birch_lab_save.state` — Indoor NPC (Prof. Birch), tight space navigation.
+- `route102_save.state` — Trainers on Route 102, verify trainer NPC detection.
 
 ### 4.4 Location Name Resolver
 
@@ -413,7 +623,10 @@ def resolve_location(name: str) -> dict | None:
 8.  ~~Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)~~ ✅
 9.  ~~Phase 4.3a — shadow mode comparison (RAG vs milestones)~~ ✅
 10. ~~Phase 4.3b — RAG-primary with milestone fallback~~ ✅
-11. Next: Phase 4.3c — RAG-only (remove milestone list once ≥95% agreement)
+11. Next: Phase 4.3c — RAG-only (behavioural evaluation, not agreement rate)
+12. Phase 4.4a — Fix `gObjectEvents` parsing + `read_active_npcs()` + tests
+13. Phase 4.4b — VLM semantic NPC identification + `target_npc` in directives
+14. Phase 4.4c — VLM bounding box fallback for script-spawned NPCs
 
 ---
 
@@ -432,6 +645,7 @@ def resolve_location(name: str) -> dict | None:
 | `tests/test_spatial_memory.py`            | **Phase 3** | ✅ 14 tests      | Unit tests for spatial metadata     |
 | `tests/test_walkthrough_rag.py`           | **Phase 4** | ✅ 52 tests      | Unit tests for walkthrough RAG      |
 | `tests/test_shadow_mode.py`               | **Phase 4.3a+b** | ✅ 30 tests | Unit tests for shadow-mode + RAG-primary |
+| `tests/test_npc_detection.py`             | **Phase 4.4a** | ⬜ Planned    | NPC detection from `gObjectEvents` (rival_battle_save) |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |

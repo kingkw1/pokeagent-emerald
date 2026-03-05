@@ -62,9 +62,10 @@ Recovery tasks are consumed at the **top** of `get_next_action_directive()`, pre
    - **Heuristic Agent (Active):** A robust rule-based engine with type-effectiveness matrix, trainer vs. wild classification, behavioral stuck-detection (switches strategy after repeated failed run attempts), and memory-based HP/PP tracking with VLM fallback. This is the production combat controller.
    - **RL Agent (Integration In Progress):** A Proximal Policy Optimization (PPO) model trained via `sb3-contrib MaskablePPO` on curriculum battle scenarios. A trained prototype (`emerald_curriculum_v1`) exists; observation alignment and live-agent data bridging are the remaining integration steps. See [agent/combat/RL_BATTLE_BOT_PLAN.md](agent/combat/RL_BATTLE_BOT_PLAN.md).
 
-3. **Navigation System** — Two-tier pathfinding:
+3. **Navigation System** — Two-tier pathfinding with NPC-seeking capability:
    - **Global:** Server-side A\* over the explored world graph with grass avoidance, ledge handling, and portal detection. Batched movement execution (up to 15 steps).
    - **Local:** BFS fallback over a 15×15 visible tile grid.
+   - **NPC Targeting (Planned):** Dynamic NPC detection via `gObjectEvents` memory parsing + VLM semantic identification. Replaces hardcoded NPC coordinates in milestones with runtime-resolved positions.
    - See [docs/PATHFINDING_SUMMARY.md](docs/PATHFINDING_SUMMARY.md).
 
 4. **Objective Manager** — Milestone-driven progression through 40+ predefined milestones derived from official speedrun splits. Provides goal coordinates and interaction flags via a tactical directive system. See [docs/DIRECTIVE_SYSTEM.md](docs/DIRECTIVE_SYSTEM.md).
@@ -203,7 +204,13 @@ pokeagent-emerald/
 - [x] **Phase 2.5: Slow Brain Wiring:** Connected `RecoveryPlanner` output to execution. Recovery tasks now pre-empt milestone navigation in `get_next_action_directive()`. Wired oscillation detector → `signal_blocker()` for navigation failures. Stripped wasteful VLM call from `planning.py` (now fully programmatic). Passed `ObjectiveManager` directly to `action_step()` instead of via function attribute.
 - [ ] **Phase 3: The "Strangler Fig" Deprecation:** Phase out the hardcoded `OpenerBot` by transitioning its movement and battle logic to the dynamic A\* and RL systems.
 - [ ] **Phase 3.5: RL Combat Integration:** Complete observation alignment, bridge the live-agent RAM data to the training observation format, and transition the default combat backend from the Heuristic Agent to the trained RL neural network. Includes an automated **data-collection pipeline** using the Pygame client to harvest diverse battle states from manual human play, feeding them into the `stable-retro` PPO training curriculum. See [agent/combat/RL_BATTLE_BOT_PLAN.md](agent/combat/RL_BATTLE_BOT_PLAN.md).
-- [ ] **Phase 4: Proactive Strategic Planning (Walkthrough RAG):** Replace hardcoded `MILESTONE_PROGRESSION` with a dynamic, walkthrough-driven planner. Embed Bulbapedia walkthroughs into a dedicated ChromaDB collection (`strategy_guide`) and query it on location transitions to generate the next navigational `Directive`. The A\* pathfinding layer remains unchanged — only the *source* of destinations shifts from a static list to LLM-driven retrieval. Milestones serve as the fallback/validation layer during the transition.
+- [ ] **Phase 4: Proactive Strategic Planning (Walkthrough RAG):**
+  - [x] **4.1:** Knowledge base preparation — Bulbapedia walkthrough chunked & embedded into ChromaDB (`strategy_guide` collection).
+  - [x] **4.2:** Strategic planner — RAG-driven `get_next_directive()` queries walkthrough text & resolves location names to `LOCATION_GRAPH` keys.
+  - [x] **4.3a:** Shadow mode — RAG planner runs alongside milestones, logging comparison to `shadow_comparison.jsonl`.
+  - [x] **4.3b:** RAG-primary with milestone fallback — RAG drives navigation, milestones catch failures.
+  - [ ] **4.3c:** RAG-only — Remove milestone list once behavioural evaluation confirms end-to-end corridor completion. Milestones retained as silent last-resort fallback.
+  - [ ] **4.4: Local NPC Navigation (Three-Tier):** Enable the agent to navigate to specific NPCs without hardcoded coordinates. *(a)* Fix `gObjectEvents` struct parsing for reliable NPC positions from memory. *(b)* VLM semantic identification — match walkthrough NPC names against `visible_entities`. *(c)* VLM bounding-box fallback for script-spawned NPCs. See [agent/brain/PLAN.MD](agent/brain/PLAN.MD).
 - [ ] **Phase 5: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
 
 ## Documentation
