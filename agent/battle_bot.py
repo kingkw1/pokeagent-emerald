@@ -999,6 +999,69 @@ class BattleBot:
         logger.warning(f"   Known species: {sorted(all_known_species)}")
         return species_upper
     
+    def _identify_opponent(self, visual_data: dict, state_data: dict, battle_info: dict) -> tuple:
+        """
+        Single source of truth for identifying the current opponent species and types.
+        
+        Priority order (VLM/dialogue trusted over RAM):
+          1. VLM visible_entities — visually confirmed, reflects current screen
+          2. Dialogue history / _opponent_species_from_dialogue cache — "sent out X"
+          3. RAM opponent_pokemon.species — LAST RESORT, proven unreliable
+             (e.g. returns TAILLOW when opponent is actually POOCHYENA)
+        
+        Opponent types from RAM are always collected regardless of species source,
+        since they may still be useful for type-based fallback decisions.
+        
+        Returns:
+            (opp_species: str, opp_types: list)
+        """
+        opp_species = 'Unknown'
+        opp_types = []
+        
+        # Always collect types from RAM (they can be useful even if species is wrong)
+        opponent_pokemon = battle_info.get('opponent_pokemon')
+        if opponent_pokemon and isinstance(opponent_pokemon, dict):
+            mem_types = opponent_pokemon.get('types', [])
+            if mem_types:
+                opp_types = mem_types
+                logger.info(f"🧠 [MEMORY READER] Opponent types from RAM: {opp_types}")
+                print(f"🧠 [MEMORY] Types: {opp_types}")
+        
+        # PRIORITY 1: VLM visible_entities (visually confirmed, most current)
+        opp_species = self._extract_species_from_visible_entities(visual_data, state_data)
+        if opp_species != 'Unknown':
+            logger.info(f"👁️ [SPECIES] VLM identified opponent: '{opp_species}'")
+            print(f"👁️ [SPECIES] VLM: {opp_species}")
+        
+        # PRIORITY 2: Dialogue history ("sent out X", "Wild X appeared")
+        if opp_species == 'Unknown':
+            logger.info("⚠️ [SPECIES] VLM didn't find opponent — checking dialogue")
+            print("⚠️ [SPECIES] Not in visible_entities — checking dialogue")
+            opp_species = self._extract_opponent_species_from_dialogue()
+            if opp_species != 'Unknown':
+                logger.info(f"💬 [SPECIES] Dialogue identified opponent: '{opp_species}'")
+                print(f"💬 [SPECIES] Dialogue: {opp_species}")
+        
+        # PRIORITY 3 (LAST RESORT): RAM opponent_pokemon.species
+        # RAM is known to return wrong species (e.g. TAILLOW when battling POOCHYENA)
+        if opp_species == 'Unknown':
+            if opponent_pokemon and isinstance(opponent_pokemon, dict):
+                mem_species = opponent_pokemon.get('species', '')
+                if mem_species and mem_species != 'Unknown' and not mem_species.startswith('Species_'):
+                    opp_species = self._fix_species_name(mem_species.upper().strip())
+                    logger.warning(f"🧠 [MEMORY READER] Using RAM species as LAST RESORT: '{opp_species}' (raw: '{mem_species}')")
+                    print(f"🧠 [MEMORY] RAM fallback: {opp_species} (⚠️ may be wrong)")
+        
+        # Update dialogue cache if we found a species from VLM that differs
+        if opp_species != 'Unknown' and self._opponent_species_from_dialogue != opp_species:
+            logger.info(f"🔄 [SPECIES UPDATE] Updating cache: '{self._opponent_species_from_dialogue}' → '{opp_species}'")
+            print(f"🔄 [SPECIES UPDATE] {self._opponent_species_from_dialogue} → {opp_species}")
+            self._opponent_species_from_dialogue = opp_species
+        
+        logger.info(f"🔍 [SPECIES] Final: '{opp_species}' types={opp_types}")
+        print(f"🔍 [SPECIES] Opponent = '{opp_species}' types={opp_types}")
+        return opp_species, opp_types
+    
     # Grass-type move effectiveness by defender type
     # Super effective (2x damage)
     GRASS_SUPER_EFFECTIVE_TYPES = {'WATER', 'GROUND', 'ROCK'}
@@ -1513,39 +1576,8 @@ class BattleBot:
                     # Track opponent types from memory reader (used for type-based decisions)
                     opp_types_from_memory = []
                     
-                    # PRIORITY 0 (NEW): Try memory reader opponent data (most reliable - direct RAM)
-                    opp_species = 'Unknown'
-                    opponent_pokemon = battle_info.get('opponent_pokemon')
-                    if opponent_pokemon and isinstance(opponent_pokemon, dict):
-                        mem_species = opponent_pokemon.get('species', '')
-                        mem_types = opponent_pokemon.get('types', [])
-                        if mem_species and mem_species != 'Unknown' and not mem_species.startswith('Species_'):
-                            opp_species = self._fix_species_name(mem_species.upper().strip())
-                            logger.info(f"🧠 [MEMORY READER] Opponent species from RAM: '{opp_species}' (raw: '{mem_species}')")
-                            print(f"🧠 [MEMORY] Opponent: {opp_species} (from RAM)")
-                        if mem_types:
-                            opp_types_from_memory = mem_types
-                            logger.info(f"🧠 [MEMORY READER] Opponent types from RAM: {opp_types_from_memory}")
-                            print(f"🧠 [MEMORY] Types: {opp_types_from_memory}")
-                    
-                    # PRIORITY 1: Try VLM visible_entities (most current, reflects Pokemon switches)
-                    if opp_species == 'Unknown':
-                        opp_species = self._extract_species_from_visible_entities(visual_data, state_data)
-                    
-                    # PRIORITY 2: If VLM didn't find it, extract from dialogue history
-                    if opp_species == 'Unknown':
-                        logger.info("⚠️ [SPECIES] VLM visible_entities didn't find opponent - checking dialogue")
-                        print("⚠️ [SPECIES] Not in visible_entities - checking dialogue")
-                        opp_species = self._extract_opponent_species_from_dialogue()
-                    else:
-                        # Found the opponent - update dialogue cache to match
-                        if self._opponent_species_from_dialogue != opp_species:
-                            logger.info(f"🔄 [SPECIES UPDATE] Detected '{opp_species}', updating cache from '{self._opponent_species_from_dialogue}'")
-                            print(f"🔄 [SPECIES UPDATE] Detected '{opp_species}' (was '{self._opponent_species_from_dialogue}')")
-                            self._opponent_species_from_dialogue = opp_species
-                    
-                    logger.info(f"🔍 [SPECIES EXTRACTION] Final opponent: '{opp_species}'")
-                    print(f"🔍 [SPECIES] Opponent = '{opp_species}'")
+                    # Identify opponent: VLM first, dialogue second, RAM last resort
+                    opp_species, opp_types_from_memory = self._identify_opponent(visual_data, state_data, battle_info)
                     
                     logger.info(f"⚔️ [BATTLE BOT] In fight menu: {player_species} ({player_hp_percent:.1f}% HP) vs {opp_species}")
                     print(f"⚔️ [BATTLE BOT] Fight menu: {player_species} ({player_hp_percent:.0f}% HP) vs {opp_species}")
@@ -1628,26 +1660,8 @@ class BattleBot:
                         logger.warning("   VLM completely stuck - forcing MOVE selection blindly")
                         print(f"⚠️ [BATTLE BOT] VLM broken! Forcing move selection (attempt #{self._unknown_state_count - 4})")
                         
-                        # PRIORITY 0: Try memory reader (most reliable)
-                        opp_species = 'Unknown'
-                        opp_types_blind = []
-                        opponent_pokemon = battle_info.get('opponent_pokemon')
-                        if opponent_pokemon and isinstance(opponent_pokemon, dict):
-                            mem_species = opponent_pokemon.get('species', '')
-                            mem_types = opponent_pokemon.get('types', [])
-                            if mem_species and mem_species != 'Unknown' and not mem_species.startswith('Species_'):
-                                opp_species = self._fix_species_name(mem_species.upper().strip())
-                            if mem_types:
-                                opp_types_blind = mem_types
-                        
-                        # PRIORITY 1: Try VLM visible_entities (most current)
-                        if opp_species == 'Unknown':
-                            opp_species = self._extract_species_from_visible_entities(visual_data, state_data)
-                        
-                        # PRIORITY 2: Extract from dialogue if VLM didn't find it
-                        if opp_species == 'Unknown':
-                            logger.warning("⚠️ [BLIND] VLM entities failed - trying dialogue")
-                            opp_species = self._extract_opponent_species_from_dialogue()
+                        # Identify opponent: VLM first, dialogue second, RAM last resort
+                        opp_species, opp_types_blind = self._identify_opponent(visual_data, state_data, battle_info)
                         
                         logger.info(f"🔍 [BLIND DECISION] Opponent species: '{opp_species}' types={opp_types_blind}")
                         print(f"🔍 [BLIND] Opponent = '{opp_species}' types={opp_types_blind}")
@@ -1676,26 +1690,8 @@ class BattleBot:
                         # Get player_pokemon for level check
                         player_pokemon = battle_info.get('player_pokemon', {})
                         
-                        # PRIORITY 0: Try memory reader (most reliable)
-                        opp_species = 'Unknown'
-                        opp_types_recovery = []
-                        opponent_pokemon = battle_info.get('opponent_pokemon')
-                        if opponent_pokemon and isinstance(opponent_pokemon, dict):
-                            mem_species = opponent_pokemon.get('species', '')
-                            mem_types = opponent_pokemon.get('types', [])
-                            if mem_species and mem_species != 'Unknown' and not mem_species.startswith('Species_'):
-                                opp_species = self._fix_species_name(mem_species.upper().strip())
-                            if mem_types:
-                                opp_types_recovery = mem_types
-                        
-                        # PRIORITY 1: Try VLM visible_entities (most current)
-                        if opp_species == 'Unknown':
-                            opp_species = self._extract_species_from_visible_entities(visual_data, state_data)
-                        
-                        # PRIORITY 2: Extract from dialogue if VLM didn't find it
-                        if opp_species == 'Unknown':
-                            logger.warning("⚠️ [RECOVERY] VLM entities failed - trying dialogue")
-                            opp_species = self._extract_opponent_species_from_dialogue()
+                        # Identify opponent: VLM first, dialogue second, RAM last resort
+                        opp_species, opp_types_recovery = self._identify_opponent(visual_data, state_data, battle_info)
                         
                         use_absorb = self._should_use_absorb(opp_species, player_pokemon, opp_types_recovery)
                         
