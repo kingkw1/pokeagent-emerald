@@ -209,7 +209,7 @@ LLM, with a static "Cheat Sheet" as the context source.
 Littleroot → Rustboro Gym) with a dynamic, walkthrough-driven planner that can
 navigate the **entire game** by querying embedded walkthrough text.
 
-**Status:** Design phase. Blocked by: nothing. Can start independently.
+**Status:** Phase 4.1–4.2 **complete**. Phase 4.3a (shadow mode) is next.
 
 ### 4.0 Design Rationale
 
@@ -373,8 +373,8 @@ def resolve_location(name: str) -> dict | None:
 4.  ~~Create demo scripts~~ ✅ (moved to `agent/brain/demos/`)
 5.  ~~Integrate brain into `agent/__init__.py`~~ ✅ (battle transition detection)
 6.  ~~Phase 3 — spatial metadata on `log_event()` calls~~ ✅
-7.  Next: Phase 4.1 — build walkthrough knowledge base (`scripts/build_walkthrough_db.py`)
-8.  Next: Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)
+7.  ~~Phase 4.1 — build walkthrough knowledge base (`scripts/build_walkthrough_db.py`)~~ ✅
+8.  ~~Phase 4.2 — implement strategic planner (`agent/brain/strategic_planner.py`)~~ ✅
 9.  Next: Phase 4.3a — shadow mode comparison (RAG vs milestones)
 
 ---
@@ -386,12 +386,13 @@ def resolve_location(name: str) -> dict | None:
 | `agent/brain/goal_manager.py`            | **Phase 1** | ❌ Deleted (merged into `objective_manager.py`) | State Machine (Logic Core) |
 | `agent/brain/planner.py`                 | **Phase 1** | ✅ Complete      | LLM-based Recovery Planner (RAG)    |
 | `agent/brain/memory.py`                  | **Phase 2+3** | ✅ Complete     | VectorDB Wrapper (`EpisodicMemory` + spatial) |
-| `agent/brain/walkthrough_db.py`          | **Phase 4** | ⬜ Not started   | Walkthrough ChromaDB collection     |
-| `agent/brain/strategic_planner.py`       | **Phase 4** | ⬜ Not started   | RAG-driven strategic navigation     |
-| `agent/brain/location_resolver.py`       | **Phase 4** | ⬜ Not started   | Prose → LOCATION_GRAPH resolver     |
-| `scripts/build_walkthrough_db.py`        | **Phase 4** | ⬜ Not started   | One-time KB build script            |
+| `agent/brain/walkthrough_db.py`          | **Phase 4** | ✅ Complete       | Walkthrough ChromaDB collection     |
+| `agent/brain/strategic_planner.py`       | **Phase 4** | ✅ Complete       | RAG-driven strategic navigation     |
+| `agent/brain/location_resolver.py`       | **Phase 4** | ✅ Complete       | Prose → LOCATION_GRAPH resolver     |
+| `scripts/build_walkthrough_db.py`        | **Phase 4** | ✅ Complete       | One-time KB build script            |
 | `tests/test_objective_manager_blocker.py` | **Phase 1** | ✅ 12 tests      | Unit tests for blocker/recovery     |
 | `tests/test_spatial_memory.py`            | **Phase 3** | ✅ 14 tests      | Unit tests for spatial metadata     |
+| `tests/test_walkthrough_rag.py`           | **Phase 4** | ✅ 52 tests      | Unit tests for walkthrough RAG      |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
