@@ -168,21 +168,22 @@ def action_step(memory_context, current_plan, latest_observation, frame, state_d
                     logger.info("⚔️ [BATTLE BOT] Recommending A to select FIGHT")
                 
                 elif battle_decision == "USE_MOVE_ABSORB":
-                    # Battle menu navigation: A (select FIGHT) → DOWN (select ABSORB) → A (confirm)
-                    # Full sequence batched for efficiency
-                    decision_explanation = "Select FIGHT → ABSORB: A→DOWN→A (batched)"
-                    logger.info("🌿 [BATTLE BOT] ABSORB: A→DOWN→A (batched)")
-                    print("🌿 [BATTLE BOT] ABSORB: A→DOWN→A (batched)")
-                    return ['A', 'DOWN', 'A']
+                    # Battle menu navigation with menu reset prefix:
+                    # B (exit any submenu) → UP+LEFT (guarantee cursor on FIGHT) → A (select FIGHT) → DOWN (ABSORB) → A (confirm)
+                    # The reset prefix prevents infinite loops when cursor is stuck on RUN after failed escape
+                    decision_explanation = "Reset menu → Select FIGHT → ABSORB: B→UP→LEFT→A→DOWN→A (batched)"
+                    logger.info("🌿 [BATTLE BOT] ABSORB: B→UP→LEFT→A→DOWN→A (batched)")
+                    print("🌿 [BATTLE BOT] ABSORB: B→UP→LEFT→A→DOWN→A (batched)")
+                    return ['B', 'UP', 'LEFT', 'A', 'DOWN', 'A']
                 
                 elif battle_decision == "USE_MOVE_POUND":
-                    # Battle menu navigation: A (select FIGHT) → UP (select POUND) → A (confirm)
-                    # UP ensures cursor on POUND even if it was on ABSORB from previous turn
-                    # Full sequence batched for efficiency
-                    decision_explanation = "Select FIGHT → POUND: A→UP→A (batched)"
-                    logger.info("🥊 [BATTLE BOT] POUND: A→UP→A (batched)")
-                    print("🥊 [BATTLE BOT] POUND: A→UP→A (batched)")
-                    return ['A', 'UP', 'A']
+                    # Battle menu navigation with menu reset prefix:
+                    # B (exit any submenu) → UP+LEFT (guarantee cursor on FIGHT) → A (select FIGHT) → UP (POUND) → A (confirm)
+                    # The reset prefix prevents infinite loops when cursor is stuck on RUN after failed escape
+                    decision_explanation = "Reset menu → Select FIGHT → POUND: B→UP→LEFT→A→UP→A (batched)"
+                    logger.info("🥊 [BATTLE BOT] POUND: B→UP→LEFT→A→UP→A (batched)")
+                    print("🥊 [BATTLE BOT] POUND: B→UP→LEFT→A→UP→A (batched)")
+                    return ['B', 'UP', 'LEFT', 'A', 'UP', 'A']
                 
                 elif battle_decision == "PRESS_B":
                     # Exit submenu (fight menu or bag menu)

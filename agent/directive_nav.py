@@ -802,5 +802,22 @@ def execute_directive(directive, state_data, recent_actions, description=''):
     if action_type == 'CROSS_BOUNDARY':
         return _handle_cross_boundary(directive, state_data)
 
+    if action_type == 'INTERACT_WARP':
+        # Safety net: translate raw planner INTERACT_WARP into goal_coords navigation
+        target = directive.get('target')
+        if target:
+            location = directive.get('location', state_data.get('player', {}).get('location', ''))
+            logger.info(f"📍 [DIRECTIVE] INTERACT_WARP - navigating to warp at {target}")
+            print(f"🚪 [DIRECTIVE] Navigating to warp tile at {target}")
+            translated = {
+                'goal_coords': (*target, location),
+                'should_interact': True,
+                'description': directive.get('description', f'Interact with warp at {target}')
+            }
+            desc = translated['description']
+            return _handle_goal_coords(translated, state_data, recent_actions, desc, location)
+        logger.warning(f"📍 [DIRECTIVE] INTERACT_WARP missing target coordinates")
+        return None
+
     logger.warning(f"📍 [DIRECTIVE] Unknown action type: {action_type}")
     return None  # fall through to VLM

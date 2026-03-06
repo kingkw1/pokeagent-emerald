@@ -1088,10 +1088,11 @@ class ObjectiveManager:
                     )
                     
                     if success:
-                        return self.navigation_planner.get_current_directive(
+                        raw = self.navigation_planner.get_current_directive(
                             current_location=graph_location,
                             current_coords=(current_x, current_y)
                         )
+                        return self._translate_planner_directive(raw, graph_location)
                     else:
                         logger.error(f"❌ [NAV PLANNER] Failed to plan journey to gym")
                         return None
@@ -1107,10 +1108,11 @@ class ObjectiveManager:
                 )
                 
                 if success:
-                    return self.navigation_planner.get_current_directive(
+                    raw = self.navigation_planner.get_current_directive(
                         current_location=graph_location,
                         current_coords=(current_x, current_y)
                     )
+                    return self._translate_planner_directive(raw, graph_location)
                 else:
                     logger.error(f"❌ [NAV PLANNER] Failed to plan journey to Route 104 South")
                     return None
@@ -1328,52 +1330,10 @@ class ObjectiveManager:
                                 logger.info(f"🏥 [POKECENTER] Planner directive: {planner_directive.get('description', 'Unknown')}")
                                 print(f"🗺️ [POKECENTER] Navigation Planner active: {planner_directive.get('description', 'Unknown')}")
                                 
-                                # Convert Navigation Planner directive to action system format
-                                # The action system expects 'goal_coords' or 'action: NAVIGATE_AND_INTERACT'
-                                action_type = planner_directive.get('action')
-                                
-                                if action_type == 'INTERACT_WARP':
-                                    # Warp tile interaction - navigate to warp coordinates
-                                    target = planner_directive.get('target')
-                                    location = planner_directive.get('location', 'RUSTBORO_CITY')
-                                    
-                                    return {
-                                        'goal_coords': (target[0], target[1], location),
-                                        'should_interact': True,
-                                        'description': planner_directive.get('description', 'Navigate to warp tile'),
-                                        'journey_reason': 'Pokemon Center healing (via planner)'
-                                    }
-                                
-                                elif action_type == 'NAVIGATE_AND_INTERACT':
-                                    # Direct navigation with A* pathfinding
-                                    target = planner_directive.get('target')
-                                    location = planner_directive.get('location', 'RUSTBORO_CITY')
-                                    should_interact = planner_directive.get('should_interact', True)
-                                    
-                                    return {
-                                        'goal_coords': (target[0], target[1], location),
-                                        'should_interact': should_interact,
-                                        'description': planner_directive.get('description', 'Navigate to target'),
-                                        'journey_reason': 'Pokemon Center healing (via planner)'
-                                    }
-                                
-                                elif action_type == 'NAVIGATE_DIRECTION':
-                                    # Directional navigation for boundary crossing
-                                    direction = planner_directive.get('direction', 'north')
-                                    
-                                    return {
-                                        'goal_direction': direction,
-                                        'description': planner_directive.get('description', f'Navigate {direction}'),
-                                        'journey_reason': 'Pokemon Center healing (via planner)'
-                                    }
-                                
-                                elif action_type == 'WAIT':
-                                    # Waiting for warp to complete - don't issue movement
-                                    logger.info(f"🏥 [POKECENTER] Waiting for warp to complete")
-                                    return None
-                                
-                                else:
-                                    logger.warning(f"🏥 [POKECENTER] Unknown planner action: {action_type}")
+                                translated = self._translate_planner_directive(planner_directive, "RUSTBORO_CITY")
+                                if translated:
+                                    translated['journey_reason'] = 'Pokemon Center healing (via planner)'
+                                    return translated
                         
                         # Fallback: direct coordinate navigation
                         _pc_fallback = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)
@@ -2320,6 +2280,84 @@ class ObjectiveManager:
 
         return None  # let normal pipeline continue
 
+    def _translate_planner_directive(self, planner_directive: Dict[str, Any], graph_location: str) -> Optional[Dict[str, Any]]:
+        """
+        Translate a raw NavigationPlanner directive into the goal_coords/goal_direction
+        format that directive_nav.py understands.
+        """
+        if not planner_directive:
+            return None
+
+        action_type = planner_directive.get('action')
+
+        if action_type == 'NAVIGATE_AND_INTERACT':
+            target_coords = planner_directive['target']
+            location = planner_directive.get('location', graph_location)
+            should_interact = planner_directive.get('should_interact', False)
+            avoid_grass = planner_directive.get('avoid_grass', True)
+            return {
+                'goal_coords': (*target_coords, location),
+                'should_interact': should_interact,
+                'avoid_grass': avoid_grass,
+                'description': planner_directive.get('description', 'Navigate to coordinates'),
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'NAVIGATE_DIRECTION':
+            direction = planner_directive.get('direction')
+            portal_coords = planner_directive.get('portal_coords')
+            return {
+                'goal_direction': direction,
+                'portal_coords': portal_coords,
+                'description': planner_directive.get('description', f'Move {direction}'),
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'INTERACT_WARP':
+            target_coords = planner_directive['target']
+            location = planner_directive.get('location', graph_location)
+            return {
+                'goal_coords': (*target_coords, location),
+                'should_interact': True,
+                'description': planner_directive.get('description', 'Interact with warp'),
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'COMPLETE':
+            return {
+                'journey_complete': True,
+                'description': 'Navigation journey complete',
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'CROSS_BOUNDARY':
+            direction = planner_directive.get('direction', 'north')
+            to_location = planner_directive.get('to_location', '')
+            print(f"\U0001f6aa [CROSS_BOUNDARY] Crossing from {planner_directive.get('from_location')} to {to_location}")
+            return {
+                'goal_direction': direction,
+                'description': planner_directive.get('description', f'Cross boundary {direction} to {to_location}'),
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'WAIT':
+            expected_location = planner_directive.get('expected_location', '')
+            print(f"\u23f3 [WAIT] Waiting for warp to {expected_location}")
+            return {
+                'wait_for_transition': True,
+                'expected_location': expected_location,
+                'description': planner_directive.get('description', f'Wait for transition to {expected_location}'),
+                'journey_progress': self.navigation_planner.get_progress_summary()
+            }
+
+        elif action_type == 'UNKNOWN':
+            print(f"\u2753 [UNKNOWN ACTION] NavigationPlanner returned UNKNOWN action")
+            return None
+
+        else:
+            logger.warning(f"Unhandled NavigationPlanner action type: {action_type}")
+            return None
+
     def _get_navigation_planner_directive(self, state_data: Dict[str, Any], target_location: Optional[str] = None, target_coords: Optional[tuple] = None, journey_reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Get directive from NavigationPlanner for comparison testing.
@@ -2546,94 +2584,7 @@ class ObjectiveManager:
             
             # TRANSLATION LAYER: Convert planner's stage-based directives into simple GOAL COORDINATES
             # The planner tells us WHERE to go, action.py decides HOW to get there
-            action_type = planner_directive.get('action')
-            
-            if action_type == 'NAVIGATE_AND_INTERACT':
-                # Planner wants us to navigate to target coordinates
-                target_coords = planner_directive['target']  # (x, y) tuple
-                should_interact = planner_directive.get('should_interact', False)
-                location = planner_directive.get('location', graph_location)
-                avoid_grass = planner_directive.get('avoid_grass', True)  # Default: avoid grass (speedrun mode)
-                
-                # Return simple goal - action.py will use A* to get there
-                return {
-                    'goal_coords': (*target_coords, location),  # (x, y, 'LOCATION')
-                    'should_interact': should_interact,
-                    'avoid_grass': avoid_grass,  # Pass through to A* pathfinding
-                    'description': planner_directive.get('description', 'Navigate to coordinates'),
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'NAVIGATE_DIRECTION':
-                # Planner wants us to move in a direction (approaching portal)
-                direction = planner_directive.get('direction')
-                portal_coords = planner_directive.get('portal_coords')  # (x, y)
-                
-                # Return directional goal - action.py will use frontier-based pathfinding
-                return {
-                    'goal_direction': direction,
-                    'portal_coords': portal_coords,  # Hint for validation
-                    'description': planner_directive.get('description', f'Move {direction}'),
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'INTERACT_WARP':
-                # Planner wants us to interact with a warp tile
-                target_coords = planner_directive['target']
-                location = planner_directive.get('location', graph_location)
-                
-                return {
-                    'goal_coords': (*target_coords, location),
-                    'should_interact': True,  # Always interact with warps
-                    'description': planner_directive.get('description', 'Interact with warp'),
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'COMPLETE':
-                # Journey complete
-                return {
-                    'journey_complete': True,
-                    'description': 'Navigation journey complete',
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'CROSS_BOUNDARY':
-                # Agent is crossing a portal/boundary between locations
-                # Continue moving in the portal direction until location changes
-                direction = planner_directive.get('direction', 'north')
-                to_location = planner_directive.get('to_location', '')
-                
-                print(f"🚪 [CROSS_BOUNDARY] Crossing from {planner_directive.get('from_location')} to {to_location}")
-                
-                return {
-                    'goal_direction': direction,
-                    'description': planner_directive.get('description', f'Cross boundary {direction} to {to_location}'),
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'WAIT':
-                # Wait for warp/transition to complete (e.g., after stepping on warp tile)
-                expected_location = planner_directive.get('expected_location', '')
-                
-                print(f"⏳ [WAIT] Waiting for warp to {expected_location}")
-                
-                return {
-                    'wait_for_transition': True,
-                    'expected_location': expected_location,
-                    'description': planner_directive.get('description', f'Wait for transition to {expected_location}'),
-                    'journey_progress': self.navigation_planner.get_progress_summary()
-                }
-                
-            elif action_type == 'UNKNOWN':
-                # Planner doesn't know what to do - let VLM handle
-                print(f"❓ [UNKNOWN ACTION] NavigationPlanner returned UNKNOWN action")
-                return None
-                
-            else:
-                # Unhandled action type - log warning and return None
-                print(f"⚠️ [UNHANDLED ACTION] NavigationPlanner returned unhandled action: {action_type}")
-                logger.warning(f"Unhandled NavigationPlanner action type: {action_type}")
-                return None
+            return self._translate_planner_directive(planner_directive, graph_location)
         else:
             # No active plan - agent is at destination or unknown state
             return None
