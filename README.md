@@ -62,13 +62,14 @@ Recovery tasks are consumed at the **top** of `get_next_action_directive()`, pre
    - **Heuristic Agent (Active):** A robust rule-based engine with type-effectiveness matrix, trainer vs. wild classification, behavioral stuck-detection (switches strategy after repeated failed run attempts), and memory-based HP/PP tracking with VLM fallback. This is the production combat controller.
    - **RL Agent (Integration In Progress):** A Proximal Policy Optimization (PPO) model trained via `sb3-contrib MaskablePPO` on curriculum battle scenarios. A trained prototype (`emerald_curriculum_v1`) exists; observation alignment and live-agent data bridging are the remaining integration steps. See [agent/combat/RL_BATTLE_BOT_PLAN.md](agent/combat/RL_BATTLE_BOT_PLAN.md).
 
-3. **Navigation System** — Two-tier pathfinding with NPC-seeking capability:
-   - **Global:** Server-side A\* over the explored world graph with grass avoidance, ledge handling, and portal detection. Batched movement execution (up to 15 steps).
+3. **Navigation System** — Two-tier pathfinding with NPC-aware obstacle avoidance:
+   - **Global:** Server-side A\* over the explored world graph with grass avoidance, ledge handling, portal detection, and **NPC obstacle injection**. Batched movement execution (up to 15 steps).
    - **Local:** BFS fallback over a 15×15 visible tile grid.
-   - **NPC Targeting (Planned):** Dynamic NPC detection via `gObjectEvents` memory parsing + VLM semantic identification. Replaces hardcoded NPC coordinates in milestones with runtime-resolved positions.
+   - **NPC Targeting:** Dynamic NPC detection via `gObjectEvents` memory parsing. `_resolve_npc_coords()` locates NPCs by role using the `NpcRegistry` (adaptive discovery) with `graphics_id` fallback. NPC positions are injected as obstacles into A\* pathfinding to prevent the agent from walking through stationary NPCs.
+   - **Graph-Derived Coordinates:** Building entrances, interior exits, and POI positions are resolved at runtime from `LOCATION_GRAPH` portal/warp metadata via `get_entrance_coords()`, `get_interior_exit_coords()`, and `get_poi_coords()` — eliminating hardcoded coordinate constants.
    - See [docs/PATHFINDING_SUMMARY.md](docs/PATHFINDING_SUMMARY.md).
 
-4. **Objective Manager** — Milestone-driven progression through 40+ predefined milestones derived from official speedrun splits. Provides goal coordinates and interaction flags via a tactical directive system. See [docs/DIRECTIVE_SYSTEM.md](docs/DIRECTIVE_SYSTEM.md).
+4. **Objective Manager** — Milestone-driven progression through 40+ predefined milestones derived from official speedrun splits. Milestone `target_coords` are resolved dynamically from `LOCATION_GRAPH` via `target_coords_fn` lambdas. Provides goal coordinates and interaction flags via a tactical directive system. RAG-primary mode (Phase 4.3b) allows the walkthrough planner to override milestone targets. See [docs/DIRECTIVE_SYSTEM.md](docs/DIRECTIVE_SYSTEM.md).
 
 5. **Perception Module** — Layered extraction pipeline:
    - **Primary:** VLM structured JSON extraction (Qwen2-VL-2B-Instruct, ~2.3 s local inference)
@@ -210,7 +211,12 @@ pokeagent-emerald/
   - [x] **4.3a:** Shadow mode — RAG planner runs alongside milestones, logging comparison to `shadow_comparison.jsonl`.
   - [x] **4.3b:** RAG-primary with milestone fallback — RAG drives navigation, milestones catch failures.
   - [ ] **4.3c:** RAG-only — Remove milestone list once behavioural evaluation confirms end-to-end corridor completion. Milestones retained as silent last-resort fallback.
-  - [ ] **4.4: Local NPC Navigation (Three-Tier):** Enable the agent to navigate to specific NPCs without hardcoded coordinates. *(a)* Fix `gObjectEvents` struct parsing for reliable NPC positions from memory. *(b)* VLM semantic identification — match walkthrough NPC names against `visible_entities`. *(c)* VLM bounding-box fallback for script-spawned NPCs. See [agent/brain/PLAN.MD](agent/brain/PLAN.MD).
+  - [x] **4.4a:** Fix `gObjectEvents` struct parsing — reliable NPC position reading from emulator memory.
+  - [x] **4.4b:** Dynamic NPC targeting — `_resolve_npc_coords()` pipeline replaces hardcoded NPC coordinates in milestones.
+  - [ ] **4.4c:** VLM bounding-box fallback for script-spawned NPCs not in `gObjectEvents`.
+  - [x] **4.4d:** NPC Identity Registry — adaptive discovery replaces hardcoded `graphics_id` constants.
+  - [x] **4.4e:** NPC obstacle injection — A\* pathfinding treats detected NPCs as impassable tiles.
+  - [x] **4.4f:** Graph-derived coordinates — building entrances, interior exits, milestone `target_coords`, and NPC fallback positions resolved from `LOCATION_GRAPH` portal/POI metadata.
 - [ ] **Phase 5: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
 
 ## Documentation

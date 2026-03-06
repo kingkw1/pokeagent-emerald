@@ -5,6 +5,7 @@ logging it, querying its history via RAG, and replanning using an LLM.
 
 **Status:** Phases 1, 2, & 3 are **complete** and integrated into the live agent.
 Phase 4 (Walkthrough RAG) is **in progress** — 4.1–4.3b complete, 4.3c next.
+Phase 4.4 (NPC Navigation) — 4.4a/b/d/e/f **complete**, 4.4c remaining.
 
 ### Design Rationale (LLM-First Approach)
 
@@ -525,7 +526,7 @@ cutscene actors, NPCs that load after a map event fires).
 - Unit test with a mock VLM returning a known bbox for a visible NPC.
 - End-to-end test on a save state where an NPC appears after a cutscene trigger.
 
-### 4.4d — NPC Identity Registry (Adaptive Discovery)
+### 4.4d — NPC Identity Registry (Adaptive Discovery) ✅ COMPLETE
 
 **Goal:** Replace hardcoded `graphics_id` constants (105=rival, 88=Norman, etc.)
 with a learned registry that maps semantic NPC roles to their `graphics_id` at
@@ -609,7 +610,65 @@ Phase C: INFER (cold start)
   rival identity through interaction, subsequent lookups use learned `graphics_id`
 - Regression: all existing `test_npc_resolve.py` tests still pass
 
-### Manual Testing Procedure
+### 4.4e — NPC Obstacle Injection in A\* Pathfinding ✅ COMPLETE
+
+**Goal:** Prevent the agent from pathing through stationary NPCs by injecting
+detected NPC positions as impassable tiles into the A\* cost grid.
+
+**Implementation:**
+- `get_npc_obstacles(state_data, player_x, player_y)` in `agent/pathfinding.py`
+  reads `active_npcs` from state data, filters out the player object (slot 0),
+  and returns a set of `(x, y)` tiles occupied by NPCs.
+- `find_path_astar()` accepts an optional `npc_obstacles` set and treats those
+  tiles as impassable (cost = infinity) during pathfinding.
+- The call chain: `_handle_goal_coords()` → `get_npc_obstacles()` → `find_path_astar(npc_obstacles=...)`
+- **Tests:** `tests/test_npc_obstacles.py` — 72 tests covering obstacle injection,
+  path avoidance, edge cases (empty NPCs, player exclusion, out-of-range NPCs).
+
+### 4.4f — Graph-Derived Coordinates (De-hardcoding) ✅ COMPLETE
+
+**Goal:** Replace hardcoded coordinate constants in `objective_manager.py` with
+runtime lookups from `LOCATION_GRAPH` portal/warp/POI metadata.
+
+**Implementation:**
+Three new helper functions added to `agent/location_graph.py`:
+- `get_entrance_coords(city, building)` — returns `exit_coords` from the city→building portal (the overworld tile that triggers warp).
+- `get_interior_exit_coords(building)` — returns `entry_coords` of the first `warp_tile` portal (the tile just inside the door).
+- `get_poi_coords(location, poi_key)` — returns POI coordinates (NPC positions, landmarks).
+
+**MILESTONE_PROGRESSION changes:**
+- 4 milestones converted from static `target_coords` to `target_coords_fn` lambdas:
+  - `ROUTE_103` → `lambda: get_poi_coords("ROUTE_103", "rival_may")`
+  - `RIVAL_BATTLE_1` → same
+  - `DAD_FIRST_MEETING` → `lambda: get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM")`
+  - `RUSTBORO_GYM_ENTERED` → `lambda: get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM")`
+- 3 callsites updated to resolve `target_coords_fn` at runtime.
+
+**Body replacements (~12 sites):**
+All hardcoded coordinate values in function bodies replaced with graph lookups,
+retaining the original value as an `or` fallback for safety:
+- Rival position checks → `get_poi_coords("ROUTE_103", "rival_may") or (9, 3)`
+- Norman adjacency → `get_poi_coords("PETALBURG_CITY_GYM", "norman") or (4, 107)`
+- Birch Lab exit → `get_interior_exit_coords("PROFESSOR_BIRCHS_LAB") or (6, 13)`
+- Gym entrances → `get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM") or (27, 19)`
+- PokeCenter entrances → `get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)`
+- Nurse fallback → `get_poi_coords(graph_location, "nurse_joy") or (7, 3)`
+
+**NPC Registry relocation:**
+- `npc_registry.json` moved from project root to `memory_db/npc_registry.json`
+- Added to `.gitignore` (runtime persistence file, not tracked in git)
+
+**What remains hardcoded (by design):**
+
+| Category | Count | Rationale |
+|----------|-------|-----------|
+| Waypoint sequences (Gym gauntlet, Route 104, Petalburg Woods, bridge) | ~49 coord values | Require RAG-driven or VLM obstacle detection approach |
+| Navigation waypoints `(23, 29)` Rustboro, `(9, 34)` Petalburg Woods | 2 values | Not in graph — intermediate pathfinding hints |
+| Trigger zone boundary checks (coordinate ranges) | ~32 bound values | Paired with waypoints — same approach needed |
+| Opener Bot `NavigationGoal` coords | 13 definitions | Deliberately deterministic FSM — lowest ROI |
+| `or` fallback tuples | ~8 values | Safety nets for graph lookup failures — intentional |
+
+**Tests:** 231 passed, 6 skipped, 0 failures after all changes.
 
 **Canonical test save:** `tests/save_states/rival_battle_save.state`
 - **Map:** ROUTE_103
@@ -711,7 +770,10 @@ def resolve_location(name: str) -> dict | None:
 12. ~~Phase 4.4a — Fix `gObjectEvents` parsing + `read_active_npcs()` + tests~~ ✅
 13. ~~Phase 4.4b — Wire `_resolve_npc_coords()` into directive pipeline, replace hardcoded NPC coords~~ ✅
 14. Phase 4.4c — VLM bounding box fallback for script-spawned NPCs
-15. Phase 4.4d — NPC Identity Registry (adaptive discovery, replace hardcoded graphics_id constants)
+15. ~~Phase 4.4d — NPC Identity Registry (adaptive discovery, replace hardcoded graphics_id constants)~~ ✅
+16. ~~Phase 4.4e — NPC obstacle injection in A\* pathfinding~~ ✅
+17. ~~Phase 4.4f — Graph-derived coordinates (building entrances, interior exits, milestone target_coords, NPC fallbacks)~~ ✅
+18. Next: Phase 3 — Strangler Fig (waypoint sequences → RAG/VLM-driven)
 
 ---
 
@@ -734,6 +796,7 @@ def resolve_location(name: str) -> dict | None:
 | `tests/test_npc_resolve.py`               | **Phase 4.4b** | ✅ 17 tests   | `_resolve_npc_coords()` unit + integration (dynamic NPC targeting) |
 | `agent/brain/npc_registry.py`             | **Phase 4.4d** | ✅ Complete     | NPC Identity Registry (adaptive discovery) |
 | `tests/test_npc_registry.py`              | **Phase 4.4d** | ✅ 25 tests     | Unit tests for NPC registry |
+| `tests/test_npc_obstacles.py`              | **Phase 4.4e** | ✅ 72 tests     | NPC obstacle injection in A\* pathfinding |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
