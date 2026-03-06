@@ -525,6 +525,90 @@ cutscene actors, NPCs that load after a map event fires).
 - Unit test with a mock VLM returning a known bbox for a visible NPC.
 - End-to-end test on a save state where an NPC appears after a cutscene trigger.
 
+### 4.4d — NPC Identity Registry (Adaptive Discovery)
+
+**Goal:** Replace hardcoded `graphics_id` constants (105=rival, 88=Norman, etc.)
+with a learned registry that maps semantic NPC roles to their `graphics_id` at
+runtime — enabling the agent to "discover fresh" by erasing memory and re-learning
+NPC identities through interaction.
+
+**Current state:** `_resolve_npc_coords()` takes `graphics_id=105` (rival),
+`graphics_id=88` (Norman), `graphics_id=29` (Nurse Joy), `graphics_id=89`
+(Roxanne) as hardcoded constants.  This works but can't generalize to new NPCs
+and violates the "no hardcoded one-off solutions" principle.
+
+**Design: Three-Phase Adaptive NPC Discovery**
+
+```
+Phase A: OBSERVE & RECORD
+  Trigger: dialogue starts after agent pressed A on an NPC
+  Input:  active_npcs (who was closest?), VLM speaker field
+  Output: registry entry  (map, local_id) → {name, role, graphics_id}
+
+Phase B: RECALL
+  Trigger: directive says "talk to Norman" / "heal at Pokemon Center"
+  Input:  semantic role string ("rival", "nurse", "gym_leader_norman")
+  Output: graphics_id + local_id for _resolve_npc_coords()
+
+Phase C: INFER (cold start)
+  Trigger: no registry entry for target NPC on current map
+  Heuristic: nearest non-player NPC in active_npcs
+  Fallback: hardcoded safety nets (kept but never primary)
+```
+
+**Data structure — `NpcRegistry`** (new class in `agent/brain/npc_registry.py`):
+
+```python
+# Key: (map_group, map_num, local_id)  — stable across sessions
+# Value: {name, role, graphics_id, first_seen_step}
+#
+# The registry is stored as a JSON file for persistence across runs
+# and also logged to EpisodicMemory for semantic retrieval.
+#
+# Example entries:
+#   ("ROUTE_103", 2)       → {name: "May",    role: "rival",   gfx: 105}
+#   ("PETALBURG_CITY_GYM", 1) → {name: "Norman", role: "gym_leader", gfx: 88}
+#   ("OLDALE_TOWN_POKEMON_CENTER_1F", 1) → {name: "Nurse Joy", role: "nurse", gfx: 29}
+```
+
+**Implementation plan:**
+
+1. **Create `agent/brain/npc_registry.py`:**
+   - `NpcRegistry` class with JSON file persistence (`npc_registry.json`)
+   - `register_npc(location, local_id, name, role, graphics_id, step)` — upserts
+   - `lookup_by_role(role, location=None)` → `{graphics_id, local_id}` or `None`
+   - `lookup_by_name(name)` → same
+   - `clear()` — wipe for fresh-start tests
+   - Optionally logs to `EpisodicMemory` for semantic retrieval backup
+
+2. **Add observation hook in `agent/__init__.py`:**
+   - When dialogue starts (visual_dialogue_active transitions False→True):
+     - Find nearest NPC in `state_data['active_npcs']` to player position
+     - Extract VLM `on_screen_text.speaker` as the NPC's name
+     - Call `npc_registry.register_npc(...)` with discovered identity
+   - This is zero-cost — uses data already present in the step pipeline
+
+3. **Wire `NpcRegistry` into `_resolve_npc_coords()`:**
+   - New first parameter: `npc_role` (e.g. `"rival"`, `"nurse"`, `"gym_leader_norman"`)
+   - Resolution order:
+     a. Registry lookup by role → get `graphics_id` + `local_id`
+     b. If registry miss → use hardcoded fallback constants (safety net)
+     c. Feed `graphics_id`/`local_id` into existing `active_npcs` search
+   - Call sites change from `graphics_id=RIVAL_GFX_ID` to `npc_role="rival"`
+
+4. **Cold-start inference (Phase C):**
+   - On first run (empty registry), the agent won't know any `graphics_id`s
+   - Heuristic: when directive says "interact with NPC" and registry has no match,
+     pick the nearest non-player NPC from `active_npcs`
+   - After first interaction, the observation hook populates the registry
+   - Subsequent lookups use the learned identity
+
+**Verification:**
+- Unit tests: registry CRUD, JSON persistence, role lookup, cold-start heuristic
+- Integration test: load `rival_battle_save.state`, clear registry, agent discovers
+  rival identity through interaction, subsequent lookups use learned `graphics_id`
+- Regression: all existing `test_npc_resolve.py` tests still pass
+
 ### Manual Testing Procedure
 
 **Canonical test save:** `tests/save_states/rival_battle_save.state`
@@ -624,9 +708,10 @@ def resolve_location(name: str) -> dict | None:
 9.  ~~Phase 4.3a — shadow mode comparison (RAG vs milestones)~~ ✅
 10. ~~Phase 4.3b — RAG-primary with milestone fallback~~ ✅
 11. Next: Phase 4.3c — RAG-only (behavioural evaluation, not agreement rate)
-12. Phase 4.4a — Fix `gObjectEvents` parsing + `read_active_npcs()` + tests
-13. Phase 4.4b — VLM semantic NPC identification + `target_npc` in directives
+12. ~~Phase 4.4a — Fix `gObjectEvents` parsing + `read_active_npcs()` + tests~~ ✅
+13. ~~Phase 4.4b — Wire `_resolve_npc_coords()` into directive pipeline, replace hardcoded NPC coords~~ ✅
 14. Phase 4.4c — VLM bounding box fallback for script-spawned NPCs
+15. Phase 4.4d — NPC Identity Registry (adaptive discovery, replace hardcoded graphics_id constants)
 
 ---
 
@@ -645,7 +730,10 @@ def resolve_location(name: str) -> dict | None:
 | `tests/test_spatial_memory.py`            | **Phase 3** | ✅ 14 tests      | Unit tests for spatial metadata     |
 | `tests/test_walkthrough_rag.py`           | **Phase 4** | ✅ 52 tests      | Unit tests for walkthrough RAG      |
 | `tests/test_shadow_mode.py`               | **Phase 4.3a+b** | ✅ 30 tests | Unit tests for shadow-mode + RAG-primary |
-| `tests/test_npc_detection.py`             | **Phase 4.4a** | ⬜ Planned    | NPC detection from `gObjectEvents` (rival_battle_save) |
+| `tests/test_npc_detection.py`             | **Phase 4.4a** | ✅ 13 tests   | NPC detection from `gObjectEvents` (rival_battle_save) |
+| `tests/test_npc_resolve.py`               | **Phase 4.4b** | ✅ 17 tests   | `_resolve_npc_coords()` unit + integration (dynamic NPC targeting) |
+| `agent/brain/npc_registry.py`             | **Phase 4.4d** | ✅ Complete     | NPC Identity Registry (adaptive discovery) |
+| `tests/test_npc_registry.py`              | **Phase 4.4d** | ✅ 25 tests     | Unit tests for NPC registry |
 | `agent/brain/demos/demo_planner.py`      | **Phase 1** | ✅ Complete      | LLM reasoning demo script           |
 | `agent/brain/demos/demo_rag_memory.py`   | **Phase 2** | ✅ Complete      | Semantic retrieval demo             |
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |

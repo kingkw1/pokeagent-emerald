@@ -222,7 +222,7 @@ class ObjectiveManager:
     without complex state management dependencies.
     """
     
-    def __init__(self, strategic_planner=None):
+    def __init__(self, strategic_planner=None, npc_registry=None):
         """Initialize with core storyline objectives.
 
         Args:
@@ -232,6 +232,9 @@ class ObjectiveManager:
                 falling back to ``MILESTONE_PROGRESSION`` only when the RAG result
                 does not resolve to a valid ``LOCATION_GRAPH`` key.
                 Shadow-mode comparison logging (Phase 4.3a) also runs.
+            npc_registry: Optional ``NpcRegistry`` instance (Phase 4.4d).
+                When provided, ``_resolve_npc_coords`` uses semantic role
+                lookups instead of hardcoded ``graphics_id`` constants.
         """
         self.objectives: List[Objective] = []
         self._initialize_storyline_objectives()
@@ -265,6 +268,7 @@ class ObjectiveManager:
         
         # ── Phase 4.3a/b: RAG-based strategic planning ──
         self.strategic_planner = strategic_planner
+        self.npc_registry = npc_registry  # Phase 4.4d: adaptive NPC discovery
         self._shadow_log_path = os.path.join("llm_logs", "shadow_comparison.jsonl")
         self._shadow_step_count: int = 0
         self._shadow_agree_count: int = 0
@@ -652,6 +656,106 @@ class ObjectiveManager:
         
         return None
     
+    # =====================================================================
+    # DYNAMIC NPC COORDINATE RESOLUTION (Phase 4.4b)
+    # =====================================================================
+    # Replaces hardcoded NPC coordinates with runtime memory reads.
+    # Uses gObjectEvents data from read_active_npcs(), passed through
+    # state_data['active_npcs'] from the memory reader pipeline.
+    # =====================================================================
+
+    def _resolve_npc_coords(
+        self,
+        state_data: Dict[str, Any],
+        *,
+        npc_role: Optional[str] = None,
+        graphics_id: Optional[int] = None,
+        local_id: Optional[int] = None,
+        fallback: Optional[tuple] = None,
+    ) -> Optional[tuple]:
+        """
+        Find an NPC's current (x, y) from the runtime gObjectEvents array.
+
+        Resolution order (Phase 4.4d):
+        1. **Registry lookup** — if ``npc_role`` is given and ``self.npc_registry``
+           exists, look up the learned ``graphics_id`` / ``local_id`` for that role.
+        2. **Explicit criteria** — use caller-supplied ``graphics_id`` / ``local_id``
+           (hardcoded fallback constants, kept as a safety net).
+        3. **Cold-start inference** — if nothing matched, pick the nearest NPC.
+
+        Skips the player object and invisible / off-screen NPCs.
+
+        Returns:
+            (x, y) tuple or ``fallback`` if not found.
+        """
+        # ── Phase 4.4d: Registry-first resolution ──────────────────
+        if npc_role and self.npc_registry:
+            location = state_data.get('player', {}).get('location', '')
+            entry = self.npc_registry.lookup_by_role(npc_role, location=location)
+            if entry:
+                # Registry hit — use learned identifiers
+                reg_gfx = entry.get('graphics_id')
+                reg_lid = entry.get('local_id')
+                if reg_gfx is not None:
+                    graphics_id = reg_gfx
+                if reg_lid is not None:
+                    local_id = reg_lid
+                logger.info(f"[NPC RESOLVE] Registry hit for role={npc_role}: "
+                            f"gfx={graphics_id}, local={local_id}")
+            else:
+                logger.debug(f"[NPC RESOLVE] Registry miss for role={npc_role}, "
+                             f"falling back to explicit criteria")
+
+        active_npcs = state_data.get('active_npcs', [])
+        if not active_npcs:
+            if fallback:
+                logger.debug(f"[NPC RESOLVE] No active_npcs in state — using fallback {fallback}")
+            return fallback
+
+        for npc in active_npcs:
+            # Skip player entry
+            if npc.get('is_player'):
+                continue
+            # Skip invisible / off-screen NPCs
+            if npc.get('invisible') or npc.get('off_screen'):
+                continue
+
+            # Match criteria (AND when both specified)
+            if graphics_id is not None and npc.get('graphics_id') != graphics_id:
+                continue
+            if local_id is not None and npc.get('local_id') != local_id:
+                continue
+
+            # At least one criterion must have been specified
+            if graphics_id is None and local_id is None:
+                # ── Cold-start: no criteria available, use nearest NPC ──
+                if npc_role:
+                    from agent.brain.npc_registry import NpcRegistry
+                    player = state_data.get('player', {}).get('position', {})
+                    px = player.get('x', 0)
+                    py = player.get('y', 0)
+                    nearest = NpcRegistry.infer_nearest_npc(active_npcs, px, py)
+                    if nearest:
+                        coords = (nearest['current_x'], nearest['current_y'])
+                        logger.info(f"[NPC RESOLVE] Cold-start: nearest NPC at {coords} "
+                                    f"for role={npc_role}")
+                        return coords
+                logger.warning("[NPC RESOLVE] No search criteria given")
+                return fallback
+
+            coords = (npc['current_x'], npc['current_y'])
+            logger.info(f"[NPC RESOLVE] Found NPC gfx={npc.get('graphics_id')} "
+                        f"local={npc.get('local_id')} at {coords}")
+            return coords
+
+        # NPC not found in active list
+        if fallback:
+            logger.info(f"[NPC RESOLVE] NPC not found (gfx={graphics_id}, local={local_id}) — "
+                        f"using fallback {fallback}")
+        else:
+            logger.info(f"[NPC RESOLVE] NPC not found (gfx={graphics_id}, local={local_id}) — no fallback")
+        return fallback
+
     def get_next_action_directive(self, state_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Get specific action directive based on current milestone state.
@@ -914,15 +1018,32 @@ class ObjectiveManager:
             if needs_dad_dialogue:
                 # HP < 100% = need to talk to Dad
                 if in_gym:
-                    # In gym - navigate to Dad at (4, 107)
-                    logger.info(f"💚 [DAD HP] HP < 100%, in gym, navigating to Norman")
-                    print(f"💚 [DAD HP] HP < 100%, in gym, navigating to Norman")
+                    # Dynamically resolve Norman's position in Petalburg Gym
+                    # Norman: graphics_id=88 (GYM_LEADER sprite), local_id=1
+                    # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
+                    NORMAN_GFX_ID = 88
+                    NORMAN_LOCAL_ID = 1
+                    NORMAN_FALLBACK = (4, 107)
+
+                    norman_coords = self._resolve_npc_coords(
+                        state_data,
+                        npc_role="gym_leader_norman",
+                        graphics_id=NORMAN_GFX_ID,
+                        local_id=NORMAN_LOCAL_ID,
+                        fallback=NORMAN_FALLBACK,
+                    )
+                    # Stand one tile south of Norman to face UP
+                    goal_x = norman_coords[0]
+                    goal_y = norman_coords[1] + 1
+
+                    logger.info(f"💚 [DAD HP] HP < 100%, in gym, Norman at {norman_coords}")
+                    print(f"💚 [DAD HP] HP < 100%, in gym, navigating to Norman [{norman_coords}]")
                     
                     return {
-                        'goal_coords': (4, 108, 'PETALBURG_CITY_GYM'),
-                        'npc_coords': (4, 107),
+                        'goal_coords': (goal_x, goal_y, 'PETALBURG_CITY_GYM'),
+                        'npc_coords': norman_coords,
                         'should_interact': True,
-                        'description': f'Navigate to Norman at (4, 107) [HP: {current_hp}/{max_hp}]'
+                        'description': f'Navigate to Norman at {norman_coords} [HP: {current_hp}/{max_hp}]'
                     }
                 else:
                     # In Petalburg City - navigate to gym entrance
@@ -1093,16 +1214,32 @@ class ObjectiveManager:
                     in_pokecenter = 'POKEMON CENTER' in current_location or 'POKECENTER' in current_location
                     
                     if in_pokecenter:
-                        # Navigate to nurse and interact
-                        # Nurse is at (7, 3), we need to be at (7, 4) facing UP
-                        logger.info(f"🏥 [POKECENTER] In Pokemon Center, navigating to nurse at (7, 3)")
-                        print(f"🏥 [POKECENTER] In Pokemon Center - talking to nurse")
+                        # Dynamically resolve Nurse Joy position
+                        # Nurse Joy: graphics_id=29 (NURSE sprite), local_id=1
+                        # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
+                        NURSE_GFX_ID = 29
+                        NURSE_LOCAL_ID = 1
+                        NURSE_FALLBACK = (7, 3)
+
+                        nurse_coords = self._resolve_npc_coords(
+                            state_data,
+                            npc_role="nurse",
+                            graphics_id=NURSE_GFX_ID,
+                            local_id=NURSE_LOCAL_ID,
+                            fallback=NURSE_FALLBACK,
+                        )
+                        # Stand one tile south of nurse to face UP
+                        goal_x = nurse_coords[0]
+                        goal_y = nurse_coords[1] + 1
+
+                        logger.info(f"🏥 [POKECENTER] In Pokemon Center, nurse at {nurse_coords}")
+                        print(f"🏥 [POKECENTER] In Pokemon Center - talking to nurse [{nurse_coords}]")
                         
                         return {
-                            'goal_coords': (7, 4, current_location),
-                            'npc_coords': (7, 3),  # Nurse position
+                            'goal_coords': (goal_x, goal_y, current_location),
+                            'npc_coords': nurse_coords,
                             'should_interact': True,
-                            'description': 'Navigate to (7, 4) and interact with nurse at (7, 3) to heal Pokemon'
+                            'description': f'Navigate to ({goal_x},{goal_y}) and interact with nurse at {nurse_coords} to heal Pokemon'
                         }
                     else:
                         # Not in Pokemon Center yet - navigate there using the navigation planner
@@ -1290,16 +1427,33 @@ class ObjectiveManager:
                 next_milestone = next_after_rival
                 special_handling = next_after_rival.get("special")  # Update special handling for new milestone
             else:
-                # Navigate to rival position (9,3) to interact with rival at (10,3)
+                # Dynamically resolve rival position from gObjectEvents
+                # Rival May on Route 103: graphics_id=105, local_id=2
+                # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
+                RIVAL_GFX_ID = 105
+                RIVAL_LOCAL_ID = 2
+                RIVAL_FALLBACK = (10, 3)  # hardcoded safety net
+
+                rival_coords = self._resolve_npc_coords(
+                    state_data,
+                    npc_role="rival",
+                    graphics_id=RIVAL_GFX_ID,
+                    local_id=RIVAL_LOCAL_ID,
+                    fallback=RIVAL_FALLBACK,
+                )
+                # Stand one tile west of the rival to face RIGHT
+                goal_x = rival_coords[0] - 1
+                goal_y = rival_coords[1]
+
                 logger.info(f"🎯 [RIVAL BATTLE] ROUTE_103 complete, RECEIVED_POKEDEX not complete, rival not battled")
-                logger.info(f"🎯 [RIVAL BATTLE] Navigating to (9,3) to interact with rival at (10,3)")
-                print(f"🎯 [RIVAL BATTLE] Navigate to rival at Route 103")
+                logger.info(f"🎯 [RIVAL BATTLE] Rival at {rival_coords} → goal ({goal_x},{goal_y})")
+                print(f"🎯 [RIVAL BATTLE] Navigate to rival at Route 103 [{rival_coords}]")
                 
                 return {
-                    'goal_coords': (9, 3, 'ROUTE_103'),
-                    'npc_coords': (10, 3),
+                    'goal_coords': (goal_x, goal_y, 'ROUTE_103'),
+                    'npc_coords': rival_coords,
                     'should_interact': True,
-                    'description': 'Navigate to (9,3) and face RIGHT to interact with rival at (10,3)'
+                    'description': f'Navigate to ({goal_x},{goal_y}) and face RIGHT to interact with rival at {rival_coords}'
                 }
         
         # =====================================================================
@@ -1475,7 +1629,19 @@ class ObjectiveManager:
                 
                 # Roxanne is at (5, 2), so when at (5, 3) we need to interact
                 ROXANNE_POSITION = (5, 3)
-                ROXANNE_NPC_COORDS = (5, 2)
+                ROXANNE_FALLBACK = (5, 2)
+                # Dynamically resolve Roxanne's position
+                # Roxanne: graphics_id=89 (GYM_LEADER sprite), local_id=1
+                # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
+                ROXANNE_GFX_ID = 89
+                ROXANNE_LOCAL_ID = 1
+                roxanne_npc_coords = self._resolve_npc_coords(
+                    state_data,
+                    npc_role="gym_leader_roxanne",
+                    graphics_id=ROXANNE_GFX_ID,
+                    local_id=ROXANNE_LOCAL_ID,
+                    fallback=ROXANNE_FALLBACK,
+                )
                 
                 current_pos = (current_x, current_y)
                 
@@ -1504,7 +1670,7 @@ class ObjectiveManager:
                         
                         if should_interact:
                             result['should_interact'] = True
-                            result['npc_coords'] = ROXANNE_NPC_COORDS
+                            result['npc_coords'] = roxanne_npc_coords
                         
                         return result
                 

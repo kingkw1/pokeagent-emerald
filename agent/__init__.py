@@ -45,6 +45,7 @@ from .planning import planning_step
 from .simple import SimpleAgent, get_simple_agent, simple_mode_processing_multiprocess, configure_simple_agent_defaults
 from .opener_bot import OpenerBot, get_opener_bot
 from .brain.memory import EpisodicMemory
+from .brain.npc_registry import NpcRegistry
 from .brain.planner import RecoveryPlanner
 from .brain.strategic_planner import StrategicPlanner
 from .brain.walkthrough_db import WalkthroughDB
@@ -95,6 +96,10 @@ class Agent:
             
             # 🧠 Brain initialization (Memory + ObjectiveManager + Planner)
             self.episodic_memory = EpisodicMemory(db_path="./memory_db")
+            self.npc_registry = NpcRegistry(
+                json_path="./npc_registry.json",
+                episodic_memory=self.episodic_memory,
+            )
             
             # Phase 4.3a: Shadow-mode RAG planner (runs alongside milestones)
             self.walkthrough_db = WalkthroughDB(db_path="./memory_db")
@@ -107,7 +112,10 @@ class Agent:
                 self.strategic_planner = None
                 print(f"   🧠 Strategic Planner: INACTIVE (run scripts/build_walkthrough_db.py first)")
             
-            self.objective_manager = ObjectiveManager(strategic_planner=self.strategic_planner)
+            self.objective_manager = ObjectiveManager(
+                strategic_planner=self.strategic_planner,
+                npc_registry=self.npc_registry,
+            )
             self.planner = RecoveryPlanner(vlm=self.vlm, memory=self.episodic_memory, verbose=True)
             
             # Pre-seed knowledge for mid-game save states
@@ -164,6 +172,7 @@ class Agent:
                     'party': game_state.get('party', []),  # ADD PARTY DATA!
                     'milestones': game_state.get('milestones', {}),
                     'visual': game_state.get('visual', {}),
+                    'active_npcs': game_state.get('active_npcs', []),
                     'step_number': game_state.get('step_number', 0),
                     'status': game_state.get('status', ''),
                     'action_queue_length': game_state.get('action_queue_length', 0),
@@ -299,6 +308,15 @@ class Agent:
                 self.context['visual_dialogue_active'] = visual_dialogue_active
                 logger.info(f"[AGENT] Visual dialogue detection: {visual_dialogue_active}")
                 
+                # ── Phase 4.4d: NPC Identity Observation Hook ──────────
+                # On dialogue False→True transition, identify the NPC we
+                # just started talking to by finding the nearest active NPC
+                # and pairing it with the VLM speaker field.
+                prev_dialogue = getattr(self, '_prev_dialogue_active', False)
+                if visual_dialogue_active and not prev_dialogue:
+                    self._observe_npc_identity(state_data, perception_output)
+                self._prev_dialogue_active = visual_dialogue_active
+                
                 # 2. Planning - decide strategy with robust programmatic check
                 should_replan = False
                 current_plan = self.context.get('planning_output', None)
@@ -328,7 +346,13 @@ class Agent:
                 # Detect oscillation: check if we're bouncing between same 2-3 positions
                 # GUARD: Skip during battles — player position is static in battle, so
                 # the detector would always fire after 6 steps of combat.
+                # GUARD: Skip during dialogue — position is frozen while the
+                # agent spams A to advance text, causing false oscillation.
                 in_battle_now = state_data.get('game', {}).get('in_battle', False)
+                in_dialogue_now = (
+                    visual_dialogue_active
+                    or state_data.get('game', {}).get('in_dialog', False)
+                )
 
                 # ── Post-battle grace: clear stale position history ──
                 # During battle the player position is frozen, so the history
@@ -343,7 +367,7 @@ class Agent:
                     self.position_history = [current_position]
                 self._was_in_battle_for_stuck = in_battle_now
 
-                if not in_battle_now and len(self.position_history) >= 6:
+                if not in_battle_now and not in_dialogue_now and len(self.position_history) >= 6:
                     # Check if last 6 positions contain only 2 unique positions
                     recent_positions = self.position_history[-6:]
                     unique_positions = set(recent_positions)
@@ -488,6 +512,77 @@ class Agent:
                         print(f"   Error debugging state_data: {debug_e}")
                 
                 return None
+
+    # ── Phase 4.4d: NPC Identity Observation ─────────────────
+    def _observe_npc_identity(self, state_data, perception_output):
+        """Record NPC identity when dialogue starts after interaction.
+
+        Finds the nearest active NPC to the player and pairs it with the
+        VLM ``on_screen_text.speaker`` field to populate the NPC registry.
+        """
+        if not hasattr(self, 'npc_registry'):
+            return
+
+        try:
+            # Extract player position
+            player = state_data.get('player', {})
+            position = player.get('position', {})
+            px = position.get('x')
+            py = position.get('y')
+            location = player.get('location', '')
+            if px is None or py is None or not location:
+                return
+
+            # Find nearest NPC
+            active_npcs = state_data.get('active_npcs', [])
+            from .brain.npc_registry import NpcRegistry
+            nearest = NpcRegistry.infer_nearest_npc(active_npcs, px, py, max_distance=3)
+            if not nearest:
+                logger.debug("[NPC OBSERVE] No nearby NPC found during dialogue start")
+                return
+
+            local_id = nearest.get('local_id')
+            graphics_id = nearest.get('graphics_id')
+            if local_id is None:
+                return
+
+            # Extract speaker name from VLM perception
+            speaker = None
+            if perception_output:
+                visual_data = perception_output.get('visual_data', {})
+                on_screen = visual_data.get('on_screen_text', {})
+                raw_speaker = on_screen.get('speaker')
+                if raw_speaker and isinstance(raw_speaker, str) and raw_speaker.strip():
+                    # Filter out VLM instruction echoes
+                    low = raw_speaker.lower()
+                    if 'character name' not in low and 'or null' not in low:
+                        speaker = raw_speaker.strip()
+
+            # Infer role from speaker name if possible
+            role = None
+            if speaker:
+                from .brain.npc_registry import _canon_role, ROLE_ALIASES
+                canon = _canon_role(speaker)
+                # If canon differs from the raw lowered name, the alias matched a role
+                if canon != speaker.strip().lower():
+                    role = canon
+
+            step_count = getattr(self, '_step_count', 0)
+            self.npc_registry.register_npc(
+                location,
+                local_id,
+                name=speaker,
+                role=role,
+                graphics_id=graphics_id,
+                step=step_count,
+            )
+            logger.info(
+                f"[NPC OBSERVE] Dialogue start → registered NPC: "
+                f"speaker={speaker}, gfx={graphics_id}, local={local_id} "
+                f"at {location}"
+            )
+        except Exception as e:
+            logger.warning(f"[NPC OBSERVE] Failed to observe NPC identity: {e}")
 
 
 __all__ = [

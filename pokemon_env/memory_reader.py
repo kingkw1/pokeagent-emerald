@@ -88,8 +88,9 @@ class MemoryAddresses:
     
     # Object Event addresses (NPCs/trainers)
     OBJECT_EVENTS_COUNT = 16  # Max NPCs per map
-    OBJECT_EVENT_SIZE = 68    # Size of each ObjectEvent struct in memory (larger than saved version)
+    OBJECT_EVENT_SIZE = 68    # Size used by legacy methods (INCORRECT per pokeemerald; actual = 0x24 = 36)
     # gObjectEvents is at 0x02037230 for active map objects
+    # See read_active_npcs() for the canonical implementation with correct struct layout.
     
     # Battle addresses
     BATTLE_TYPE = 0x02023E82
@@ -2570,8 +2571,19 @@ class PokemonEmeraldReader:
                 logger.info(f"Final state party: {state['player']['party']}")
             else:
                 self._rate_limited_warning("No Pokemon found in party", "party_empty")
-        
-                
+
+            # Active NPCs on current map (Phase 4.4b: dynamic NPC targeting)
+            try:
+                active_npcs = self.read_active_npcs()
+                if active_npcs:
+                    state["active_npcs"] = active_npcs
+                    logger.debug(f"Found {len(active_npcs)} active NPCs on current map")
+                else:
+                    state["active_npcs"] = []
+            except Exception as npc_err:
+                logger.debug(f"Could not read active NPCs: {npc_err}")
+                state["active_npcs"] = []
+
         except Exception as e:
             import traceback
             logger.warning(f"Failed to read comprehensive state: {e}")
@@ -3809,13 +3821,147 @@ class PokemonEmeraldReader:
             logger.warning(f"Failed to get game progress context: {e}")
             return {}
     
+    # ==================================================================
+    # Phase 4.4a — Canonical NPC Detection via gObjectEvents
+    # ==================================================================
+    # Struct layout validated against pokeemerald decompilation:
+    #   https://github.com/pret/pokeemerald/blob/master/include/global.fieldmap.h
+    #
+    # struct ObjectEvent (0x24 = 36 bytes):
+    #   +0x00  u32 flags  (bit 0 = active, bit 13 = invisible,
+    #                       bit 14 = offScreen, bit 16 = isPlayer)
+    #   +0x04  u8  spriteId
+    #   +0x05  u8  graphicsId
+    #   +0x06  u8  movementType
+    #   +0x07  u8  trainerType
+    #   +0x08  u8  localId
+    #   +0x09  u8  mapNum
+    #   +0x0A  u8  mapGroup
+    #   +0x0B  u8  currentElevation:4 | previousElevation:4
+    #   +0x0C  s16 initialCoords.x
+    #   +0x0E  s16 initialCoords.y
+    #   +0x10  s16 currentCoords.x
+    #   +0x12  s16 currentCoords.y
+    #   +0x14  s16 previousCoords.x
+    #   +0x16  s16 previousCoords.y
+    #   +0x18  ...  (direction / range fields)
+    #   size = 0x24 (36 bytes)
+    #
+    # Array: gObjectEvents[16] at 0x02037230
+    # ==================================================================
+
+    _GOBJECT_EVENTS_ADDR = 0x02037230
+    _OBJECT_EVENT_SLOTS = 16
+    _OBJECT_EVENT_SIZE = 0x24  # 36 bytes per pokeemerald decompilation
+    _MAP_OFFSET = 7            # pokeemerald MAP_OFFSET: border tiles added to all object coords
+
+    def read_active_npcs(self):
+        """
+        Read all active NPC / player ObjectEvents from the gObjectEvents array.
+
+        Uses the pokeemerald-validated struct layout (36 bytes per slot, 16 slots).
+        Coordinates are adjusted by ``-MAP_OFFSET`` (7) so they match the
+        player-visible map coordinates returned by ``read_coordinates()``.
+
+        Returns *all* active entries including the player (identified via
+        ``is_player`` flag).  Callers can filter as needed.
+
+        Returns:
+            list[dict]: Each dict contains:
+                slot, graphics_id, movement_type, trainer_type, local_id,
+                map_num, map_group, current_x, current_y, initial_x, initial_y,
+                previous_x, previous_y, is_player, active, invisible,
+                memory_address
+        """
+        results = []
+
+        try:
+            for slot in range(self._OBJECT_EVENT_SLOTS):
+                addr = self._GOBJECT_EVENTS_ADDR + slot * self._OBJECT_EVENT_SIZE
+
+                # --- flags (u32 bitfield) ---
+                flags = self._read_u32(addr + 0x00)
+                is_active = bool(flags & 0x1)
+
+                if not is_active:
+                    continue
+
+                is_invisible = bool(flags & (1 << 13))
+                is_off_screen = bool(flags & (1 << 14))
+                is_player = bool(flags & (1 << 16))
+
+                # --- scalar fields ---
+                sprite_id    = self._read_u8(addr + 0x04)
+                graphics_id  = self._read_u8(addr + 0x05)
+                movement_type = self._read_u8(addr + 0x06)
+                trainer_type = self._read_u8(addr + 0x07)
+                local_id     = self._read_u8(addr + 0x08)
+                map_num      = self._read_u8(addr + 0x09)
+                map_group    = self._read_u8(addr + 0x0A)
+
+                # --- raw coordinates (include MAP_OFFSET border) ---
+                raw_initial_x  = self._read_s16(addr + 0x0C)
+                raw_initial_y  = self._read_s16(addr + 0x0E)
+                raw_current_x  = self._read_s16(addr + 0x10)
+                raw_current_y  = self._read_s16(addr + 0x12)
+                raw_previous_x = self._read_s16(addr + 0x14)
+                raw_previous_y = self._read_s16(addr + 0x16)
+
+                # Apply MAP_OFFSET correction so coords match read_coordinates()
+                current_x  = raw_current_x  - self._MAP_OFFSET
+                current_y  = raw_current_y  - self._MAP_OFFSET
+                initial_x  = raw_initial_x  - self._MAP_OFFSET
+                initial_y  = raw_initial_y  - self._MAP_OFFSET
+                previous_x = raw_previous_x - self._MAP_OFFSET
+                previous_y = raw_previous_y - self._MAP_OFFSET
+
+                # --- basic sanity filters ---
+                if raw_current_x == 0 and raw_current_y == 0:
+                    continue  # uninitialised slot
+                if current_x < -50 or current_x > 500:
+                    continue
+                if current_y < -50 or current_y > 500:
+                    continue
+
+                results.append({
+                    "slot": slot,
+                    "graphics_id": graphics_id,
+                    "sprite_id": sprite_id,
+                    "movement_type": movement_type,
+                    "trainer_type": trainer_type,
+                    "local_id": local_id,
+                    "map_num": map_num,
+                    "map_group": map_group,
+                    "current_x": current_x,
+                    "current_y": current_y,
+                    "initial_x": initial_x,
+                    "initial_y": initial_y,
+                    "previous_x": previous_x,
+                    "previous_y": previous_y,
+                    "is_player": is_player,
+                    "invisible": is_invisible,
+                    "off_screen": is_off_screen,
+                    "active": True,
+                    "memory_address": addr,
+                })
+
+            logger.debug(f"read_active_npcs: {len(results)} active object events")
+            return results
+
+        except Exception as e:
+            logger.error(f"read_active_npcs failed: {e}")
+            return []
+
     def read_object_events(self):
         """
-        Read NPC/trainer object events using OAM sprite detection for walking positions.
-        
+        DEPRECATED — Use ``read_active_npcs()`` for reliable NPC detection.
+
+        Legacy NPC reader using OAM sprite detection for walking positions.
+        Retained for backward compatibility with ``get_comprehensive_state()``.
+
         1. First try OAM (Object Attribute Memory) for actual visual sprite positions
         2. Fallback to static spawn positions from gObjectEvents
-        
+
         Returns:
             list: List of object events with their current walking positions
         """
@@ -3855,8 +4001,10 @@ class PokemonEmeraldReader:
     
     def _read_runtime_object_events(self, player_x, player_y):
         """
+        DEPRECATED — Use ``read_active_npcs()`` instead.
+
         Try to read NPCs from runtime sources:
-        1. First try gSprites array (visual sprite positions)  
+        1. First try gSprites array (visual sprite positions)
         2. Fallback to EWRAM addresses and legacy gObjectEvents
         """
         object_events = []
@@ -3954,6 +4102,8 @@ class PokemonEmeraldReader:
     
     def _read_gsprites_npcs(self, player_x, player_y):
         """
+        DEPRECATED — Use ``read_active_npcs()`` instead.
+
         Read NPCs from gSprites array (actual visual sprite positions during movement)
         Based on pokeemerald research: proper coordinate conversion with MAP_OFFSET
         """
@@ -4040,7 +4190,7 @@ class PokemonEmeraldReader:
         return object_events
     
     def _read_legacy_gobject_events(self, player_x, player_y):
-        """Legacy gObjectEvents reading method (fallback)"""
+        """DEPRECATED — Use ``read_active_npcs()`` instead. Legacy gObjectEvents fallback."""
         object_events = []
         
         try:
@@ -4251,6 +4401,8 @@ class PokemonEmeraldReader:
     
     def _read_gobject_walking_positions(self, player_x, player_y):
         """
+        DEPRECATED — Use ``read_active_npcs()`` instead.
+
         Read NPCs from gObjectEvents array using currentCoords for actual walking positions.
         Based on pokeemerald decompilation: ObjectEvent.currentCoords gives real-time positions.
         
@@ -4645,6 +4797,8 @@ class PokemonEmeraldReader:
     
     def _read_proper_gobject_events(self, player_x, player_y):
         """
+        DEPRECATED — Use ``read_active_npcs()`` instead.
+
         Read NPCs from proper gObjectEvents array using ObjectEvent structure validation.
         Based on pokeemerald decompilation.
         """
@@ -4721,6 +4875,8 @@ class PokemonEmeraldReader:
     
     def _read_known_npc_addresses(self, player_x, player_y):
         """
+        DEPRECATED — Use ``read_active_npcs()`` instead.
+
         Fallback method: Read NPCs from known addresses found in ground truth validation.
         Used when gObjectEvents array is inactive (e.g., in save states).
         """
