@@ -271,6 +271,7 @@ class ObjectiveManager:
         self._blocker_state: Optional[Dict[str, Any]] = None  # {reason, context} when blocked
         self._brain_prev_in_battle: bool = False
         self._last_logged_dialogue: Optional[str] = None
+        self._consecutive_dialogue_steps: int = 0  # Track repeated dialogue presses to break NPC re-trigger loops
         
         # ── Phase 4.3a/b: RAG-based strategic planning ──
         self.strategic_planner = strategic_planner
@@ -914,6 +915,32 @@ class ObjectiveManager:
         # CRITICAL: Always check for dialogue FIRST before any navigation
         # If dialogue is active, we must complete it before doing anything else
         if is_dialogue_active():
+            self._consecutive_dialogue_steps += 1
+            
+            # After 6+ consecutive dialogue presses with no progress, force movement
+            # to break free from NPC re-trigger loops (e.g., talking to defeated trainer)
+            if self._consecutive_dialogue_steps > 6:
+                logger.warning(f"🚨 [DIALOGUE LOOP] {self._consecutive_dialogue_steps} consecutive dialogue steps — forcing movement to break free")
+                print(f"🚨 [DIALOGUE LOOP] Stuck in dialogue loop — moving away")
+                self._consecutive_dialogue_steps = 0
+                return {
+                    'goal_direction': 'south',
+                    'description': 'Break free from dialogue loop — move away from NPC',
+                    'journey_reason': 'Dialogue loop escape'
+                }
+            
+            # After 3+ consecutive dialogue presses, use B instead of A.
+            # B advances dialogue text but won't re-initiate NPC conversation.
+            if self._consecutive_dialogue_steps > 3:
+                logger.info(f"⚠️ [DIALOGUE] {self._consecutive_dialogue_steps} consecutive presses — switching to B (won't re-trigger NPC)")
+                print(f"⚠️ [DIALOGUE] Pressing B to avoid NPC re-trigger ({self._consecutive_dialogue_steps} consecutive)")
+                return {
+                    'action': 'DIALOGUE_B',
+                    'target': None,
+                    'description': 'Press B to advance dialogue (avoid NPC re-trigger)',
+                    'milestone': None
+                }
+            
             return {
                 'action': 'DIALOGUE',
                 'target': None,
@@ -932,6 +959,9 @@ class ObjectiveManager:
         # List of building keywords that indicate we're indoors but shouldn't be
         unwanted_buildings = ['HOUSE', 'MART', 'SHOP']
         in_unwanted_building = any(keyword in current_location for keyword in unwanted_buildings)
+        
+        # Reset consecutive dialogue counter since we're past the dialogue check
+        self._consecutive_dialogue_steps = 0
         
         if in_unwanted_building:
             logger.info(f"🏠 [EXIT BUILDING] Detected unwanted building: '{current_location}'")

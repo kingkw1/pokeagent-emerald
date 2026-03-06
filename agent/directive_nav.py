@@ -788,6 +788,13 @@ def execute_directive(directive, state_data, recent_actions, description=''):
         print(f"💬 [DIALOGUE] Detected - resetting post-dialogue movement counter")
         return ['A']
 
+    if action_type == 'DIALOGUE_B':
+        stuck_handler._was_in_dialogue = True
+        stuck_handler._post_dialogue_movement_count = 0
+        logger.info(f"📍 [DIRECTIVE] DIALOGUE_B - pressing B to advance (NPC-safe)")
+        print(f"💬 [DIALOGUE] Using B to advance (won't re-trigger NPC)")
+        return ['B']
+
     if action_type == 'WAIT_FOR_DIALOGUE':
         logger.info(f"📍 [DIRECTIVE] Waiting for auto-dialogue to complete - returning empty action")
         return []
