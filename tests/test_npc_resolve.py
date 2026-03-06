@@ -74,10 +74,31 @@ class TestResolveNpcCoordsPure:
         )
         assert coords == (10, 3)
 
-    def test_mismatch_criteria_uses_fallback(self, om):
-        """When graphics_id and local_id don't match the same NPC, return fallback."""
+    def test_mismatch_criteria_uses_cold_start(self, om):
+        """When graphics_id and local_id don't match the same NPC, cold-start finds nearest."""
+        state = {
+            "active_npcs": self.SAMPLE_NPCS,
+            "player": {"position": {"x": 5, "y": 3}, "location": "TEST"},
+        }
         coords = om._resolve_npc_coords(
-            self._state(), graphics_id=105, local_id=1, fallback=(99, 99)
+            state, graphics_id=105, local_id=1, fallback=(99, 99)
+        )
+        # Criteria miss → cold-start → nearest non-player NPC at (7,3) dist=2
+        assert coords == (7, 3)
+
+    def test_mismatch_criteria_no_visible_npcs_uses_fallback(self, om):
+        """Criteria miss + only invisible NPCs → fallback."""
+        npcs = [
+            {"slot": 0, "graphics_id": 0, "local_id": 0,
+             "current_x": 5, "current_y": 3,
+             "is_player": True, "invisible": False, "off_screen": False},
+            {"slot": 1, "graphics_id": 50, "local_id": 3,
+             "current_x": 20, "current_y": 20,
+             "is_player": False, "invisible": True, "off_screen": False},
+        ]
+        coords = om._resolve_npc_coords(
+            {"active_npcs": npcs, "player": {"position": {"x": 5, "y": 3}, "location": "TEST"}},
+            graphics_id=105, local_id=1, fallback=(99, 99)
         )
         assert coords == (99, 99)
 
@@ -85,10 +106,29 @@ class TestResolveNpcCoordsPure:
 
     def test_skips_player(self, om):
         """Player NPC (is_player=True) should never be returned even if criteria match."""
+        state = {
+            "active_npcs": self.SAMPLE_NPCS,
+            "player": {"position": {"x": 5, "y": 3}, "location": "TEST"},
+        }
         coords = om._resolve_npc_coords(
-            self._state(), graphics_id=0, local_id=0, fallback=(0, 0)
+            state, graphics_id=0, local_id=0, fallback=(0, 0)
         )
-        # Player has gfx=0, local_id=0.  Should be skipped → fallback
+        # Player has gfx=0, local_id=0.  Skipped in criteria scan AND cold-start.
+        # Cold-start returns nearest non-player NPC at (7,3)
+        assert coords == (7, 3)
+
+    def test_skips_player_only_npc(self, om):
+        """When the only NPC is the player, return fallback."""
+        npcs = [
+            {"slot": 0, "graphics_id": 0, "local_id": 0,
+             "current_x": 5, "current_y": 3,
+             "is_player": True, "invisible": False, "off_screen": False},
+        ]
+        coords = om._resolve_npc_coords(
+            {"active_npcs": npcs, "player": {"position": {"x": 5, "y": 3}, "location": "TEST"}},
+            graphics_id=0, local_id=0, fallback=(0, 0)
+        )
+        # Only NPC is player → criteria skip + cold-start skip → fallback
         assert coords == (0, 0)
 
     # --- Invisible / off-screen filtering ---
@@ -121,15 +161,29 @@ class TestResolveNpcCoordsPure:
 
     # --- Fallback behaviour ---
 
-    def test_returns_fallback_when_not_found(self, om):
+    def test_criteria_miss_uses_cold_start(self, om):
+        """When criteria don't match any NPC, cold-start finds nearest."""
+        state = {
+            "active_npcs": self.SAMPLE_NPCS,
+            "player": {"position": {"x": 10, "y": 3}, "location": "TEST"},
+        }
         coords = om._resolve_npc_coords(
-            self._state(), graphics_id=999, fallback=(42, 42)
+            state, graphics_id=999, fallback=(42, 42)
+        )
+        # Player at (10,3), nearest visible non-player NPC is (10,3) gfx=105
+        assert coords == (10, 3)
+
+    def test_criteria_miss_empty_npcs_uses_fallback(self, om):
+        """Criteria miss + empty NPC list → fallback."""
+        coords = om._resolve_npc_coords(
+            {"active_npcs": []}, graphics_id=999, fallback=(42, 42)
         )
         assert coords == (42, 42)
 
-    def test_returns_none_when_not_found_no_fallback(self, om):
+    def test_returns_none_when_no_npcs_no_fallback(self, om):
+        """No active NPCs, no fallback → None."""
         coords = om._resolve_npc_coords(
-            self._state(), graphics_id=999
+            {"active_npcs": []}, graphics_id=999
         )
         assert coords is None
 
@@ -146,12 +200,25 @@ class TestResolveNpcCoordsPure:
         )
         assert coords == (10, 3)
 
-    # --- Edge: no criteria given ---
+    # --- Edge: no criteria given → cold-start nearest NPC ---
 
-    def test_no_criteria_returns_fallback(self, om):
-        """If neither graphics_id nor local_id is specified, return fallback."""
+    def test_no_criteria_uses_cold_start(self, om):
+        """If neither graphics_id, local_id, nor npc_role is specified,
+        cold-start inference kicks in and returns the nearest NPC."""
+        # State with player at (0,0) — nearest non-player NPC is at (7,3) then (5, 3) etc.
+        state = {
+            "active_npcs": self.SAMPLE_NPCS,
+            "player": {"position": {"x": 5, "y": 3}, "location": "TEST"},
+        }
+        coords = om._resolve_npc_coords(state, fallback=(0, 0))
+        # Should return nearest NPC, not fallback
+        # Player at (5,3), NPC at (7,3) distance=2, NPC at (10,3) distance=5
+        assert coords == (7, 3)
+
+    def test_no_criteria_empty_npcs_returns_fallback(self, om):
+        """With no active NPCs and no criteria, fall back."""
         coords = om._resolve_npc_coords(
-            self._state(), fallback=(0, 0)
+            {"active_npcs": []}, fallback=(0, 0)
         )
         assert coords == (0, 0)
 
@@ -212,13 +279,15 @@ class TestResolveNpcCoordsIntegration:
         assert abs(coords[0] - 10) <= 2, f"Rival X={coords[0]}, expected ~10"
         assert abs(coords[1] - 3) <= 2, f"Rival Y={coords[1]}, expected ~3"
 
-    def test_resolve_nonexistent_npc_returns_fallback(self, rival_state_data):
-        """NPC with non-matching criteria should return fallback."""
+    def test_resolve_nonexistent_criteria_uses_cold_start(self, rival_state_data):
+        """NPC with non-matching criteria → cold-start finds nearest visible NPC."""
         om = ObjectiveManager()
         coords = om._resolve_npc_coords(
             rival_state_data, graphics_id=999, fallback=(99, 99)
         )
-        assert coords == (99, 99)
+        # Cold-start picks up a real NPC from the save state
+        assert coords is not None
+        assert coords != (99, 99), "Expected cold-start to find a real NPC, not fallback"
 
     def test_rival_directive_uses_dynamic_coords(self, rival_state_data):
         """The rival battle directive should use resolved coords, not hardcoded."""

@@ -17,6 +17,7 @@ from agent.pathfinding import (
     _pathfind_to_target, _local_pathfind_from_tiles,
     _astar_pathfind_with_grid_data, pathfind_to_goal,
     _dynamically_blocked_tiles, _recent_positions,
+    update_npc_obstacles,
 )
 from agent import stuck_handler
 
@@ -147,7 +148,8 @@ def _handle_goal_coords(directive, state_data, recent_actions, description, loca
     if distance > 0:
         print(f"🔍 [GOAL_COORDS] Distance={distance}, about to call pathfind_to_goal({goal_x}, {goal_y})")
 
-        pathfound_action = pathfind_to_goal(state_data, goal_x, goal_y, avoid_grass=avoid_grass)
+        pathfound_action = pathfind_to_goal(state_data, goal_x, goal_y, avoid_grass=avoid_grass,
+                                             npc_coords=npc_coords)
 
         if pathfound_action:
             path_list = pathfound_action if isinstance(pathfound_action, list) else [pathfound_action]
@@ -417,6 +419,9 @@ def _handle_navigate_direction(directive, state_data):
             for key, value in grid_serializable.items():
                 x, y = map(int, key.split(','))
                 location_grid[(x, y)] = value
+
+            # Refresh NPC obstacles before direct A* calls (bypass callers)
+            update_npc_obstacles(state_data)
 
             if use_directional:
                 logger.info(f"🗺️ [NAVIGATE_DIRECTION] Using directional A* moving {direction} to reach {target_location}")

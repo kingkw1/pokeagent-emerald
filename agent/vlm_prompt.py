@@ -28,6 +28,7 @@ from agent.pathfinding import (
     _local_pathfind_from_tiles,
     _astar_pathfind_with_grid_data,
     _recent_positions,
+    update_npc_obstacles,
 )
 from agent import stuck_handler
 from agent.vlm_action import parse_vlm_response
@@ -469,6 +470,9 @@ def _compute_nav_suggestion(state_data, player_data, current_plan, current_posit
                         for key, value in grid_serializable.items():
                             x, y = map(int, key.split(','))
                             location_grid[(x, y)] = value
+
+                        # Refresh NPC obstacles before direct A* call
+                        update_npc_obstacles(state_data)
 
                         astar_direction = _astar_pathfind_with_grid_data(
                             location_grid=location_grid, bounds=bounds,

@@ -39,6 +39,13 @@ _recent_positions = deque(maxlen=10)
 # Dict mapping (world_x, world_y, location) → remaining TTL (decremented each action_step call)
 _dynamically_blocked_tiles = {}
 
+# Live NPC obstacle tiles — refreshed every pathfind call from gObjectEvents.
+# Unlike _dynamically_blocked_tiles (sticky TTL), these are ephemeral: rebuilt
+# from scratch on each pathfind_to_goal() invocation so moving NPCs are handled
+# correctly without leaving stale blocks behind.
+# Set of (world_x, world_y, location) tuples.
+_npc_occupied_tiles: set = set()
+
 # Direction offsets for converting direction names to coordinate deltas
 _DIRECTION_OFFSETS = {
     'UP': (0, -1),
@@ -46,6 +53,58 @@ _DIRECTION_OFFSETS = {
     'LEFT': (-1, 0),
     'RIGHT': (1, 0)
 }
+
+
+def update_npc_obstacles(
+    state_data: Dict[str, Any],
+    *,
+    exclude_coords: Optional[Tuple[int, int]] = None,
+) -> None:
+    """
+    Refresh ``_npc_occupied_tiles`` from the live ``active_npcs`` list.
+
+    Called at the top of every ``pathfind_to_goal()`` invocation so A* and
+    local BFS treat NPC-occupied tiles as impassable walls.
+
+    Args:
+        state_data: Current game state (must contain ``active_npcs`` list
+            and ``player.position`` / ``player.location``).
+        exclude_coords: Optional ``(x, y)`` of the *target* NPC.  When
+            navigating *to* an NPC, their tile must stay walkable so
+            A* can plan a path that ends adjacent or on-top.
+    """
+    global _npc_occupied_tiles
+    _npc_occupied_tiles = set()
+
+    location = state_data.get('player', {}).get('location', '')
+    active_npcs = state_data.get('active_npcs', [])
+
+    if not active_npcs or not location:
+        return
+
+    for npc in active_npcs:
+        # Skip the player's own object event
+        if npc.get('is_player'):
+            continue
+        # Skip invisible / off-screen NPCs (they don't physically block)
+        if npc.get('invisible') or npc.get('off_screen'):
+            continue
+
+        nx = npc.get('current_x')
+        ny = npc.get('current_y')
+        if nx is None or ny is None:
+            continue
+
+        # Don't block the tile of the NPC we're walking *toward*
+        if exclude_coords and (nx, ny) == exclude_coords:
+            continue
+
+        key = (nx, ny, location)
+        _npc_occupied_tiles.add(key)
+
+    if _npc_occupied_tiles:
+        logger.debug(f"[NPC OBSTACLES] Refreshed {len(_npc_occupied_tiles)} NPC tiles "
+                     f"on {location} (excluded={exclude_coords})")
 
 
 # ============================================================================
@@ -204,6 +263,9 @@ def _pathfind_to_target(state_data: Dict[str, Any], target_x: int, target_y: int
             world_y = current_y + (y - center)
             if (world_x, world_y, current_location) in _dynamically_blocked_tiles:
                 return False
+            # Check live NPC obstacle tiles
+            if (world_x, world_y, current_location) in _npc_occupied_tiles:
+                return False
             
             tile = raw_tiles[y][x]
             symbol = format_tile_to_symbol(tile) if tile else '?'
@@ -323,6 +385,9 @@ def _local_pathfind_from_tiles(state_data: Dict[str, Any], goal_direction: str, 
             world_x = current_x + (x - center)
             world_y = current_y + (y - center)
             if (world_x, world_y, current_location) in _dynamically_blocked_tiles:
+                return False
+            # Check live NPC obstacle tiles
+            if (world_x, world_y, current_location) in _npc_occupied_tiles:
                 return False
             
             tile = raw_tiles[y][x]
@@ -613,6 +678,9 @@ def _astar_pathfind_to_coords_with_grid(
                 return False
             # Check dynamically blocked tiles (NPC/obstacle positions)
             if (pos[0], pos[1], location) in _dynamically_blocked_tiles:
+                return False
+            # Check live NPC obstacle tiles
+            if (pos[0], pos[1], location) in _npc_occupied_tiles:
                 return False
             tile = location_grid[pos]
             return tile in ['.', '_', '~', 'D', 'S', 'N', '?']  # Include NPCs as potential targets, '?' for frontier tiles
@@ -1168,6 +1236,9 @@ def _astar_pathfind_with_grid_data(
             # Check dynamically blocked tiles (NPC/obstacle positions)
             if (pos[0], pos[1], location) in _dynamically_blocked_tiles:
                 return False
+            # Check live NPC obstacle tiles
+            if (pos[0], pos[1], location) in _npc_occupied_tiles:
+                return False
             tile = location_grid[pos]
             
             # Diagonal ledges are IMPASSABLE - treat as walls
@@ -1555,7 +1626,8 @@ def _astar_pathfind_with_grid_data(
 # ============================================================================
 
 def pathfind_to_goal(state_data: Dict[str, Any], goal_x: int, goal_y: int,
-                     avoid_grass: bool = True) -> Optional[List[str]]:
+                     avoid_grass: bool = True,
+                     npc_coords: Optional[Tuple[int, int]] = None) -> Optional[List[str]]:
     """
     Multi-tier pathfinding to reach a goal coordinate.
 
@@ -1571,15 +1643,34 @@ def pathfind_to_goal(state_data: Dict[str, Any], goal_x: int, goal_y: int,
         goal_x: Target world X coordinate
         goal_y: Target world Y coordinate
         avoid_grass: If True, penalize grass tiles to avoid encounters
+        npc_coords: Optional (x, y) of the target NPC.  That NPC's tile
+            is excluded from the obstacle set so A* can plan a path to it.
 
     Returns:
         List of direction strings or None if no path found
     """
+    # Refresh NPC obstacle layer from live gObjectEvents data.
+    # Exclude the target NPC tile so A* can pathfind *to* them.
+    update_npc_obstacles(state_data, exclude_coords=npc_coords)
+
     player_data = state_data.get('player', {})
     position = player_data.get('position', {})
     current_x = position.get('x', 0)
     current_y = position.get('y', 0)
     location = player_data.get('location', '')
+
+    # Debug: log NPC obstacle count for diagnosis
+    if _npc_occupied_tiles:
+        nearby = [(x, y) for x, y, loc in _npc_occupied_tiles
+                  if loc == location and abs(x - current_x) <= 8 and abs(y - current_y) <= 8]
+        if nearby:
+            logger.debug(f"[NPC OBSTACLES] {len(_npc_occupied_tiles)} NPC tiles, "
+                         f"{len(nearby)} nearby: {sorted(nearby)}")
+    else:
+        npc_count = len(state_data.get('active_npcs', []))
+        if npc_count > 0:
+            logger.debug(f"[NPC OBSTACLES] 0 obstacle tiles despite {npc_count} active_npcs "
+                         f"(all filtered: player/invisible/off_screen?)")
 
     # Tier 1: Local A* on 15x15 visible grid
     result = _pathfind_to_target(state_data, goal_x, goal_y)

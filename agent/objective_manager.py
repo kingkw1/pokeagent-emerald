@@ -676,12 +676,13 @@ class ObjectiveManager:
         """
         Find an NPC's current (x, y) from the runtime gObjectEvents array.
 
-        Resolution order (Phase 4.4d):
+        Resolution order:
         1. **Registry lookup** — if ``npc_role`` is given and ``self.npc_registry``
            exists, look up the learned ``graphics_id`` / ``local_id`` for that role.
         2. **Explicit criteria** — use caller-supplied ``graphics_id`` / ``local_id``
-           (hardcoded fallback constants, kept as a safety net).
-        3. **Cold-start inference** — if nothing matched, pick the nearest NPC.
+           (kept as optional safety net but no longer required).
+        3. **Cold-start inference** — if neither registry nor explicit criteria
+           matched, pick the nearest visible non-player NPC.
 
         Skips the player object and invisible / off-screen NPCs.
 
@@ -704,7 +705,7 @@ class ObjectiveManager:
                             f"gfx={graphics_id}, local={local_id}")
             else:
                 logger.debug(f"[NPC RESOLVE] Registry miss for role={npc_role}, "
-                             f"falling back to explicit criteria")
+                             f"trying explicit criteria or cold-start")
 
         active_npcs = state_data.get('active_npcs', [])
         if not active_npcs:
@@ -712,43 +713,37 @@ class ObjectiveManager:
                 logger.debug(f"[NPC RESOLVE] No active_npcs in state — using fallback {fallback}")
             return fallback
 
-        for npc in active_npcs:
-            # Skip player entry
-            if npc.get('is_player'):
-                continue
-            # Skip invisible / off-screen NPCs
-            if npc.get('invisible') or npc.get('off_screen'):
-                continue
+        # ── Criteria-based scan (when graphics_id or local_id available) ──
+        has_criteria = graphics_id is not None or local_id is not None
+        if has_criteria:
+            for npc in active_npcs:
+                if npc.get('is_player'):
+                    continue
+                if npc.get('invisible') or npc.get('off_screen'):
+                    continue
+                if graphics_id is not None and npc.get('graphics_id') != graphics_id:
+                    continue
+                if local_id is not None and npc.get('local_id') != local_id:
+                    continue
 
-            # Match criteria (AND when both specified)
-            if graphics_id is not None and npc.get('graphics_id') != graphics_id:
-                continue
-            if local_id is not None and npc.get('local_id') != local_id:
-                continue
+                coords = (npc['current_x'], npc['current_y'])
+                logger.info(f"[NPC RESOLVE] Found NPC gfx={npc.get('graphics_id')} "
+                            f"local={npc.get('local_id')} at {coords}")
+                return coords
 
-            # At least one criterion must have been specified
-            if graphics_id is None and local_id is None:
-                # ── Cold-start: no criteria available, use nearest NPC ──
-                if npc_role:
-                    from agent.brain.npc_registry import NpcRegistry
-                    player = state_data.get('player', {}).get('position', {})
-                    px = player.get('x', 0)
-                    py = player.get('y', 0)
-                    nearest = NpcRegistry.infer_nearest_npc(active_npcs, px, py)
-                    if nearest:
-                        coords = (nearest['current_x'], nearest['current_y'])
-                        logger.info(f"[NPC RESOLVE] Cold-start: nearest NPC at {coords} "
-                                    f"for role={npc_role}")
-                        return coords
-                logger.warning("[NPC RESOLVE] No search criteria given")
-                return fallback
-
-            coords = (npc['current_x'], npc['current_y'])
-            logger.info(f"[NPC RESOLVE] Found NPC gfx={npc.get('graphics_id')} "
-                        f"local={npc.get('local_id')} at {coords}")
+        # ── Cold-start: no criteria or criteria didn't match ──────
+        from agent.brain.npc_registry import NpcRegistry
+        player = state_data.get('player', {}).get('position', {})
+        px = player.get('x', 0)
+        py = player.get('y', 0)
+        nearest = NpcRegistry.infer_nearest_npc(active_npcs, px, py)
+        if nearest:
+            coords = (nearest['current_x'], nearest['current_y'])
+            logger.info(f"[NPC RESOLVE] Cold-start: nearest NPC at {coords} "
+                        f"(role={npc_role})")
             return coords
 
-        # NPC not found in active list
+        # Nothing found at all
         if fallback:
             logger.info(f"[NPC RESOLVE] NPC not found (gfx={graphics_id}, local={local_id}) — "
                         f"using fallback {fallback}")
@@ -1019,17 +1014,12 @@ class ObjectiveManager:
                 # HP < 100% = need to talk to Dad
                 if in_gym:
                     # Dynamically resolve Norman's position in Petalburg Gym
-                    # Norman: graphics_id=88 (GYM_LEADER sprite), local_id=1
-                    # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
-                    NORMAN_GFX_ID = 88
-                    NORMAN_LOCAL_ID = 1
+                    # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
                     NORMAN_FALLBACK = (4, 107)
 
                     norman_coords = self._resolve_npc_coords(
                         state_data,
                         npc_role="gym_leader_norman",
-                        graphics_id=NORMAN_GFX_ID,
-                        local_id=NORMAN_LOCAL_ID,
                         fallback=NORMAN_FALLBACK,
                     )
                     # Stand one tile south of Norman to face UP
@@ -1215,17 +1205,12 @@ class ObjectiveManager:
                     
                     if in_pokecenter:
                         # Dynamically resolve Nurse Joy position
-                        # Nurse Joy: graphics_id=29 (NURSE sprite), local_id=1
-                        # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
-                        NURSE_GFX_ID = 29
-                        NURSE_LOCAL_ID = 1
+                        # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
                         NURSE_FALLBACK = (7, 3)
 
                         nurse_coords = self._resolve_npc_coords(
                             state_data,
                             npc_role="nurse",
-                            graphics_id=NURSE_GFX_ID,
-                            local_id=NURSE_LOCAL_ID,
                             fallback=NURSE_FALLBACK,
                         )
                         # Stand one tile south of nurse to face UP
@@ -1428,17 +1413,12 @@ class ObjectiveManager:
                 special_handling = next_after_rival.get("special")  # Update special handling for new milestone
             else:
                 # Dynamically resolve rival position from gObjectEvents
-                # Rival May on Route 103: graphics_id=105, local_id=2
-                # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
-                RIVAL_GFX_ID = 105
-                RIVAL_LOCAL_ID = 2
+                # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
                 RIVAL_FALLBACK = (10, 3)  # hardcoded safety net
 
                 rival_coords = self._resolve_npc_coords(
                     state_data,
                     npc_role="rival",
-                    graphics_id=RIVAL_GFX_ID,
-                    local_id=RIVAL_LOCAL_ID,
                     fallback=RIVAL_FALLBACK,
                 )
                 # Stand one tile west of the rival to face RIGHT
@@ -1632,14 +1612,10 @@ class ObjectiveManager:
                 ROXANNE_FALLBACK = (5, 2)
                 # Dynamically resolve Roxanne's position
                 # Roxanne: graphics_id=89 (GYM_LEADER sprite), local_id=1
-                # Phase 4.4d: prefer registry lookup by role, hardcoded as safety net
-                ROXANNE_GFX_ID = 89
-                ROXANNE_LOCAL_ID = 1
+                # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
                 roxanne_npc_coords = self._resolve_npc_coords(
                     state_data,
                     npc_role="gym_leader_roxanne",
-                    graphics_id=ROXANNE_GFX_ID,
-                    local_id=ROXANNE_LOCAL_ID,
                     fallback=ROXANNE_FALLBACK,
                 )
                 

@@ -244,6 +244,7 @@ class ComprehensiveStateResponse(BaseModel):
     map: dict
     milestones: dict = {}
     location_connections: dict = {}  # Add location connections for portal display
+    active_npcs: list = []  # NPC object events from gObjectEvents memory
     step_number: int
     status: str
     action_queue_length: int = 0
@@ -1139,6 +1140,7 @@ async def get_comprehensive_state():
             map=state["map"],
             milestones=state.get("milestones", {}),
             location_connections=state.get("location_connections", {}),
+            active_npcs=state.get("active_npcs", []),
             step_number=current_step,
             status="running",
             action_queue_length=queue_length,

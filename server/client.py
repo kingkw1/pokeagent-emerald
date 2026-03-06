@@ -375,7 +375,6 @@ def run_multiprocess_client(server_port=8000, args=None):
                                             'action_queue_length': state_data.get('action_queue_length', 0),
                                             'recent_actions': state_data.get('recent_actions', [])
                                         }
-                                        
                                         result = agent.step(game_state)
                                         if result and result.get('action'):
                                             # Convert action to buttons list format expected by server
