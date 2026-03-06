@@ -749,6 +749,61 @@ def get_trainers_at_location(location_name: str) -> List[Dict[str, Any]]:
     return location_data.get('trainers', [])
 
 
+def get_entrance_coords(city: str, building: str) -> Optional[Tuple[int, int]]:
+    """
+    Get the overworld coordinates of a building entrance (the tile you walk onto
+    to enter a building from the city).
+
+    Looks up ``city → building`` portal ``exit_coords`` — the tile in the *city*
+    map that triggers the warp into *building*.
+
+    >>> get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM")
+    (27, 19)
+    """
+    portal = get_portal_info(city, building)
+    if portal:
+        return portal.get('exit_coords')
+    return None
+
+
+def get_interior_exit_coords(building: str) -> Optional[Tuple[int, int]]:
+    """
+    Get the warp-tile coordinates *inside* a building that lead back to the
+    overworld.  Returns the ``entry_coords`` of the first portal whose type
+    is ``warp_tile`` and whose destination is NOT an interior sublocation.
+
+    For most buildings this is the single door tile:
+    >>> get_interior_exit_coords("PROFESSOR_BIRCHS_LAB")
+    (6, 13)
+    >>> get_interior_exit_coords("RUSTBORO_CITY_POKEMON_CENTER_1F")
+    (7, 9)
+    """
+    portals = get_location_portals(building)
+    for dest, info in portals.items():
+        if info.get('type') == 'warp_tile':
+            return info.get('entry_coords')
+    # Fallback: return entry_coords of first portal
+    for dest, info in portals.items():
+        return info.get('entry_coords')
+    return None
+
+
+def get_poi_coords(location_name: str, poi_key: str) -> Optional[Tuple[int, int]]:
+    """
+    Get the coordinates of a named point-of-interest at a location.
+
+    >>> get_poi_coords("ROUTE_103", "rival_may")
+    (9, 3)
+    >>> get_poi_coords("PETALBURG_CITY_GYM", "norman")
+    (4, 107)
+    """
+    poi = get_poi_at_location(location_name)
+    entry = poi.get(poi_key)
+    if entry:
+        return entry.get('coords')
+    return None
+
+
 # === DEBUGGING / VALIDATION ===
 
 def validate_location_graph() -> List[str]:

@@ -78,7 +78,7 @@ class NpcRegistry:
 
     def __init__(
         self,
-        json_path: str = "./npc_registry.json",
+        json_path: str = "./memory_db/npc_registry.json",
         episodic_memory=None,
     ):
         self.json_path = json_path

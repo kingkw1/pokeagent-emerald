@@ -97,7 +97,7 @@ class Agent:
             # 🧠 Brain initialization (Memory + ObjectiveManager + Planner)
             self.episodic_memory = EpisodicMemory(db_path="./memory_db")
             self.npc_registry = NpcRegistry(
-                json_path="./npc_registry.json",
+                json_path="./memory_db/npc_registry.json",
                 episodic_memory=self.episodic_memory,
             )
             

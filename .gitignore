@@ -210,6 +210,7 @@ docs/archive/
 # Memory files
 memory_db/
 memory_db_demo/
+npc_registry.json
 
 # LLM logs
 llm_logs/shadow_comparison.jsonl

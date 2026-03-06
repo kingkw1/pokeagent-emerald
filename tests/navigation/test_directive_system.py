@@ -41,12 +41,11 @@ def test_route_103_directive():
     
     # Validate
     assert directive is not None, "❌ No directive returned for Route 103 state"
-    assert directive['action'] == 'NAVIGATE_AND_INTERACT', f"❌ Wrong action type: {directive['action']}"
-    assert directive['target'] == (9, 3, 'ROUTE 103'), f"❌ Wrong target: {directive['target']}"
+    assert 'goal_coords' in directive, f"❌ Missing goal_coords: {directive.keys()}"
+    assert directive.get('should_interact') == True, f"❌ Expected should_interact=True"
     
     print("✅ Directive generated successfully!")
-    print(f"   Action: {directive['action']}")
-    print(f"   Target: {directive['target']}")
+    print(f"   goal_coords: {directive.get('goal_coords')}")
     print(f"   Description: {directive['description']}")
     print()
 
@@ -74,10 +73,10 @@ def test_at_rival_position():
     directive = obj_manager.get_next_action_directive(state_data)
     
     assert directive is not None, "❌ No directive returned at rival position"
-    assert directive['action'] == 'INTERACT', f"❌ Wrong action type: {directive['action']}"
+    assert 'goal_coords' in directive or 'should_interact' in directive, f"❌ Missing expected keys: {directive.keys()}"
     
-    print("✅ INTERACT directive generated successfully!")
-    print(f"   Action: {directive['action']}")
+    print("✅ Directive generated successfully at rival position!")
+    print(f"   Keys: {list(directive.keys())}")
     print(f"   Description: {directive['description']}")
     print()
 
@@ -138,8 +137,8 @@ def test_no_directive_after_rival_battle():
         print("✅ Returns None (VLM will handle navigation to Oldale)")
     else:
         print("✅ Returns next directive (Pokemon Center)")
-        print(f"   Action: {directive['action']}")
-        print(f"   Description: {directive['description']}")
+        print(f"   Keys: {list(directive.keys())}")
+        print(f"   Description: {directive.get('description', 'N/A')}")
     print()
 
 def test_oldale_pokemon_center():

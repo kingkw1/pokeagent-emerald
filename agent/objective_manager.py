@@ -12,6 +12,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from agent.navigation_planner import NavigationPlanner
+from agent.location_graph import (
+    get_entrance_coords,
+    get_interior_exit_coords,
+    get_poi_coords,
+    get_portal_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +52,14 @@ MILESTONE_PROGRESSION = [
     
     # [11-14] SPLIT 03: Rival battle sequence & Return to lab for Pokedex
     {"milestone": "OLDALE_TOWN", "target_location": "OLDALE_TOWN", "description": "Travel to Oldale Town"},
-    {"milestone": "ROUTE_103", "target_location": "ROUTE_103", "target_coords": (9, 3), "description": "Go to Route 103"},
-    {"milestone": "RIVAL_BATTLE_1", "target_location": "ROUTE_103", "target_coords": (9, 3), "description": "Battle rival May", "special": "rival_battle"},
+    {"milestone": "ROUTE_103", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Go to Route 103"},
+    {"milestone": "RIVAL_BATTLE_1", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Battle rival May", "special": "rival_battle"},
     {"milestone": "RECEIVED_POKEDEX", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Return to Birch for Pokedex"},
     
     # [15-18] SPLIT 04: Petalburg City sequence
     {"milestone": "ROUTE_102", "target_location": "ROUTE_102", "description": "Travel through Route 102"},
     {"milestone": "PETALBURG_CITY", "target_location": "PETALBURG_CITY", "description": "Arrive at Petalburg City"},
-    {"milestone": "DAD_FIRST_MEETING", "target_location": "PETALBURG_CITY_GYM", "target_coords": (15, 8), "description": "Enter gym to meet Dad", "special": "gym_dialogue"},
+    {"milestone": "DAD_FIRST_MEETING", "target_location": "PETALBURG_CITY_GYM", "target_coords_fn": lambda: get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM"), "description": "Enter gym to meet Dad", "special": "gym_dialogue"},
     {"milestone": "GYM_EXPLANATION", "target_location": None, "description": "Watch Wally tutorial", "special": "gym_dialogue"},
     
     # [19-22] SPLIT 05: Road to Rustboro
@@ -64,7 +70,7 @@ MILESTONE_PROGRESSION = [
     
     # [23-26] SPLIT 06: Rustboro Gym
     {"milestone": "RUSTBORO_CITY", "target_location": "RUSTBORO_CITY", "description": "Arrive at Rustboro City"},
-    {"milestone": "RUSTBORO_GYM_ENTERED", "target_location": "RUSTBORO_CITY_GYM", "target_coords": (27, 19), "description": "Enter Rustboro Gym"},
+    {"milestone": "RUSTBORO_GYM_ENTERED", "target_location": "RUSTBORO_CITY_GYM", "target_coords_fn": lambda: get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM"), "description": "Enter Rustboro Gym"},
     {"milestone": "ROXANNE_DEFEATED", "target_location": None, "description": "Defeat Roxanne"},
     {"milestone": "FIRST_GYM_COMPLETE", "target_location": None, "description": "First gym badge obtained"},
 ]
@@ -557,7 +563,8 @@ class ObjectiveManager:
             current_x = position.get('x', 0)
             current_y = position.get('y', 0)
             current_location = player_data.get('location', '').upper()
-            at_rival_position = (current_x == 9 and current_y == 3 and 'ROUTE 103' in current_location)
+            _rival_coords = get_poi_coords("ROUTE_103", "rival_may") or (9, 3)
+            at_rival_position = (current_x == _rival_coords[0] and current_y == _rival_coords[1] and 'ROUTE 103' in current_location)
             
             logger.info(f"🔍 [TRANSITION DETECTED] Battle ended! at_rival_position={at_rival_position}, x={current_x}, y={current_y}, loc={current_location}")
             print(f"🔍 [TRANSITION DETECTED] Battle ended! at_rival_position={at_rival_position}")
@@ -567,7 +574,7 @@ class ObjectiveManager:
                 logger.info(f"✅ [BATTLE COMPLETION] Detected rival battle completion via state transition")
                 print(f"✅ [GOAL COMPLETE] ROUTE_103_RIVAL_BATTLE")
         
-        # Detect Dad dialogue completion: Track 'A' button press when adjacent to Dad at (4, 107) in Petalburg Gym
+        # Detect Dad dialogue completion: Track 'A' button press when adjacent to Dad in Petalburg Gym
         player_data = state_data.get('player', {})
         position = player_data.get('position', {})
         current_x = position.get('x', 0)
@@ -577,13 +584,13 @@ class ObjectiveManager:
         # Check if in Petalburg Gym
         in_petalburg_gym = 'PETALBURG CITY GYM' in current_location or 'PETALBURG_CITY_GYM' in current_location
         
-        # Check if adjacent to Dad's position (4, 107)
-        # Adjacent means within 1 tile in any direction
+        # Check if adjacent to Dad's position (looked up from location graph)
+        _norman_coords = get_poi_coords("PETALBURG_CITY_GYM", "norman") or (4, 107)
         adjacent_to_dad = (
             in_petalburg_gym and
-            abs(current_x - 4) <= 1 and 
-            abs(current_y - 107) <= 1 and
-            not (current_x == 4 and current_y == 107)  # Not on same tile (Norman is there)
+            abs(current_x - _norman_coords[0]) <= 1 and 
+            abs(current_y - _norman_coords[1]) <= 1 and
+            not (current_x == _norman_coords[0] and current_y == _norman_coords[1])  # Not on same tile
         )
         
         # Check if 'A' was pressed in recent actions
@@ -593,7 +600,7 @@ class ObjectiveManager:
         # Mark complete if we pressed A while adjacent to Dad
         if adjacent_to_dad and pressed_a and not self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE'):
             self.mark_goal_complete('PETALBURG_GYM_DAD_DIALOGUE', 'Initiated dialogue with Norman at Petalburg Gym')
-            logger.info(f"✅ [DAD DIALOGUE] Detected 'A' press at position ({current_x}, {current_y}) adjacent to Dad (4, 107)")
+            logger.info(f"✅ [DAD DIALOGUE] Detected 'A' press at position ({current_x}, {current_y}) adjacent to Dad {_norman_coords}")
             print(f"✅ [GOAL COMPLETE] PETALBURG_GYM_DAD_DIALOGUE - Pressed A at ({current_x}, {current_y})")
         
         # Update previous state for next iteration
@@ -949,7 +956,8 @@ class ObjectiveManager:
         # We use FIRST_RIVAL_BATTLE milestone to track actual battle completion
         
         # Get current battle state
-        at_rival_position = (current_x == 9 and current_y == 3 and 'ROUTE 103' in current_location)
+        _rival_pos = get_poi_coords("ROUTE_103", "rival_may") or (9, 3)
+        at_rival_position = (current_x == _rival_pos[0] and current_y == _rival_pos[1] and 'ROUTE 103' in current_location)
         game_data = state_data.get('game', {})
         in_battle = game_data.get('in_battle', False)
         was_in_battle = self._previous_state.get('in_battle', False)  # For logging only
@@ -972,10 +980,11 @@ class ObjectiveManager:
                     'milestone': 'RECEIVED_POKEDEX'
                 }
             elif is_milestone_complete('RECEIVED_POKEDEX') and not is_milestone_complete('ROUTE_102'):
-                # Exit lab - door is at (6, 13) inside lab coordinates
+                # Exit lab via warp tile (derived from location graph)
+                _lab_exit = get_interior_exit_coords("PROFESSOR_BIRCHS_LAB") or (6, 13)
                 return {
                     'action': 'NAVIGATE',
-                    'target': (6, 13, current_location),
+                    'target': (_lab_exit[0], _lab_exit[1], current_location),
                     'description': 'Exit Birch Lab',
                     'milestone': None
                 }
@@ -1015,7 +1024,7 @@ class ObjectiveManager:
                 if in_gym:
                     # Dynamically resolve Norman's position in Petalburg Gym
                     # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
-                    NORMAN_FALLBACK = (4, 107)
+                    NORMAN_FALLBACK = get_poi_coords("PETALBURG_CITY_GYM", "norman") or (4, 107)
 
                     norman_coords = self._resolve_npc_coords(
                         state_data,
@@ -1041,10 +1050,11 @@ class ObjectiveManager:
                     print(f"💚 [DAD HP] HP < 100%, in city, navigating to gym")
                     
                     # Use navigation planner to get to gym
+                    _gym_entrance = get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM") or (15, 8)
                     success = self.navigation_planner.plan_journey(
                         start_location=graph_location,
                         end_location='PETALBURG_CITY_GYM',
-                        final_coords=(15, 8)  # Gym entrance warp tile
+                        final_coords=_gym_entrance  # Gym entrance warp tile
                     )
                     
                     if success:
@@ -1167,22 +1177,23 @@ class ObjectiveManager:
                     logger.info(f"🏥 [POKECENTER EXIT] Healing complete, exiting Pokemon Center")
                     print(f"🏥 [POKECENTER EXIT] Pokemon healed - leaving Pokemon Center")
                     
-                    # Warp tile is at (7, 9) but it's not walkable in the grid
-                    # Navigate to (6, 8) first, then push DOWN through the warp
-                    # Check if we're already at (6, 8) - if so, just push DOWN
-                    if current_x == 6 and current_y == 8:
-                        logger.info(f"🏥 [POKECENTER EXIT] At (6, 8), pushing DOWN through warp")
+                    # Derive exit warp tile from location graph
+                    _exit_warp = get_interior_exit_coords(graph_location) or (7, 9)
+                    # Warp tile itself may not be walkable; approach from one tile above
+                    _pre_warp = (_exit_warp[0], _exit_warp[1] - 1)
+                    
+                    if current_x == _pre_warp[0] and current_y == _pre_warp[1]:
+                        logger.info(f"🏥 [POKECENTER EXIT] At {_pre_warp}, pushing DOWN through warp")
                         return {
                             'goal_direction': 'south',
-                            'description': 'Push DOWN from (6, 8) to exit Pokemon Center via warp',
+                            'description': f'Push DOWN from {_pre_warp} to exit Pokemon Center via warp',
                             'journey_reason': 'Exit Pokemon Center after healing'
                         }
                     else:
-                        # Not at warp position yet, navigate there
-                        logger.info(f"🏥 [POKECENTER EXIT] Navigating to (6, 8) before exit warp")
+                        logger.info(f"🏥 [POKECENTER EXIT] Navigating to {_pre_warp} before exit warp")
                         return {
-                            'goal_coords': (6, 8, current_location),
-                            'description': 'Navigate to (6, 8) to prepare for Pokemon Center exit',
+                            'goal_coords': (_pre_warp[0], _pre_warp[1], current_location),
+                            'description': f'Navigate to {_pre_warp} to prepare for Pokemon Center exit',
                             'journey_reason': 'Position for Pokemon Center exit warp'
                         }
                 
@@ -1206,7 +1217,7 @@ class ObjectiveManager:
                     if in_pokecenter:
                         # Dynamically resolve Nurse Joy position
                         # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
-                        NURSE_FALLBACK = (7, 3)
+                        NURSE_FALLBACK = get_poi_coords(graph_location, "nurse_joy") or (7, 3)
 
                         nurse_coords = self._resolve_npc_coords(
                             state_data,
@@ -1271,10 +1282,11 @@ class ObjectiveManager:
                                     print(f"✅ [RUSTBORO WAYPOINT] Waypoint reached - resuming navigation")
                         
                         # Use navigation planner to create journey
+                        _pc_entrance = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)
                         success = self.navigation_planner.plan_journey(
                             start_location=graph_location,
                             end_location="RUSTBORO_CITY_POKEMON_CENTER_1F",
-                            final_coords=(16, 38)  # Pokemon Center entrance in Rustboro
+                            final_coords=_pc_entrance  # Pokemon Center entrance in Rustboro
                         )
                         
                         if success:
@@ -1334,13 +1346,14 @@ class ObjectiveManager:
                                     logger.warning(f"🏥 [POKECENTER] Unknown planner action: {action_type}")
                         
                         # Fallback: direct coordinate navigation
+                        _pc_fallback = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)
                         logger.warning(f"🏥 [POKECENTER] Planner failed, using direct navigation")
-                        print(f"🏥 [POKECENTER] Using direct navigation to (16, 38)")
+                        print(f"🏥 [POKECENTER] Using direct navigation to {_pc_fallback}")
                         
                         return {
-                            'goal_coords': (16, 38, 'RUSTBORO_CITY'),
+                            'goal_coords': (_pc_fallback[0], _pc_fallback[1], 'RUSTBORO_CITY'),
                             'should_interact': True,
-                            'description': 'Navigate to Pokemon Center at (16, 38) to heal Pokemon',
+                            'description': f'Navigate to Pokemon Center at {_pc_fallback} to heal Pokemon',
                             'journey_reason': 'Heal Pokemon before challenging gym'
                         }
                 else:
@@ -1361,7 +1374,7 @@ class ObjectiveManager:
         
         milestone_id = next_milestone["milestone"]
         target_location = next_milestone.get("target_location")
-        target_coords = next_milestone.get("target_coords")
+        target_coords = next_milestone.get("target_coords") or (next_milestone["target_coords_fn"]() if "target_coords_fn" in next_milestone else None)
         special_handling = next_milestone.get("special")
         description = next_milestone.get("description", "Continue progression")
         
@@ -1401,7 +1414,7 @@ class ObjectiveManager:
                 next_milestone = next_after_rival  # Update the main milestone object
                 milestone_id = next_after_rival["milestone"]
                 target_location = next_after_rival.get("target_location")
-                target_coords = next_after_rival.get("target_coords")  # ADD THIS
+                target_coords = next_after_rival.get("target_coords") or (next_after_rival["target_coords_fn"]() if "target_coords_fn" in next_after_rival else None)
                 special_handling = next_after_rival.get("special")  # Already done below, but be explicit
                 description = next_after_rival.get("description", "Continue progression")
                 
@@ -1414,7 +1427,8 @@ class ObjectiveManager:
             else:
                 # Dynamically resolve rival position from gObjectEvents
                 # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
-                RIVAL_FALLBACK = (10, 3)  # hardcoded safety net
+                _rival_poi = get_poi_coords("ROUTE_103", "rival_may") or (9, 3)
+                RIVAL_FALLBACK = (_rival_poi[0] + 1, _rival_poi[1])  # one tile east as safety net
 
                 rival_coords = self._resolve_npc_coords(
                     state_data,
@@ -1651,10 +1665,10 @@ class ObjectiveManager:
                         return result
                 
                 # Default: Not at any recognized waypoint, go to first waypoint
-                # SPECIAL: If we're at (27, 19), we just entered via warp
+                # SPECIAL: If we're at the gym entrance coords, we just entered via warp
                 # The warp takes us to (5, 19) which is waypoint 0
-                # After warp, we might be briefly showing (27, 19) before update
-                GYM_ENTRANCE_OUTSIDE = (27, 19)
+                # After warp, we might be briefly showing entrance coords before update
+                GYM_ENTRANCE_OUTSIDE = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM") or (27, 19)
                 if current_pos == GYM_ENTRANCE_OUTSIDE:
                     # Just entered gym, but position hasn't updated yet
                     # Return directive for waypoint 1 (already at waypoint 0 after warp)
@@ -1769,7 +1783,7 @@ class ObjectiveManager:
                 if lookahead_location and lookahead_milestone["milestone"] == "ROUTE_104_NORTH":
                     # Found the final destination - plan to Route 104 North instead
                     final_target = lookahead_location
-                    final_coords = lookahead_milestone.get("target_coords")
+                    final_coords = lookahead_milestone.get("target_coords") or (lookahead_milestone["target_coords_fn"]() if "target_coords_fn" in lookahead_milestone else None)
                     final_description = f"Navigate through Petalburg Woods to {lookahead_location}"
                     
                     logger.info(f"✅ [LOOK-AHEAD] Planning to final destination: {final_target}")
