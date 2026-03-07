@@ -228,7 +228,7 @@ class ObjectiveManager:
     without complex state management dependencies.
     """
     
-    def __init__(self, strategic_planner=None, npc_registry=None):
+    def __init__(self, strategic_planner=None, npc_registry=None, episodic_memory=None):
         """Initialize with core storyline objectives.
 
         Args:
@@ -264,6 +264,9 @@ class ObjectiveManager:
         self.navigation_planner = NavigationPlanner()
         self._last_planner_location = None
         self._last_planner_coords = None
+        
+        # ── Episodic memory (for logging milestones + dialogue) ──
+        self._episodic_memory = episodic_memory
         
         # ── Blocker / Recovery (ported from GoalManager) ──
         self.blocking_keywords = BLOCKING_KEYWORDS
@@ -464,18 +467,28 @@ class ObjectiveManager:
             )
             self.objectives.append(objective)
     
-    def mark_goal_complete(self, goal_id: str, description: str = ""):
+    def mark_goal_complete(self, goal_id: str, description: str = "", state_data: dict = None):
         """
         Mark a sub-goal as complete. This is persistent across calls.
+        Also logs to episodic memory for cross-session retrieval.
         
         Args:
             goal_id: Unique identifier for the goal (e.g., 'ROUTE_103_RIVAL_BATTLE')
             description: Human-readable description for logging
+            state_data: Optional emulator state for spatial metadata
         """
         if goal_id not in self.completed_goals:
             self.completed_goals[goal_id] = True
             logger.info(f"✅ [GOAL COMPLETE] {goal_id}: {description}")
             print(f"✅ [GOAL COMPLETE] {goal_id}" + (f": {description}" if description else ""))
+            
+            # Log milestone to episodic memory for cross-session retrieval
+            if self._episodic_memory is not None:
+                self._episodic_memory.log_event(
+                    f"Milestone complete: {goal_id} — {description}",
+                    {"type": "milestone", "goal_id": goal_id},
+                    state_data=state_data,
+                )
     
     def is_goal_complete(self, goal_id: str) -> bool:
         """Check if a sub-goal has been completed"""
@@ -571,7 +584,7 @@ class ObjectiveManager:
             print(f"🔍 [TRANSITION DETECTED] Battle ended! at_rival_position={at_rival_position}")
             
             if at_rival_position and not self.is_goal_complete('ROUTE_103_RIVAL_BATTLE'):
-                self.mark_goal_complete('ROUTE_103_RIVAL_BATTLE', 'Defeated rival May on Route 103')
+                self.mark_goal_complete('ROUTE_103_RIVAL_BATTLE', 'Defeated rival May on Route 103', state_data=state_data)
                 logger.info(f"✅ [BATTLE COMPLETION] Detected rival battle completion via state transition")
                 print(f"✅ [GOAL COMPLETE] ROUTE_103_RIVAL_BATTLE")
         
@@ -600,7 +613,7 @@ class ObjectiveManager:
         
         # Mark complete if we pressed A while adjacent to Dad
         if adjacent_to_dad and pressed_a and not self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE'):
-            self.mark_goal_complete('PETALBURG_GYM_DAD_DIALOGUE', 'Initiated dialogue with Norman at Petalburg Gym')
+            self.mark_goal_complete('PETALBURG_GYM_DAD_DIALOGUE', 'Initiated dialogue with Norman at Petalburg Gym', state_data=state_data)
             logger.info(f"✅ [DAD DIALOGUE] Detected 'A' press at position ({current_x}, {current_y}) adjacent to Dad {_norman_coords}")
             print(f"✅ [GOAL COMPLETE] PETALBURG_GYM_DAD_DIALOGUE - Pressed A at ({current_x}, {current_y})")
         
@@ -917,9 +930,11 @@ class ObjectiveManager:
         if is_dialogue_active():
             self._consecutive_dialogue_steps += 1
             
-            # After 6+ consecutive dialogue presses with no progress, force movement
-            # to break free from NPC re-trigger loops (e.g., talking to defeated trainer)
-            if self._consecutive_dialogue_steps > 6:
+            # After 20+ consecutive dialogue presses with no progress, force movement
+            # to break free from NPC re-trigger loops (e.g., talking to defeated trainer).
+            # Threshold is high (20) because scripted cutscenes like Norman's gym
+            # intro legitimately have 15+ textboxes.
+            if self._consecutive_dialogue_steps > 20:
                 logger.warning(f"🚨 [DIALOGUE LOOP] {self._consecutive_dialogue_steps} consecutive dialogue steps — forcing movement to break free")
                 print(f"🚨 [DIALOGUE LOOP] Stuck in dialogue loop — moving away")
                 self._consecutive_dialogue_steps = 0
@@ -1021,18 +1036,46 @@ class ObjectiveManager:
         
         # === PETALBURG CITY → Talk to Dad in gym (HP-BASED SPLIT DETECTION) ===
         # =====================================================================
-        # PETALBURG CITY: HP-BASED DAD DIALOGUE DETECTION
+        # PETALBURG CITY: DAD DIALOGUE DETECTION
         # =====================================================================
-        # Simple HP-based logic (ignore milestones):
-        # - HP < 100% in Petalburg City/Gym → Go to Dad
+        # Logic:
+        # - If we've already talked to Norman (goal complete) → Head west
+        # - HP < 100% in Petalburg City/Gym AND haven't talked yet → Go to Dad
         # - HP = 100% in Petalburg City/Gym → Head west to Route 104 South
+        #
+        # CRITICAL: Norman doesn't heal HP — the HP check was a proxy for
+        # "has the cutscene been completed?" but it breaks because HP stays
+        # unchanged after the dialogue. The goal-complete gate prevents an
+        # infinite re-trigger loop.
         # =====================================================================
         
         in_petalburg_city = 'PETALBURG CITY' in current_location or 'PETALBURG_CITY' in current_location.replace(' ', '_')
         in_gym = 'PETALBURG CITY GYM' in current_location or 'PETALBURG_CITY_GYM' in current_location
         
         if in_petalburg_city or in_gym:
-            # Check party HP to determine if Dad dialogue is complete
+            # Gate: if we've already initiated Norman dialogue, don't go back
+            dad_dialogue_done = self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE')
+            
+            if dad_dialogue_done:
+                logger.info(f"✅ [DAD HP] Norman dialogue already complete — heading west")
+                print(f"✅ [DAD HP] Norman dialogue already complete — heading west to Route 104 South")
+                
+                success = self.navigation_planner.plan_journey(
+                    start_location=graph_location,
+                    end_location='ROUTE_104_SOUTH'
+                )
+                
+                if success:
+                    raw = self.navigation_planner.get_current_directive(
+                        current_location=graph_location,
+                        current_coords=(current_x, current_y)
+                    )
+                    return self._translate_planner_directive(raw, graph_location)
+                else:
+                    logger.error(f"❌ [NAV PLANNER] Failed to plan journey to Route 104 South")
+                    return None
+            
+            # Check party HP to determine if Dad dialogue is needed
             party = state_data.get('player', {}).get('party', [])
             needs_dad_dialogue = False
             
@@ -2213,10 +2256,17 @@ class ObjectiveManager:
             brain_dialogue = brain_on_screen.get("dialogue")
 
         if brain_dialogue and brain_dialogue != self._last_logged_dialogue:
+            brain_in_battle_now = state_data.get("game", {}).get("in_battle", False)
+            brain_loc = state_data.get("player", {}).get("location", "Unknown")
+            dialogue_meta = {
+                "type": "dialogue",
+                "in_battle": brain_in_battle_now,
+                "location": brain_loc,
+            }
             if episodic_memory is not None:
                 episodic_memory.log_event(
                     f"Heard dialogue: '{brain_dialogue}'",
-                    {"type": "dialogue"},
+                    dialogue_meta,
                     state_data=state_data,
                 )
             self._last_logged_dialogue = brain_dialogue

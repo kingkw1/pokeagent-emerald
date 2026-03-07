@@ -115,6 +115,7 @@ class Agent:
             self.objective_manager = ObjectiveManager(
                 strategic_planner=self.strategic_planner,
                 npc_registry=self.npc_registry,
+                episodic_memory=self.episodic_memory,
             )
             self.planner = RecoveryPlanner(vlm=self.vlm, memory=self.episodic_memory, verbose=True)
             
@@ -366,6 +367,20 @@ class Agent:
                     print("🔄 [STUCK DETECTION] Battle ended — resetting position history")
                     self.position_history = [current_position]
                 self._was_in_battle_for_stuck = in_battle_now
+
+                # ── Post-dialogue grace: clear stale position history ──
+                # During dialogue the player position is frozen while
+                # pressing A/B.  Brief inter-textbox gaps can cause the
+                # oscillation detector to false-trigger.  Reset history on
+                # the dialogue→non-dialogue transition so 6 fresh steps
+                # are needed before any oscillation signal.
+                if not hasattr(self, '_was_in_dialogue_for_stuck'):
+                    self._was_in_dialogue_for_stuck = False
+                if self._was_in_dialogue_for_stuck and not in_dialogue_now:
+                    logger.info("[STUCK DETECTION] Dialogue ended — clearing position history (post-dialogue grace)")
+                    print("🔄 [STUCK DETECTION] Dialogue ended — resetting position history")
+                    self.position_history = [current_position]
+                self._was_in_dialogue_for_stuck = in_dialogue_now
 
                 if not in_battle_now and not in_dialogue_now and len(self.position_history) >= 6:
                     # Check if last 6 positions contain only 2 unique positions

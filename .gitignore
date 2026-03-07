@@ -214,3 +214,6 @@ npc_registry.json
 
 # LLM logs
 llm_logs/shadow_comparison.jsonl
+
+# Run logs (stdout tee for debugging)
+run_logs/

@@ -375,7 +375,7 @@ LOCATION_GRAPH: Dict[str, Dict[str, Any]] = {
             "PETALBURG_CITY_GYM": {
                 "type": "warp_tile",
                 "direction": "interact",
-                "entry_coords": (4, 112),  # Inside gym, near door
+                "entry_coords": (4, 111),  # Inside gym, door mat tile ('D')
                 "exit_coords": (15, 8),    # Gym door in Petalburg
                 "description": "Enter Petalburg Gym (Norman's gym)",
                 "requirements": None,
@@ -421,8 +421,8 @@ LOCATION_GRAPH: Dict[str, Dict[str, Any]] = {
             "PETALBURG_CITY": {
                 "type": "warp_tile",
                 "direction": "interact",
-                "entry_coords": (4, 112),
-                "exit_coords": (4, 112),
+                "entry_coords": (4, 111),
+                "exit_coords": (4, 111),
                 "description": "Exit to Petalburg City",
                 "requirements": None,
             },

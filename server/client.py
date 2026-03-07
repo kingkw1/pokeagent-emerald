@@ -8,8 +8,41 @@ import sys
 import time
 import base64
 import io
+from datetime import datetime
 import requests
 from PIL import Image
+
+
+class TeeWriter:
+    """Write to both a file and the original stream (stdout/stderr)."""
+
+    def __init__(self, log_path: str, original_stream):
+        self._original = original_stream
+        self._file = open(log_path, "a", encoding="utf-8", buffering=1)  # line-buffered
+
+    def write(self, text):
+        self._original.write(text)
+        try:
+            self._file.write(text)
+        except Exception:
+            pass
+
+    def flush(self):
+        self._original.flush()
+        try:
+            self._file.flush()
+        except Exception:
+            pass
+
+    def close_log(self):
+        try:
+            self._file.close()
+        except Exception:
+            pass
+
+    # Delegate everything else (fileno, isatty, etc.) to the original
+    def __getattr__(self, name):
+        return getattr(self._original, name)
 
 # Display-related imports (conditionally used)
 try:
@@ -70,6 +103,19 @@ def run_multiprocess_client(server_port=8000, args=None):
         bool: True if ran successfully
     """
     server_url = f"http://localhost:{server_port}"
+    
+    # ── File-based run logging ──
+    # Tee stdout and stderr to a timestamped log file so full run
+    # transcripts can be shared for debugging.
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "run_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_path = os.path.join(log_dir, log_filename)
+    tee_out = TeeWriter(log_path, sys.stdout)
+    tee_err = TeeWriter(log_path, sys.stderr)
+    sys.stdout = tee_out
+    sys.stderr = tee_err
+    print(f"📝 Run log: {log_path}")
     
     # Initialize the agent (it handles VLM, simple vs 4-module, etc internally)
     agent = Agent(args)
@@ -286,14 +332,11 @@ def run_multiprocess_client(server_port=8000, args=None):
                                     if response.status_code == 200:
                                         screenshot_data = response.json().get("screenshot_base64", "")
                                         if screenshot_data:
-                                            import datetime
-                                            import os
-                                            
                                             # Create screenshots directory if it doesn't exist
                                             screenshots_dir = "data/screenshots"
                                             os.makedirs(screenshots_dir, exist_ok=True)
                                             
-                                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                             filename = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
                                             
                                             # Decode and save the screenshot
@@ -459,5 +502,12 @@ def run_multiprocess_client(server_port=8000, args=None):
     # Cleanup
     if not headless and PYGAME_AVAILABLE:
         pygame.quit()
+    
+    # Close log tee
+    print(f"📝 Run log saved: {log_path}")
+    sys.stdout = tee_out._original
+    sys.stderr = tee_err._original
+    tee_out.close_log()
+    tee_err.close_log()
     
     return True

@@ -745,7 +745,7 @@ def resolve_location(name: str) -> dict | None:
 
 ---
 
-## 📅 PHASE 5: Recursive Sub-Goaling (North Star)
+## 📅 PHASE X: Recursive Sub-Goaling (North Star)
 
 **Goal:** Multi-step dependency chains (Get Cut → Beat Gym → Cut Tree).
 
