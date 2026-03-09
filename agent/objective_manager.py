@@ -13,6 +13,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from agent.navigation_planner import NavigationPlanner
 from agent.location_graph import (
+    find_nearest_pokemon_center,
+    get_connected_locations,
     get_entrance_coords,
     get_interior_exit_coords,
     get_poi_coords,
@@ -31,6 +33,12 @@ BLOCKING_KEYWORDS = ["wait", "stop", "don't go", "dangerous"]
 # NEXT uncompleted milestone after the highest completed one.
 # This eliminates brittle if/elif chains and backward-checking logic.
 # ============================================================================
+
+# Phase 5.1: Milestones at or below this index are "opening sequence" scripting.
+# When the highest completed milestone is past this index, opener-only special
+# cases (Birch Lab, Petalburg City/Gym, Rival Battle) are skipped so that
+# RAG + generic systems drive all navigation.
+OPENING_SEQUENCE_LAST_INDEX = 18  # GYM_EXPLANATION (index 18)
 
 MILESTONE_PROGRESSION = [
     # [0-2] SPLIT 01: Game start
@@ -772,6 +780,189 @@ class ObjectiveManager:
             logger.info(f"[NPC RESOLVE] NPC not found (gfx={graphics_id}, local={local_id}) — no fallback")
         return fallback
 
+    # =====================================================================
+    # Phase 5.3: Generic Pokemon Center Healing Subsystem
+    # =====================================================================
+    # Works for any city — finds the nearest Pokemon Center via the
+    # LOCATION_GRAPH, plans a journey there, heals, and exits.
+    # Replaces the Rustboro-specific healing block.
+    #
+    # Two-tier decision logic:
+    #   Tier 1 — Opportunistic: if in a town with a directly-connected
+    #            Pokemon Center, heal for any HP damage or depleted move.
+    #            The trip is essentially free, so always top off.
+    #   Tier 2 — Threshold:     if not near a Pokemon Center, only heal
+    #            when the situation is actually dangerous (HP < 50% or
+    #            a move at critically low PP).
+    # =====================================================================
+
+    # Healing thresholds — easily tunable constants
+    HP_HEAL_THRESHOLD = 0.50   # Tier 2: heal when any Pokemon HP < 50%
+    PP_LOW_THRESHOLD = 5       # Tier 2: heal when any move PP <= 5 (~25% of base)
+
+    def _check_healing_needed(
+        self,
+        state_data: Dict[str, Any],
+        graph_location: Optional[str],
+        current_x: int,
+        current_y: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a directive to heal at the nearest Pokemon Center, or None."""
+        if not graph_location:
+            return None
+
+        # --- Determine proximity to a Pokemon Center ---
+        in_pokecenter = "POKEMON_CENTER" in (graph_location or "")
+
+        pc_location = find_nearest_pokemon_center(graph_location)
+        if not pc_location:
+            return None  # No reachable Pokemon Center
+
+        # A Pokemon Center is "adjacent" if we're inside one or the town
+        # we're standing in has a direct portal to one (1 hop in the graph).
+        pokecenter_adjacent = in_pokecenter or (
+            pc_location in get_connected_locations(graph_location)
+        )
+
+        # --- Scan party HP / PP ---
+        party = state_data.get('player', {}).get('party', [])
+        if not party:
+            party = state_data.get('party', [])
+
+        any_damage = False          # any Pokemon HP < max
+        any_fainted = False         # any Pokemon HP == 0
+        any_low_hp = False          # any Pokemon HP < 50%
+        any_move_depleted = False   # any move at 0 PP
+        any_low_pp = False          # any move PP <= PP_LOW_THRESHOLD
+        healing_reasons: list[str] = []
+
+        for pokemon in party:
+            species = pokemon.get('species_name', 'UNKNOWN')
+            current_hp = pokemon.get('current_hp', 0)
+            max_hp = pokemon.get('max_hp', 1)
+
+            if max_hp > 0 and current_hp < max_hp:
+                any_damage = True
+                hp_pct = current_hp / max_hp
+                if current_hp == 0:
+                    any_fainted = True
+                    healing_reasons.append(f"{species} FAINTED")
+                elif hp_pct < self.HP_HEAL_THRESHOLD:
+                    any_low_hp = True
+                    healing_reasons.append(
+                        f"{species} HP: {current_hp}/{max_hp} ({hp_pct*100:.0f}%)"
+                    )
+                else:
+                    # Minor damage — only matters for opportunistic tier
+                    healing_reasons.append(
+                        f"{species} HP: {current_hp}/{max_hp} ({hp_pct*100:.0f}%)"
+                    )
+
+            for move_name, current_pp in zip(
+                pokemon.get('moves', []), pokemon.get('move_pp', [])
+            ):
+                if not move_name or move_name == 'NONE':
+                    continue
+                if current_pp == 0:
+                    any_move_depleted = True
+                    healing_reasons.append(f"{species} {move_name}: 0 PP")
+                elif current_pp <= self.PP_LOW_THRESHOLD:
+                    any_low_pp = True
+                    healing_reasons.append(
+                        f"{species} {move_name}: {current_pp} PP (low)"
+                    )
+
+        # --- Tier decision ---
+        if pokecenter_adjacent:
+            # Tier 1 — Opportunistic: heal for any damage or depleted move.
+            needs_healing = any_damage or any_move_depleted
+        else:
+            # Tier 2 — Threshold: only return for serious deficits.
+            needs_healing = (
+                any_fainted or any_low_hp
+                or any_move_depleted or any_low_pp
+            )
+
+        # --- Already healed and inside the center → exit ---
+        if not needs_healing and in_pokecenter:
+            logger.info("🏥 [HEAL] Healed — exiting Pokemon Center")
+            print("🏥 [HEAL] Pokemon healed — leaving Pokemon Center")
+            _exit_warp = get_interior_exit_coords(graph_location) or (7, 9)
+            _pre_warp = (_exit_warp[0], _exit_warp[1] - 1)
+
+            if current_x == _pre_warp[0] and current_y == _pre_warp[1]:
+                return {
+                    'goal_direction': 'south',
+                    'description': 'Step DOWN through Pokemon Center exit warp',
+                    'journey_reason': 'Exit Pokemon Center after healing',
+                }
+            return {
+                'goal_coords': (_pre_warp[0], _pre_warp[1], graph_location),
+                'description': f'Walk to {_pre_warp} to exit Pokemon Center',
+                'journey_reason': 'Position for Pokemon Center exit warp',
+            }
+
+        if not needs_healing:
+            return None  # Healthy and not stuck inside a center
+
+        tier_label = "OPPORTUNISTIC" if pokecenter_adjacent else "THRESHOLD"
+        logger.info(f"🏥 [HEAL/{tier_label}] Needs healing: {healing_reasons}")
+        print(f"🏥 [HEAL/{tier_label}] Healing needed: {healing_reasons}")
+
+        # --- Inside Pokemon Center → talk to Nurse Joy ---
+        if in_pokecenter:
+            nurse_fallback = get_poi_coords(graph_location, "nurse_joy") or (7, 3)
+            nurse_coords = self._resolve_npc_coords(
+                state_data, npc_role="nurse", fallback=nurse_fallback,
+            )
+            goal_x = nurse_coords[0]
+            goal_y = nurse_coords[1] + 1  # One tile south to face up
+
+            logger.info(f"🏥 [HEAL] In Pokemon Center, nurse at {nurse_coords}")
+            print(f"🏥 [HEAL] In Pokemon Center — talking to nurse [{nurse_coords}]")
+            return {
+                'goal_coords': (goal_x, goal_y, graph_location),
+                'npc_coords': nurse_coords,
+                'should_interact': True,
+                'description': f'Interact with nurse at {nurse_coords} to heal',
+            }
+
+        # --- Outside → navigate to the Pokemon Center ---
+        logger.info(f"🏥 [HEAL] Planning journey to {pc_location}")
+        print(f"🏥 [HEAL] Heading to {pc_location}")
+
+        _pc_entrance = get_entrance_coords(graph_location, pc_location)
+        if not _pc_entrance:
+            # Pokemon Center may not be directly adjacent — use planner
+            _pc_entrance = None
+
+        success = self.navigation_planner.plan_journey(
+            start_location=graph_location,
+            end_location=pc_location,
+            final_coords=_pc_entrance,
+        )
+
+        if success:
+            raw = self.navigation_planner.get_current_directive(
+                current_location=graph_location,
+                current_coords=(current_x, current_y),
+            )
+            translated = self._translate_planner_directive(raw, graph_location)
+            if translated:
+                translated['journey_reason'] = 'Pokemon Center healing'
+                return translated
+
+        # Fallback: direct navigation to entrance
+        if _pc_entrance:
+            return {
+                'goal_coords': (_pc_entrance[0], _pc_entrance[1], graph_location),
+                'should_interact': True,
+                'description': f'Navigate to Pokemon Center entrance at {_pc_entrance}',
+                'journey_reason': 'Pokemon Center healing (fallback)',
+            }
+
+        return None
+
     def get_next_action_directive(self, state_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Get specific action directive based on current milestone state.
@@ -904,6 +1095,11 @@ class ObjectiveManager:
         # Get milestone states
         milestones = state_data.get('milestones', {})
         
+        # Phase 5.1: Determine if we are past the opening sequence.
+        # When true, opener-only special cases (Birch Lab, Petalburg City/Gym,
+        # Rival Battle) are skipped — RAG + generic systems drive navigation.
+        _past_opening = get_highest_milestone_index(milestones) > OPENING_SEQUENCE_LAST_INDEX
+        
         # Helper to check if milestone is complete
         def is_milestone_complete(milestone_id: str) -> bool:
             milestone_data = milestones.get(milestone_id, {})
@@ -1008,6 +1204,7 @@ class ObjectiveManager:
         was_in_battle = self._previous_state.get('in_battle', False)  # For logging only
         
         # Check if battle is complete (either via our detection or milestone)
+        # --- Phase 5.1: Skip opener-only Birch Lab + Rival Battle blocks ---
         rival_battle_complete = self.is_goal_complete('ROUTE_103_RIVAL_BATTLE') or \
                                is_milestone_complete('FIRST_RIVAL_BATTLE')
         
@@ -1016,7 +1213,7 @@ class ObjectiveManager:
         
         # === SPECIAL CASE: INSIDE BIRCH LAB ===
         # Wait for dialogue to auto-trigger (bypass planner)
-        if 'BIRCHS LAB' in current_location or 'BIRCH LAB' in current_location:
+        if not _past_opening and ('BIRCHS LAB' in current_location or 'BIRCH LAB' in current_location):
             if rival_battle_complete and not is_milestone_complete('RECEIVED_POKEDEX'):
                 return {
                     'action': 'WAIT_FOR_DIALOGUE',
@@ -1038,21 +1235,14 @@ class ObjectiveManager:
         # =====================================================================
         # PETALBURG CITY: DAD DIALOGUE DETECTION
         # =====================================================================
-        # Logic:
-        # - If we've already talked to Norman (goal complete) → Head west
-        # - HP < 100% in Petalburg City/Gym AND haven't talked yet → Go to Dad
-        # - HP = 100% in Petalburg City/Gym → Head west to Route 104 South
-        #
-        # CRITICAL: Norman doesn't heal HP — the HP check was a proxy for
-        # "has the cutscene been completed?" but it breaks because HP stays
-        # unchanged after the dialogue. The goal-complete gate prevents an
-        # infinite re-trigger loop.
+        # Phase 5.1: This entire block is opener-only scripting. When past the
+        # opening sequence, skip it — the agent navigates Petalburg via RAG.
         # =====================================================================
         
         in_petalburg_city = 'PETALBURG CITY' in current_location or 'PETALBURG_CITY' in current_location.replace(' ', '_')
         in_gym = 'PETALBURG CITY GYM' in current_location or 'PETALBURG_CITY_GYM' in current_location
         
-        if in_petalburg_city or in_gym:
+        if not _past_opening and (in_petalburg_city or in_gym):
             # Gate: if we've already initiated Norman dialogue, don't go back
             dad_dialogue_done = self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE')
             
@@ -1161,236 +1351,17 @@ class ObjectiveManager:
                     return None
         
         # =====================================================================
-        # SUB-GOAL: RUSTBORO CITY POKEMON CENTER HEALING
+        # Phase 5.3: GENERIC POKEMON CENTER HEALING
         # =====================================================================
-        # CRITICAL: This must run BEFORE the sequential milestone system
-        # because we need to heal before challenging the gym
+        # Replaces the Rustboro-specific healing block.  Works for any city —
+        # checks party HP/PP, finds nearest Pokemon Center via LOCATION_GRAPH,
+        # navigates there, heals, and exits.
         # =====================================================================
-        # If we've reached Rustboro City but don't have the gym badge yet,
-        # and our Pokemon need healing (HP or PP), go to Pokemon Center first
-        # =====================================================================
-        
-        # DEBUG: Always log this check
-        logger.debug(f"[POKECENTER] graph_location='{graph_location}', current_location='{current_location}'")
-        
-        # CRITICAL: Check both outside Pokemon Center (RUSTBORO_CITY) AND inside (RUSTBORO_CITY_POKEMON_CENTER_1F)
-        in_rustboro_city = graph_location == 'RUSTBORO_CITY'
-        in_pokecenter = graph_location == 'RUSTBORO_CITY_POKEMON_CENTER_1F'
-        
-        logger.debug(f"[POKECENTER] in_rustboro_city={in_rustboro_city}, in_pokecenter={in_pokecenter}")
-        
-        if in_rustboro_city or in_pokecenter:
-            rustboro_complete = is_milestone_complete('RUSTBORO_CITY')
-            has_stone_badge = is_milestone_complete('STONE_BADGE')
-            
-            logger.info(f"🏥 [POKECENTER CHECK] In Rustboro: milestone={rustboro_complete}, badge={has_stone_badge}")
-            print(f"🏥 [POKECENTER CHECK] In Rustboro: milestone={rustboro_complete}, badge={has_stone_badge}")
-            
-            if rustboro_complete and not has_stone_badge:
-                # =====================================================================
-                # COMPREHENSIVE PARTY DATA DEBUGGING
-                # =====================================================================
-                # Trace the entire path: state_data → game → party → pokemon objects
-                # =====================================================================
-                
-                # =====================================================================
-                # FIX: Party data is in state_data['player']['party'], NOT state_data['game']['party']
-                # The game memory reader stores party in the player section, not game section
-                # Fallback: Also check state_data['party'] if player['party'] is empty
-                # =====================================================================
-                party = state_data.get('player', {}).get('party', [])
-                
-                # Fallback to top-level party if player party is empty
-                if not party:
-                    party = state_data.get('party', [])
-                    if party:
-                        print(f"🔍 [POKECENTER] Using fallback: state_data['party']")
-                
-                needs_healing = False
-                healing_reasons = []
-                
-                logger.debug(f"[POKECENTER] Party length: {len(party) if party else 0}")
-                
-                if party:
-                    for i, pokemon in enumerate(party):
-                        # Pokemon is a dictionary, not an object
-                        species = pokemon.get('species_name', 'UNKNOWN')
-                        current_hp = pokemon.get('current_hp', 0)
-                        max_hp = pokemon.get('max_hp', 1)
-                        hp_percent = (current_hp / max_hp * 100) if max_hp > 0 else 0
-                        
-                        # Get move PP data
-                        move_pp = pokemon.get('move_pp', [])  # List of current PP values
-                        moves = pokemon.get('moves', [])  # Move names
-                        
-                        # DEBUG: Show raw data
-                        logger.debug(f"[POKEMON {i+1}] {species} HP={current_hp}/{max_hp}, moves={moves}, pp={move_pp}")
-                        
-                        # Check HP
-                        if current_hp < max_hp:
-                            needs_healing = True
-                            reason = f"{species} HP: {current_hp}/{max_hp} ({hp_percent:.1f}%)"
-                            healing_reasons.append(reason)
-                        
-                        # Check PP for all moves
-                        # Note: We don't have max PP in the data, so we can't check PP percentage
-                        # We'll assume any move with 0 PP needs healing
-                        for move_idx, (move_name, current_pp) in enumerate(zip(moves, move_pp)):
-                            if move_name and move_name != 'NONE':
-                                if current_pp == 0:
-                                    needs_healing = True
-                                    reason = f"{species} {move_name}: PP depleted (0 PP)"
-                                    healing_reasons.append(reason)
-                    
-                logger.info(f"🏥 [POKECENTER] needs_healing={needs_healing}, reasons: {healing_reasons}")
-                if needs_healing:
-                    print(f"🏥 [POKECENTER] Healing needed: {healing_reasons}")
-                
-                # CRITICAL: Exit Pokemon Center after healing is complete
-                # Healing complete + inside Pokemon Center = time to leave
-                if not needs_healing and in_pokecenter:
-                    logger.info(f"🏥 [POKECENTER EXIT] Healing complete, exiting Pokemon Center")
-                    print(f"🏥 [POKECENTER EXIT] Pokemon healed - leaving Pokemon Center")
-                    
-                    # Derive exit warp tile from location graph
-                    _exit_warp = get_interior_exit_coords(graph_location) or (7, 9)
-                    # Warp tile itself may not be walkable; approach from one tile above
-                    _pre_warp = (_exit_warp[0], _exit_warp[1] - 1)
-                    
-                    if current_x == _pre_warp[0] and current_y == _pre_warp[1]:
-                        logger.info(f"🏥 [POKECENTER EXIT] At {_pre_warp}, pushing DOWN through warp")
-                        return {
-                            'goal_direction': 'south',
-                            'description': f'Push DOWN from {_pre_warp} to exit Pokemon Center via warp',
-                            'journey_reason': 'Exit Pokemon Center after healing'
-                        }
-                    else:
-                        logger.info(f"🏥 [POKECENTER EXIT] Navigating to {_pre_warp} before exit warp")
-                        return {
-                            'goal_coords': (_pre_warp[0], _pre_warp[1], current_location),
-                            'description': f'Navigate to {_pre_warp} to prepare for Pokemon Center exit',
-                            'journey_reason': 'Position for Pokemon Center exit warp'
-                        }
-                
-                # SPECIAL CASE: After exiting Pokemon Center, navigate NORTH to stable area before gym
-                # Pokemon Center exit drops us at (16, 38-39) in southern Rustboro
-                # # Gym is at (27, 19) in northern Rustboro - navigate UP first to avoid pathfinding issues
-                # if not needs_healing and in_rustboro_city and current_y > 35:
-                #     logger.info(f"🏥 [POST-HEAL NAV] After healing, navigating NORTH from Y={current_y} toward gym area")
-                #     print(f"🏥 [POST-HEAL] Healed! Moving NORTH toward gym (currently at Y={current_y})")
-                    
-                #     return {
-                #         'goal_direction': 'north',
-                #         'description': f'Navigate NORTH from Pokemon Center area (Y={current_y}) toward gym region',
-                #         'journey_reason': 'Move north after healing before navigating to gym'
-                #     }
-                
-                if needs_healing:
-                    # Check if we're already in the Pokemon Center
-                    in_pokecenter = 'POKEMON CENTER' in current_location or 'POKECENTER' in current_location
-                    
-                    if in_pokecenter:
-                        # Dynamically resolve Nurse Joy position
-                        # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
-                        NURSE_FALLBACK = get_poi_coords(graph_location, "nurse_joy") or (7, 3)
-
-                        nurse_coords = self._resolve_npc_coords(
-                            state_data,
-                            npc_role="nurse",
-                            fallback=NURSE_FALLBACK,
-                        )
-                        # Stand one tile south of nurse to face UP
-                        goal_x = nurse_coords[0]
-                        goal_y = nurse_coords[1] + 1
-
-                        logger.info(f"🏥 [POKECENTER] In Pokemon Center, nurse at {nurse_coords}")
-                        print(f"🏥 [POKECENTER] In Pokemon Center - talking to nurse [{nurse_coords}]")
-                        
-                        return {
-                            'goal_coords': (goal_x, goal_y, current_location),
-                            'npc_coords': nurse_coords,
-                            'should_interact': True,
-                            'description': f'Navigate to ({goal_x},{goal_y}) and interact with nurse at {nurse_coords} to heal Pokemon'
-                        }
-                    else:
-                        # Not in Pokemon Center yet - navigate there using the navigation planner
-                        # This ensures proper pathfinding through the location graph
-                        logger.info(f"🏥 [POKECENTER] Need healing, planning journey to Pokemon Center")
-                        print(f"🏥 [POKECENTER] Pokemon need healing - planning route to Pokemon Center")
-                        print(f"🏥 [POKECENTER] Current: {graph_location}, Target: RUSTBORO_CITY_POKEMON_CENTER_1F")
-                        
-                        # SPECIAL CASE: Rustboro City boundary navigation
-                        # If agent is in lower Rustboro (Y > 55), navigate UP to safer bounds first
-                        # This prevents map stitcher edge case issues
-                        if graph_location == 'RUSTBORO_CITY' and current_y > 48:
-                            logger.info(f"🏙️ [RUSTBORO BOUNDARY] Agent at edge (Y={current_y}), navigating UP to stable region")
-                            print(f"🏙️ [RUSTBORO BOUNDARY] At Y={current_y} (edge area), moving UP to stable zone")
-                            
-                            # Use simple upward navigation until we're in stable bounds (Y <= 55)
-                            return {
-                                'goal_direction': 'north',
-                                'description': f'Navigate UP from Rustboro edge (Y={current_y}) to stable region',
-                                'journey_reason': 'Move to stable map region before Pokemon Center navigation'
-                            }
-                        
-                        # RUSTBORO CITY WAYPOINT: Navigate to (23, 29) when in trigger zone
-                        # Trigger zone: X between 12-35 AND Y between 28-38
-                        if graph_location == 'RUSTBORO_CITY':
-                            in_waypoint_zone = (12 <= current_x <= 35) and (28 <= current_y <= 38)
-                            
-                            if in_waypoint_zone:
-                                WAYPOINT = (23, 29)
-                                current_pos = (current_x, current_y)
-                                
-                                if current_pos != WAYPOINT:
-                                    logger.info(f"🏙️ [RUSTBORO WAYPOINT] In zone at ({current_x}, {current_y}), routing to {WAYPOINT}")
-                                    print(f"🏙️ [RUSTBORO WAYPOINT] Detected at ({current_x}, {current_y}) - navigating to {WAYPOINT}")
-                                    
-                                    return {
-                                        'goal_coords': (23, 29, 'RUSTBORO_CITY'),
-                                        'should_interact': False,
-                                        'description': 'Navigate to (23, 29) waypoint in Rustboro City',
-                                        'journey_reason': 'Rustboro City navigation waypoint'
-                                    }
-                                else:
-                                    logger.info(f"✅ [RUSTBORO WAYPOINT] At waypoint {WAYPOINT} - continuing")
-                                    print(f"✅ [RUSTBORO WAYPOINT] Waypoint reached - resuming navigation")
-                        
-                        # Use navigation planner to create journey
-                        _pc_entrance = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)
-                        success = self.navigation_planner.plan_journey(
-                            start_location=graph_location,
-                            end_location="RUSTBORO_CITY_POKEMON_CENTER_1F",
-                            final_coords=_pc_entrance  # Pokemon Center entrance in Rustboro
-                        )
-                        
-                        if success:
-                            # Get directive from planner
-                            current_pos = (current_x, current_y)
-                            planner_directive = self.navigation_planner.get_current_directive("RUSTBORO_CITY_POKEMON_CENTER_1F", current_pos)
-                            
-                            if planner_directive:
-                                logger.info(f"🏥 [POKECENTER] Planner directive: {planner_directive.get('description', 'Unknown')}")
-                                print(f"🗺️ [POKECENTER] Navigation Planner active: {planner_directive.get('description', 'Unknown')}")
-                                
-                                translated = self._translate_planner_directive(planner_directive, "RUSTBORO_CITY")
-                                if translated:
-                                    translated['journey_reason'] = 'Pokemon Center healing (via planner)'
-                                    return translated
-                        
-                        # Fallback: direct coordinate navigation
-                        _pc_fallback = get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_POKEMON_CENTER_1F") or (16, 38)
-                        logger.warning(f"🏥 [POKECENTER] Planner failed, using direct navigation")
-                        print(f"🏥 [POKECENTER] Using direct navigation to {_pc_fallback}")
-                        
-                        return {
-                            'goal_coords': (_pc_fallback[0], _pc_fallback[1], 'RUSTBORO_CITY'),
-                            'should_interact': True,
-                            'description': f'Navigate to Pokemon Center at {_pc_fallback} to heal Pokemon',
-                            'journey_reason': 'Heal Pokemon before challenging gym'
-                        }
-                else:
-                    print(f"✅ [POKECENTER] All Pokemon at 100% HP/PP - no healing needed!")
+        healing_directive = self._check_healing_needed(
+            state_data, graph_location, current_x, current_y
+        )
+        if healing_directive:
+            return healing_directive
         
         # =====================================================================
         # SEQUENTIAL MILESTONE SYSTEM
@@ -1416,11 +1387,12 @@ class ObjectiveManager:
         
         # =====================================================================
         # SPECIAL CASE HANDLING
+        # Phase 5.1: Rival battle is opener-only scripting.
         # =====================================================================
         
         # RIVAL BATTLE: Navigate to specific coordinates and interact
         # Logic: ROUTE_103 complete AND RECEIVED_POKEDEX not complete AND rival battle goal not complete
-        if special_handling == "rival_battle":
+        if not _past_opening and special_handling == "rival_battle":
             # Check using GOALS (not milestones - RIVAL_BATTLE_1 milestone doesn't exist in game)
             rival_battle_complete = self.is_goal_complete('ROUTE_103_RIVAL_BATTLE')
             has_pokedex = is_milestone_complete('RECEIVED_POKEDEX')
@@ -1483,141 +1455,9 @@ class ObjectiveManager:
                     'description': f'Navigate to ({goal_x},{goal_y}) and face RIGHT to interact with rival at {rival_coords}'
                 }
         
-        # =====================================================================
-        # PETALBURG WOODS: Navigate around obstacle zone
-        # =====================================================================
-        # In the eastern section of Petalburg Woods (x=11-25, y=31-38), there's
-        # a difficult area with NPCs/obstacles. Route to (9,34) to avoid them.
-        # =====================================================================
-        in_petalburg_woods = graph_location == 'PETALBURG_WOODS' or 'MAP_18_0B' in current_location
-        
-        if in_petalburg_woods:
-            position = player_data.get('position', {})
-            current_x = position.get('x', 0)
-            current_y = position.get('y', 0)
-            
-            # Trigger zone: X between 11-25 AND Y between 31-38
-            in_obstacle_zone = (11 <= current_x <= 25) and (31 <= current_y <= 38)
-            
-            if in_obstacle_zone:
-                WAYPOINT = (9, 34)
-                current_pos = (current_x, current_y)
-                
-                logger.info(f"🌲 [PETALBURG WOODS] In obstacle zone at ({current_x}, {current_y})")
-                print(f"🌲 [PETALBURG WOODS] Obstacle zone detected - navigating to waypoint {WAYPOINT}")
-                
-                # Navigate to waypoint unless already there
-                if current_pos != WAYPOINT:
-                    return {
-                        'goal_coords': (9, 34, 'PETALBURG_WOODS'),
-                        'description': 'Navigate to (9,34) to avoid Petalburg Woods obstacle zone',
-                        'avoid_grass': True
-                    }
-                else:
-                    logger.info(f"✅ [PETALBURG WOODS] Reached waypoint {WAYPOINT} - continuing")
-                    print(f"✅ [PETALBURG WOODS] Waypoint reached - resuming normal navigation")
-        
-        # ROUTE 104 SOUTH: Navigate around NPC using waypoint system
-        # The NPC at (11, 44) blocks the direct path with a large dialogue zone
-        # Blocked tiles: (11,44), (12,44), (13,44), (14,44), (15,44), (11,43), (11,42), (11,41), (11,40)
-        # Strategy: Route through grass on south side via waypoints 16,45 -> 10,45
-        in_route_104_south = graph_location is not None and 'ROUTE_104' in graph_location and 'SOUTH' in graph_location
-        
-        if in_route_104_south:
-            position = player_data.get('position', {})
-            current_x = position.get('x', 0)
-            current_y = position.get('y', 0)
-            
-            # Check if we're in the trigger zone that requires special routing
-            # Trigger: X between 16-25 AND Y between 41-53
-            in_trigger_zone = (16 <= current_x <= 25) and (41 <= current_y <= 53)
-            
-            # SPECIAL: If the player is on the horizontal grass path (y=45, x=10-17)
-            # between waypoints, route them to (10,45) regardless of trigger zone.
-            # This handles battle interruptions along the path from (16,45) to (10,45).
-            on_grass_path = (current_y == 45) and (10 <= current_x <= 17)
-            
-            if in_trigger_zone or on_grass_path:
-                if on_grass_path and not in_trigger_zone:
-                    logger.info(f"🌿 [ROUTE 104 SOUTH] On grass path at ({current_x}, {current_y}), routing to (10,45)")
-                    print(f"🌿 [ROUTE 104 SOUTH] On grass path y=45, continue west to (10,45)")
-                else:
-                    logger.info(f"🌿 [ROUTE 104 SOUTH] In trigger zone at ({current_x}, {current_y})")
-                    print(f"🌿 [ROUTE 104 SOUTH] Navigating around NPC via grass waypoints")
-                
-                # Waypoint sequence: current position -> (16,45) -> (10,45) -> continue
-                WAYPOINT_SEQUENCE = [
-                    (16, 45),  # East waypoint (approach grass from east)
-                    (10, 45),  # West waypoint (exit grass to west side)
-                ]
-                
-                current_pos = (current_x, current_y)
-
-                # CRITICAL: If on the horizontal grass path (y=45, x=10-17), always route to (10,45)
-                # This is the direct path from waypoint 1 (16,45) to waypoint 2 (10,45)
-                # Catches battle interruptions at positions like (11,45), (12,45), etc.
-                if (current_y == 45) and (10 <= current_x <= 17):
-                    final_wp = WAYPOINT_SEQUENCE[-1]  # (10, 45)
-                    if current_pos != final_wp:
-                        logger.info(f"🌿 [ROUTE 104 SOUTH] On horizontal path at {current_pos}, routing to {final_wp}")
-                        print(f"🌿 [ROUTE 104 SOUTH] On y=45 path, heading to {final_wp}")
-                        return {
-                            'goal_coords': (final_wp[0], final_wp[1], 'ROUTE_104_SOUTH'),
-                            'description': f'Continue west on grass path to {final_wp}',
-                            'avoid_grass': False
-                        }
-
-                # FALLBACK: Check broader grass corridor for other interruptions
-                # x in [10..16], y in [44..46]
-                GRASS_PATH_MIN_X, GRASS_PATH_MAX_X = 10, 16
-                GRASS_PATH_MIN_Y, GRASS_PATH_MAX_Y = 44, 46
-
-                if (GRASS_PATH_MIN_X <= current_x <= GRASS_PATH_MAX_X) and (GRASS_PATH_MIN_Y <= current_y <= GRASS_PATH_MAX_Y):
-                    # If we're already at the final west waypoint, fall through normally
-                    final_wp = WAYPOINT_SEQUENCE[-1]
-                    if current_pos != final_wp:
-                        logger.info(f"🌿 [ROUTE 104 SOUTH] In grass corridor at {current_pos}, directing to final waypoint {final_wp}")
-                        print(f"🌿 [ROUTE 104 SOUTH] In grass corridor, continue to {final_wp}")
-                        return {
-                            'goal_coords': (final_wp[0], final_wp[1], 'ROUTE_104_SOUTH'),
-                            'description': f'Continue through grass to {final_wp} (resume interrupted path)',
-                            'avoid_grass': False
-                        }
-
-                # Check if we're at or past a waypoint
-                for i, waypoint_pos in enumerate(WAYPOINT_SEQUENCE):
-                    if current_pos == waypoint_pos:
-                        # At this waypoint - move to next
-                        if i < len(WAYPOINT_SEQUENCE) - 1:
-                            next_pos = WAYPOINT_SEQUENCE[i + 1]
-                            next_x, next_y = next_pos
-                            
-                            logger.info(f"🎯 [ROUTE 104 SOUTH] At waypoint {i+1}/{len(WAYPOINT_SEQUENCE)}: {current_pos} -> {next_pos}")
-                            print(f"🎯 [ROUTE 104 SOUTH] Waypoint {i+1}/{len(WAYPOINT_SEQUENCE)}: going through grass")
-                            
-                            return {
-                                'goal_coords': (next_x, next_y, 'ROUTE_104_SOUTH'),
-                                'description': f'Navigate to waypoint {next_pos} (grass route around NPC)',
-                                'avoid_grass': False  # CRITICAL: Allow grass pathfinding for this route
-                            }
-                        else:
-                            # At final waypoint (10, 45) - release restrictions, continue normally
-                            logger.info(f"✅ [ROUTE 104 SOUTH] Completed waypoint sequence at {current_pos}")
-                            print(f"✅ [ROUTE 104 SOUTH] Past NPC zone, resuming normal navigation")
-                            # Fall through to normal navigation
-                            break
-                
-                # Not at any waypoint yet - navigate to first waypoint (16, 45)
-                if current_pos not in WAYPOINT_SEQUENCE:
-                    first_waypoint = WAYPOINT_SEQUENCE[0]
-                    logger.info(f"🎯 [ROUTE 104 SOUTH] At ({current_x},{current_y}), navigating to first waypoint {first_waypoint}")
-                    print(f"🎯 [ROUTE 104 SOUTH] Heading to waypoint 1: {first_waypoint}")
-                    
-                    return {
-                        'goal_coords': (first_waypoint[0], first_waypoint[1], 'ROUTE_104_SOUTH'),
-                        'description': f'Navigate to waypoint {first_waypoint} (avoid NPC dialogue zone)',
-                        'avoid_grass': True  # Avoid grass before reaching waypoint
-                    }
+        # Phase 5.2: Petalburg Woods obstacle zone and Route 104 South NPC
+        # avoidance waypoints REMOVED.  The agent navigates via A* + RAG and
+        # battles NPCs if encountered (healing afterward if needed).
         
         # ROXANNE BATTLE: Navigate through gym trainers then to gym leader
         # Logic: RUSTBORO_GYM_ENTERED complete AND ROXANNE_DEFEATED not complete

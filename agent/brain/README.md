@@ -10,7 +10,8 @@ The brain runs inside every `Agent.step()` call (see `agent/__init__.py`,
 between perception and navigation). On each frame it:
 
 1. **Logs new dialogue** to a persistent ChromaDB vector database
-   (`EpisodicMemory.log_event`).
+   (`EpisodicMemory.log_event`) with enriched metadata (location, battle
+   state, spatial coordinates).
 2. **Detects battle transitions** by comparing the current `in_battle` flag
    against the previous frame's value.
 3. **On battle start:** writes the event to memory, marks the ObjectiveManager
@@ -23,10 +24,18 @@ between perception and navigation). On each frame it:
 5. **Outside of battle:** runs keyword-based blocker detection on NPC dialogue
    (e.g. "wait", "stop") and, if triggered, fires the same RAG → LLM pipeline
    with a short-circuit to press A until the blocker clears.
+6. **Logs milestone completions** to episodic memory when goals are marked
+   done (e.g., `PETALBURG_GYM_DAD_DIALOGUE`), with spatial metadata for
+   cross-session retrieval.
 
 ### What this proves today
 
-- The vector database **grows** over time (every dialogue, every battle).
+- The vector database **grows** over time (every dialogue, every battle,
+  every milestone completion).
+- Dialogue events carry **structured metadata** (location, in_battle flag,
+  spatial coordinates) enabling filtered queries.
+- Milestone completions are **persistently recorded** in ChromaDB, not just
+  a transient in-memory dict — enabling cross-session progress awareness.
 - The database is **queried** via semantic similarity (visible in the
   `============` verbose block during gameplay).
 - Retrieved memories are **injected into the LLM prompt**, so the recovery plan
@@ -48,6 +57,8 @@ which now serves as the single executive router. The consolidation:
 
 The remaining brain modules (`EpisodicMemory`, `RecoveryPlanner`) are injected
 into ObjectiveManager via `update_brain(episodic_memory=..., recovery_planner=...)`.
+Additionally, `ObjectiveManager.__init__()` accepts an `episodic_memory` kwarg
+for milestone logging directly (without going through `update_brain`).
 
 | Capability | Status | Target |
 |------------|--------|--------|
@@ -55,8 +66,12 @@ into ObjectiveManager via `update_brain(episodic_memory=..., recovery_planner=..
 | RAG-powered recovery planning | **Done** | Stable |
 | Battle transition detection | **Done** | Stable |
 | NPC dialogue blocker detection | **Done** | Expand keyword list / use LLM classification |
-| Spatial memory (x, y, map_id metadata) | Not started | Log coordinates on every event |
-| Proactive planning (not just reactive) | Not started | Brain proposes next objective, not just recovery |
+| Spatial memory (x, y, location metadata) | **Done** | Stable (Phase 3) |
+| Milestone logging to episodic memory | **Done** | Stable (Phase 4.5a) |
+| Enriched dialogue metadata | **Done** | Stable (Phase 4.5b) |
+| File-based run logging (TeeWriter) | **Done** | Stable (Phase 4.5d) |
+| Goal hydration from DB on startup | Not started | Load completed milestones from ChromaDB (Phase 4.5c) |
+| Proactive planning (not just reactive) | **In Progress** | RAG-primary navigation active (Phase 4.3b) |
 | Multi-step sub-goaling | Not started | Dependency chains (e.g. Get Cut → Beat Gym → Cut Tree) |
 | Learning from failures | Not started | Log failed actions, avoid repeating them |
 
@@ -98,35 +113,45 @@ python -m pytest tests/test_objective_manager_blocker.py -v
 
 ## Known Gaps & Next Steps
 
-### 1. Phase 3 (Spatial Awareness) needs a concrete spec before coding
+### 1. Goal Hydration from DB on Startup (Phase 4.5c)
 
-The plan says "log (x, y, map_id) as metadata" but several decisions remain
-unresolved:
+Milestone completions are now logged to ChromaDB, but `completed_goals` is
+still initialized as an empty dict on each process start. The next step is to
+query the DB for `{"type": "milestone"}` events at startup and pre-populate
+`completed_goals`. This would let the agent resume from any save state and
+know what it's already accomplished — even if the save state predates the
+milestone system.
 
-- **Where do coordinates come from?** `state_data['player']['x']` /
-  `state_data['player']['y']` / `state_data['player']['map_id']` — these exist
-  today and can be passed into `log_event()` metadata immediately.
-- **What does spatial retrieval look like?** ChromaDB supports `where` clause
-  filtering on metadata (e.g. `where={"map_id": 17}`), which is separate from
-  vector similarity. A spatial query would combine both: vector similarity on
-  the event text *and* a map filter so results stay geographically relevant.
-- **Suggested first step:** Before touching the pathfinder, add `x`, `y`,
-  `map_id` to the metadata dict in every `log_event()` call in
-  `agent/__init__.py` and verify with `inspect_brain.py`. That's a 3-line
-  change with zero risk to navigation.
+This is the key enabler for **reducing hardcoded objective manager logic**:
+once milestones persist across sessions, special-case handlers can be replaced
+with generic "check if milestone X is done" guards that work regardless of
+which save state was loaded.
 
-### 2. Phase 4 (Sub-Goaling) needs a design doc before implementation
+### 2. Phase 4.3c (RAG-Only Navigation)
 
-"Get Cut → Beat Gym → Cut Tree" is a good North Star but doesn't define:
+The RAG planner drives navigation today (Phase 4.3b), with milestones as a
+silent fallback. Once behavioural evaluation confirms the RAG planner can
+guide the agent through the Littleroot → Rustboro corridor without regression,
+the milestone list moves to `tests/fixtures/` for regression testing.
 
-- What the dependency graph structure looks like (DAG? linear chain?).
-- How this interacts with the ObjectiveManager's milestone system, which already
-  drives navigation objectives. Building a parallel system risks divergence.
+Success criteria:
+1. End-to-end run from `06_road` split reaches Rustboro City (RAG-only navigation).
+2. No regression in route completion time vs. milestone-only runs.
+3. `MILESTONE_PROGRESSION` demoted from primary to last-resort fallback.
 
-### 3. Memory lifecycle: the database grows indefinitely
+### 3. Opening Sequence vs. Post-Opening
 
-Every dialogue line and battle event is logged and never evicted. For a
-speedrun (a few hundred steps), this is fine. For extended runs or repeated
+Everything before leaving Petalburg Gym (Norman dialogue, Wally tutorial,
+scripted cutscenes) is the "opening sequence" — full of game-specific triggers
+that require special handling. The `05_petalburg` and `06_road` save state
+splits let us bypass the opening and focus development on the post-opening
+corridor (Route 104 South → Petalburg Woods → Route 104 North → Rustboro City)
+where the agent should handle everything dynamically via RAG + episodic memory.
+
+### 4. Memory Lifecycle
+
+Every dialogue line, battle event, and milestone is logged and never evicted.
+For a speedrun (a few hundred steps), this is fine. For extended runs or repeated
 restarts against the same save state, stale or duplicate entries accumulate and
 begin polluting retrieval results.
 
@@ -138,3 +163,10 @@ begin polluting retrieval results.
 - **Long-term:** Area-based summarization — when the player leaves a map, merge
   all dialogue/battle events for that map into a single summary entry, reducing
   retrieval noise.
+
+### 5. Sub-Goaling (Phase X)
+
+"Get Cut → Beat Gym → Cut Tree" is a good North Star but doesn't define:
+- What the dependency graph structure looks like (DAG? linear chain?).
+- How this interacts with the ObjectiveManager's milestone system.
+- Building a parallel system risks divergence.

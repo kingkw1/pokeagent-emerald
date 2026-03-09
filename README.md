@@ -217,7 +217,13 @@ pokeagent-emerald/
   - [x] **4.4d:** NPC Identity Registry — adaptive discovery replaces hardcoded `graphics_id` constants.
   - [x] **4.4e:** NPC obstacle injection — A\* pathfinding treats detected NPCs as impassable tiles.
   - [x] **4.4f:** Graph-derived coordinates — building entrances, interior exits, milestone `target_coords`, and NPC fallback positions resolved from `LOCATION_GRAPH` portal/POI metadata.
-- [ ] **Phase 5: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
+- [ ] **Phase 5: Post-Opening Strangler Fig** — Remove location-specific hardcoded blocks so RAG + generic systems drive all post-opening navigation:
+  - [x] **5.1:** Milestone-index gate — opener-only special cases (Birch Lab, Petalburg City/Gym, Rival Battle) skipped when past opening sequence.
+  - [x] **5.2:** Remove location-specific waypoint hacks — Route 104 South NPC avoidance and Petalburg Woods obstacle zone waypoints deleted; agent navigates via A\* + RAG.
+  - [x] **5.3:** Generic Pokemon Center healing — `_check_healing_needed()` + `find_nearest_pokemon_center()` work in any city, replacing the Rustboro-specific healing block.
+  - [ ] **5.4:** Gym navigation via RAG + A\* — replace Roxanne waypoint sequence with generic gym pathfinding.
+  - [ ] **5.5:** End-to-end validation from `06_road` split to Roxanne completion with zero location-specific special cases.
+- [ ] **Phase X: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
 
 ## Documentation
 

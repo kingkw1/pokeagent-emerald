@@ -659,6 +659,45 @@ def get_connected_locations(location_name: str) -> List[str]:
     return list(portals.keys())
 
 
+def find_nearest_pokemon_center(current_location: str) -> Optional[str]:
+    """
+    Find the nearest Pokemon Center reachable from *current_location* via BFS.
+
+    If *current_location* is itself a Pokemon Center, return it directly.
+    Otherwise traverse the ``LOCATION_GRAPH`` and return the first node whose
+    key contains ``POKEMON_CENTER``.
+
+    >>> find_nearest_pokemon_center("RUSTBORO_CITY")
+    'RUSTBORO_CITY_POKEMON_CENTER_1F'
+    >>> find_nearest_pokemon_center("OLDALE_TOWN")
+    'OLDALE_TOWN_POKEMON_CENTER_1F'
+    """
+    from collections import deque
+
+    start = current_location.upper()
+
+    if "POKEMON_CENTER" in start:
+        return start
+
+    if start not in LOCATION_GRAPH:
+        return None
+
+    queue: deque = deque([start])
+    visited = {start}
+
+    while queue:
+        loc = queue.popleft()
+        for neighbour in get_connected_locations(loc):
+            if neighbour in visited:
+                continue
+            if "POKEMON_CENTER" in neighbour:
+                return neighbour
+            visited.add(neighbour)
+            queue.append(neighbour)
+
+    return None
+
+
 def find_shortest_path(start_location: str, end_location: str, 
                        requirements: Optional[Dict[str, Any]] = None) -> Optional[List[Tuple[str, str, Dict]]]:
     """

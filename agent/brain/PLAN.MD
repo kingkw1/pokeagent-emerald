@@ -6,6 +6,8 @@ logging it, querying its history via RAG, and replanning using an LLM.
 **Status:** Phases 1, 2, & 3 are **complete** and integrated into the live agent.
 Phase 4 (Walkthrough RAG) is **in progress** — 4.1–4.3b complete, 4.3c next.
 Phase 4.4 (NPC Navigation) — 4.4a/b/d/e/f **complete**, 4.4c remaining.
+Phase 4.5 (Memory-Driven Progress Tracking) — **complete** and integrated.
+Phase 5 (Post-Opening Strangler Fig) — **in progress** — 5.1–5.3 complete, 5.4 next.
 
 ### Design Rationale (LLM-First Approach)
 
@@ -745,6 +747,225 @@ def resolve_location(name: str) -> dict | None:
 
 ---
 
+## 📅 PHASE 4.5: Memory-Driven Progress Tracking ✅ COMPLETE
+
+**Goal:** Make the episodic memory the persistent source of truth for agent
+progress — milestones, dialogue, and game events — so the agent can resume
+intelligently across save states and sessions, and move toward reducing
+hardcoded objective manager logic.
+
+### Problem Statement
+
+Before this phase:
+- `completed_goals` was a transient Python `dict` — milestones were lost on
+  process restart or save state switch.
+- Dialogue logging was minimal: just raw text with `{"type": "dialogue"}`.
+  No location, no battle context, no step number.
+- `mark_goal_complete()` only printed to console/logger. No persistent record
+  in the vector DB meant we couldn't query "what milestones have been hit?"
+  across sessions.
+- Debugging required parsing raw console logs. No structured event trail.
+
+### 4.5a — Milestone Completion → Episodic Memory ✅
+
+`mark_goal_complete()` now logs to ChromaDB with structured metadata:
+```python
+episodic_memory.log_event(
+    f"Milestone complete: {goal_id} — {description}",
+    {"type": "milestone", "goal_id": goal_id},
+    state_data=state_data,  # Spatial metadata (x, y, location)
+)
+```
+
+**Implementation:**
+- `ObjectiveManager.__init__()` now accepts `episodic_memory` kwarg, stored
+  as `self._episodic_memory`.
+- `mark_goal_complete()` gained optional `state_data` parameter.
+- All call sites (`ROUTE_103_RIVAL_BATTLE`, `PETALBURG_GYM_DAD_DIALOGUE`)
+  pass `state_data` for spatial tagging.
+- `Agent.__init__` threads `episodic_memory` to `ObjectiveManager()`.
+
+**Queryable:** `retrieve_raw("milestone", n_results=20)` returns all completed
+milestones with their locations and timestamps.
+
+### 4.5b — Enriched Dialogue Metadata ✅
+
+Dialogue events logged by `update_brain()` now include:
+```python
+{"type": "dialogue", "in_battle": True/False, "location": "PETALBURG CITY GYM"}
+```
+Plus spatial metadata from `state_data` (`pos_x`, `pos_y`, `location`).
+
+This enables queries like:
+- "What dialogue did I hear in Petalburg Gym?" (filter by location)
+- "What did NPCs say outside of battle?" (filter by `in_battle=False`)
+- "What happened near (4, 108)?" (spatial proximity via `retrieve_near()`)
+
+### 4.5c — Goal Hydration from DB (Future)
+
+**Status:** Planned, not yet implemented.
+
+On startup, query the episodic memory for `{"type": "milestone"}` events and
+pre-populate `completed_goals`. This would let the agent resume from any save
+state and know what it's already accomplished — even if the save state predates
+the milestone system.
+
+```python
+# Planned implementation in ObjectiveManager.__init__():
+if episodic_memory:
+    milestone_events = episodic_memory.collection.get(
+        where={"type": "milestone"}
+    )
+    for meta in milestone_events["metadatas"]:
+        goal_id = meta.get("goal_id")
+        if goal_id:
+            self.completed_goals[goal_id] = True
+```
+
+**Why this matters for de-hardcoding:** Once milestones persist across sessions,
+the objective manager's special-case handlers (Norman dialogue, rival battle)
+can be replaced with generic "check if milestone X is done" guards that work
+regardless of which save state was loaded. This is a stepping stone toward the
+Phase 4.3c RAG-only navigation goal.
+
+### 4.5d — File-Based Run Logging ✅
+
+All stdout/stderr output is now tee'd to timestamped log files in `run_logs/`
+via a `TeeWriter` class in `server/client.py`. Log files persist across runs
+and can be shared for debugging.
+
+- File format: `run_logs/run_YYYYMMDD_HHMMSS.log`
+- `TeeWriter` mirrors all writes to both the original stream and the log file.
+- Cleanup: original streams restored on exit, log files flushed and closed.
+- `run_logs/` added to `.gitignore`.
+
+---
+
+## 📅 PHASE 5: Post-Opening Strangler Fig
+
+**Goal:** Starting from the `06_road` split (player outside Petalburg Gym, all
+milestones through `RUSTBORO_CITY` completed), RAG + generic systems handle
+all navigation and decision-making — no location-specific hardcoded blocks.
+
+**Status:** Phase 5.1 **complete**. 5.2–5.4 in progress.
+
+### The Problem
+
+`_get_next_action_directive_inner()` contains ~6 large special-case blocks that
+fire *before* the NAVIGATION HANDLING / RAG section. These blocks hard-script
+specific behaviours for Birch Lab, Petalburg City, Rustboro Pokemon Center,
+Route 104 South NPC avoidance, Petalburg Woods obstacle zone, and Roxanne's
+gym — all returning early so RAG never gets a chance to drive navigation.
+
+While the RAG-primary system (Phase 4.3b) **is working** — logs show 18 RAG
+PRIMARY overrides in a recent run — the special-case early returns intercept
+most steps before RAG fires.
+
+### Classification of Special Cases
+
+**Opener-only scripting** (gate behind milestone index):
+- Birch Lab (wait for Pokedex, exit lab)
+- Petalburg City / Gym (Dad dialogue, HP-based routing)
+- Rival battle handler (Route 103 NPC interaction)
+
+**Location-specific waypoints** (remove, let agent navigate naturally):
+- Route 104 South NPC avoidance (hardcoded grass waypoints around chatty NPC)
+- Petalburg Woods obstacle zone (hardcoded waypoint to avoid eastern section)
+
+If the agent fights the Route 104 NPC, that's acceptable — with a working
+Pokemon Center healing subsystem, the agent can heal and return. A fully
+autonomous agent should march through battles or avoid them based on its
+own reasoning, not hardcoded waypoints.
+
+**Generic capabilities** (extract and generalise):
+- Rustboro Pokemon Center healing → Generic "heal at nearest Pokemon Center"
+  that works in ANY city, not just Rustboro
+- Roxanne gym waypoints → Replace with RAG + A* inside-gym pathfinding
+
+### 5.1 Milestone-Index Gate for Opener Blocks ✅ COMPLETE
+
+Wrap Birch Lab, Petalburg City/Gym, and Rival Battle blocks in a guard:
+```python
+OPENING_SEQUENCE_LAST_INDEX = 18  # GYM_EXPLANATION (index 18)
+_past_opening = get_highest_milestone_index(milestones) > OPENING_SEQUENCE_LAST_INDEX
+```
+
+When `_past_opening` is true, these blocks are skipped entirely. The `06_road`
+split (highest completed = RUSTBORO_CITY, index 23) skips all opener blocks.
+Opener runs (starting from `00_init` or `05_petalburg`) still work unchanged.
+
+### 5.2 Remove Location-Specific Waypoint Hacks ✅ COMPLETE
+
+Delete the Route 104 South NPC avoidance waypoints and Petalburg Woods obstacle
+zone waypoint. The agent navigates using A* + RAG like any other route. If it
+encounters the NPC, it battles and heals afterward.
+
+### 5.3 Generic Pokemon Center Healing Subsystem ✅ COMPLETE
+
+Extract the Rustboro-specific healing block into `_check_healing_needed()` with
+**two-tier decision logic**:
+
+**Tier 1 — Opportunistic** (in a town with a directly-connected Pokemon Center):
+- Heal for *any* HP damage or any fully depleted move
+- The trip is essentially free (1 hop), so always top off
+
+**Tier 2 — Threshold** (on a route / no adjacent Pokemon Center):
+- Heal only when **any Pokemon faints**, **HP < 50%** (`HP_HEAL_THRESHOLD`),
+  or **any move PP ≤ 5** (`PP_LOW_THRESHOLD`, ≈25% of typical base PP)
+- Prevents wasteful round-trips after a single stray hit
+
+Adjacency is determined via `get_connected_locations()` — a Pokemon Center
+is "adjacent" if the current graph node has a direct portal to it (1 hop).
+
+Both tiers share the same navigation / nurse-interaction / exit flow:
+1. `find_nearest_pokemon_center()` (BFS over `LOCATION_GRAPH`)
+2. `NavigationPlanner.plan_journey()` to reach the center
+3. `_resolve_npc_coords(npc_role="nurse")` → interact with Nurse Joy
+4. Walk south to exit warp and leave
+
+Constants (class-level, easily tunable):
+```python
+HP_HEAL_THRESHOLD = 0.50   # Tier 2: heal when any Pokemon HP < 50%
+PP_LOW_THRESHOLD = 5       # Tier 2: heal when any move PP ≤ 5
+```
+
+**Known limitation:** Max PP per move is not in the current state data, so the
+opportunistic tier cannot detect "PP < 100%" (only PP == 0). In practice HP
+damage is by far the more common trigger, and healing restores both HP and PP.
+
+> **Future: cost-to-return model.** Both tiers are special-cases of a single
+> "should I heal?" function that weighs *(a)* confidence of beating upcoming
+> trainers given current party state, *(b)* cost to return to a Pokemon Center
+> (travel distance, risk of unavoidable battles on the way back), and *(c)*
+> cost to re-traverse the ground between the PC and current position. When
+> confidence is high and return cost is low, skip healing; when confidence is
+> low *or* return cost is high, heal proactively. This subsumes both
+> opportunistic and threshold logic under a unified framework.
+>
+> Additional future rules for **gym leaders** and **rival battles**, which
+> represent a substantial difficulty spike above normal trainer encounters,
+> may warrant a lower HP threshold or a pre-battle "must be at full health"
+> gate.
+
+### 5.4 Gym Navigation via RAG + A*
+
+Replace the Roxanne waypoint sequence with generic gym navigation:
+1. RAG says "Enter Rustboro Gym and defeat Roxanne"
+2. Building entrance resolved from `LOCATION_GRAPH`
+3. Inside gym: A* navigates to the gym leader's NPC position (resolved
+   dynamically via `_resolve_npc_coords(npc_role="gym_leader_*")`)
+4. Trainer battles happen automatically when the agent walks into their
+   line of sight — no waypoints needed
+5. After victory: generic "exit building" logic (walk south to exit warp)
+
+### 5.5 End-to-End Validation
+
+- Load `06_road` split → reach Rustboro → heal → enter gym → beat Roxanne
+- Zero location-specific special cases fire
+- Compare completion rate and time against hardcoded baseline
+
+---
+
 ## 📅 PHASE X: Recursive Sub-Goaling (North Star)
 
 **Goal:** Multi-step dependency chains (Get Cut → Beat Gym → Cut Tree).
@@ -773,7 +994,16 @@ def resolve_location(name: str) -> dict | None:
 15. ~~Phase 4.4d — NPC Identity Registry (adaptive discovery, replace hardcoded graphics_id constants)~~ ✅
 16. ~~Phase 4.4e — NPC obstacle injection in A\* pathfinding~~ ✅
 17. ~~Phase 4.4f — Graph-derived coordinates (building entrances, interior exits, milestone target_coords, NPC fallbacks)~~ ✅
-18. Next: Phase 3 — Strangler Fig (waypoint sequences → RAG/VLM-driven)
+18. ~~Phase 4.5a — Milestone completion → episodic memory logging~~ ✅
+19. ~~Phase 4.5b — Enriched dialogue metadata (location, in_battle)~~ ✅
+20. Phase 4.5c — Goal hydration from DB on startup (load completed milestones from ChromaDB)
+21. ~~Phase 4.5d — File-based run logging (TeeWriter → run_logs/)~~ ✅
+22. ~~Phase 5.1 — Milestone-index gate for opener blocks~~ ✅
+23. ~~Phase 5.2 — Remove location-specific waypoint hacks~~ ✅
+24. ~~Phase 5.3 — Generic Pokemon Center healing (two-tier: opportunistic + threshold)~~ ✅
+25. Next: Phase 5.4 — Gym navigation via RAG + A\*
+26. Next: Phase 5.5 — End-to-end validation from 06_road split
+27. Next: Phase 4.3c — RAG-only (behavioural evaluation, not agreement rate)
 
 ---
 
@@ -802,4 +1032,5 @@ def resolve_location(name: str) -> dict | None:
 | `agent/brain/demos/demo_full_flow.py`    | **Phase 2** | ✅ Complete      | End-to-end RAG demo                 |
 | `agent/brain/demos/inspect_brain.py`     | **Util**    | ✅ Complete      | Live DB inspector                   |
 | `agent/brain/README.md`                  | **Docs**    | ✅ Complete      | Module overview & goals             |
+| `server/client.py` (TeeWriter)           | **Phase 4.5d** | ✅ Complete   | File-based run logging (`run_logs/`) |
 | `agent/brain/PLAN.MD`                    | **Docs**    | ✅ Current       | This roadmap                        |
