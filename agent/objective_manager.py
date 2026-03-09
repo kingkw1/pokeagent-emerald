@@ -8,6 +8,7 @@ This module provides milestone-driven strategic planning without the complex sta
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -23,8 +24,14 @@ from agent.location_graph import (
 
 logger = logging.getLogger(__name__)
 
-# Keywords indicating the player cannot progress (ported from GoalManager)
-BLOCKING_KEYWORDS = ["wait", "stop", "don't go", "dangerous"]
+# Patterns indicating the player cannot progress (ported from GoalManager).
+# Uses word-boundary regex so "wait" matches "Wait!" but not "waiting".
+BLOCKING_PATTERNS = [
+    re.compile(r"\bwait\b", re.IGNORECASE),
+    re.compile(r"\bstop\b", re.IGNORECASE),
+    re.compile(r"don't go", re.IGNORECASE),
+    re.compile(r"\bdangerous\b", re.IGNORECASE),
+]
 
 # ============================================================================
 # SEQUENTIAL MILESTONE PROGRESSION SYSTEM
@@ -277,7 +284,7 @@ class ObjectiveManager:
         self._episodic_memory = episodic_memory
         
         # ── Blocker / Recovery (ported from GoalManager) ──
-        self.blocking_keywords = BLOCKING_KEYWORDS
+        self.blocking_patterns = BLOCKING_PATTERNS
         self._recovery_tasks: List[Dict[str, Any]] = []  # Stack of recovery sub-goals
         self._blocker_state: Optional[Dict[str, Any]] = None  # {reason, context} when blocked
         self._brain_prev_in_battle: bool = False
@@ -2056,11 +2063,10 @@ class ObjectiveManager:
             dialogue = ""
 
         if dialogue and isinstance(dialogue, str):
-            dialogue_lower = dialogue.lower()
-            for keyword in self.blocking_keywords:
-                if keyword in dialogue_lower:
+            for pattern in self.blocking_patterns:
+                if pattern.search(dialogue):
                     self._handle_blocker(
-                        reason=f"NPC Dialogue Keyword: '{keyword}'",
+                        reason=f"NPC Dialogue Keyword: '{pattern.pattern}'",
                         context=dialogue,
                     )
                     break
