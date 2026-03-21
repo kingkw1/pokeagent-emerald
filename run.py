@@ -14,6 +14,9 @@ import argparse
 import subprocess
 import signal
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before any imports that read env vars
+
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from server.client import run_multiprocess_client

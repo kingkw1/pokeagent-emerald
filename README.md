@@ -98,6 +98,7 @@ The default VLM backend is **Google Gemini Flash** (`gemini-2.0-flash`). The sys
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager (recommended)
 - A legally obtained **Pokémon Emerald GBA ROM**
 - **[Tesseract OCR](https://github.com/tesseract-ocr/tesseract)** installed on your system
+- **[libmgba](https://mgba.io/)** native shared library (see System Dependencies below)
 - **(Optional)** A Google Gemini API key for the default VLM backend
 - **(Optional)** An NVIDIA GPU with CUDA for local VLM inference and RL model training
 
@@ -110,8 +111,17 @@ Install system-level packages before the Python setup:
 sudo apt update
 sudo apt install -y tesseract-ocr python3.10 python3.10-venv git
 
+# Install the native mGBA shared library (required by the mgba Python package)
+wget https://github.com/mgba-emu/mgba/releases/download/0.10.5/mGBA-0.10.5-ubuntu64-focal.tar.xz
+tar -xf mGBA-0.10.5-ubuntu64-focal.tar.xz
+sudo dpkg -i mGBA-0.10.5-ubuntu64-focal/libmgba.deb
+sudo apt --fix-broken install -y   # resolves any missing deps (ffmpeg libs, etc.)
+
+# On Ubuntu 22.04+, you may also need a libzip compatibility symlink:
+sudo ln -sf /lib/x86_64-linux-gnu/libzip.so.4 /lib/x86_64-linux-gnu/libzip.so.5 && sudo ldconfig
+
 # macOS (Homebrew)
-brew install tesseract python@3.10 git
+brew install tesseract python@3.10 git mgba
 ```
 
 ### Setup
@@ -143,8 +153,9 @@ source .venv/bin/activate   # Linux / macOS
 2. **API Keys:** Create a `.env` file in the project root:
 
 ```env
-# Required for the default Gemini VLM backend
-GOOGLE_API_KEY=your_google_api_key_here
+# Required for the default Gemini VLM backend (either name works)
+GEMINI_API_KEY=your_gemini_api_key_here
+# GOOGLE_API_KEY=your_google_api_key_here  # also accepted
 
 # Optional — only if using the OpenAI or OpenRouter backends
 OPENAI_API_KEY=your_openai_key_here
@@ -212,8 +223,13 @@ cd pokeagent-emerald
 # 4. Extract the gitignored extras into the repo root
 tar xzf /path/to/pokeagent-extras.tar.gz
 
-# 5. Install system deps + Python environment (see Setup section above)
+# 5. Install system deps + Python environment (see System Dependencies section above)
 sudo apt install -y tesseract-ocr
+# Install native mGBA library (see System Dependencies for full instructions)
+wget https://github.com/mgba-emu/mgba/releases/download/0.10.5/mGBA-0.10.5-ubuntu64-focal.tar.xz
+tar -xf mGBA-0.10.5-ubuntu64-focal.tar.xz
+sudo dpkg -i mGBA-0.10.5-ubuntu64-focal/libmgba.deb
+sudo apt --fix-broken install -y
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
