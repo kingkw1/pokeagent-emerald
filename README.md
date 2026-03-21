@@ -94,36 +94,136 @@ The default VLM backend is **Google Gemini Flash** (`gemini-2.0-flash`). The sys
 
 ### Prerequisites
 
-- **Python 3.10 or 3.11** (3.12+ is not supported)
-- A legally obtained Pokémon Emerald GBA ROM
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed on your system
-- (Optional) A Google Gemini API key for the default VLM backend
+- **Python 3.10** (pinned in `.python-version`; 3.11 also works, 3.12+ is **not** supported)
+- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager (recommended)
+- A legally obtained **Pokémon Emerald GBA ROM**
+- **[Tesseract OCR](https://github.com/tesseract-ocr/tesseract)** installed on your system
+- **(Optional)** A Google Gemini API key for the default VLM backend
+- **(Optional)** An NVIDIA GPU with CUDA for local VLM inference and RL model training
+
+### System Dependencies
+
+Install system-level packages before the Python setup:
+
+```bash
+# Ubuntu / Debian
+sudo apt update
+sudo apt install -y tesseract-ocr python3.10 python3.10-venv git
+
+# macOS (Homebrew)
+brew install tesseract python@3.10 git
+```
 
 ### Setup
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/kingkw1/pokeagent-emerald.git
 cd pokeagent-emerald
 
-# Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux / macOS
-# .venv\Scripts\activate   # Windows
+# 2. Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install dependencies (uv is recommended)
-uv sync          # preferred
-# or: pip install -r requirements.txt
+# 3. Create the virtual environment and install all dependencies
+#    uv reads .python-version (3.10) and pyproject.toml automatically
+uv sync
+
+# 4. Activate the virtual environment
+source .venv/bin/activate   # Linux / macOS
+# .venv\Scripts\activate    # Windows
+
+# (Alternative: skip uv and use pip)
+# python3.10 -m venv .venv && source .venv/bin/activate
+# pip install -r requirements.txt
 ```
 
 ### Configuration
 
-1. **ROM File:** Place your ROM as `Emerald-GBAdvance/rom.gba` (this is the default path).
+1. **ROM File:** Place your Pokémon Emerald ROM at `Emerald-GBAdvance/rom.gba`.
 2. **API Keys:** Create a `.env` file in the project root:
 
 ```env
-GOOGLE_API_KEY=your_key_here
+# Required for the default Gemini VLM backend
+GOOGLE_API_KEY=your_google_api_key_here
+
+# Optional — only if using the OpenAI or OpenRouter backends
+OPENAI_API_KEY=your_openai_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
 ```
+
+3. **Save States (optional):** The `Emerald-GBAdvance/` directory ships with several `.state` files at different game checkpoints. You can use `--load-state` to start from any of them.
+
+### Verify Installation
+
+```bash
+# Confirm Python version
+python --version   # should be 3.10.x
+
+# Run the test suite
+pytest
+
+# Quick smoke test — start in manual (keyboard) mode
+python run.py --manual --load-state Emerald-GBAdvance/truck_start.state
+```
+
+### Transferring to Another Machine
+
+The git repo contains the source code and tracked assets, but several large or sensitive items are **gitignored** and must be copied manually.
+
+#### What Git Already Tracks
+
+Everything in the repo — source code, docs, save states (`.state`), milestone configs, `uv.lock`, etc. Just `git clone` (or `git pull`) on the new machine to get these.
+
+#### What You Must Copy Manually
+
+| Item | Path | Size | Why |
+|------|------|------|-----|
+| **GBA ROM** | `Emerald-GBAdvance/rom.gba` | ~16 MB | Gitignored (`.gba`) — legally required to supply your own |
+| **Trained models** | `models/` | ~20 GB | Gitignored — perception checkpoints (`perception_v0.1`, `perception_v0.2_qwen_final`) and RL models (`PPO/`, `PPO_Masked/`) |
+| **Episodic memory DB** | `memory_db/` | ~7 MB | Gitignored — ChromaDB vector store with NPC registry and past episodes |
+| **Agent cache** | `.pokeagent_cache/` | ~1 MB | Gitignored — checkpoint state, milestone progress, map stitcher data |
+| **Environment file** | `.env` | tiny | Gitignored — API keys (Gemini, OpenAI, etc.) |
+
+#### Transfer Steps
+
+```bash
+# === On the OLD machine ===
+
+# 1. Make sure all code changes are committed and pushed
+cd /path/to/pokeagent-emerald
+git add -A && git commit -m "sync before transfer" && git push
+
+# 2. Archive the gitignored files you need on the new machine
+tar czf pokeagent-extras.tar.gz \
+    Emerald-GBAdvance/rom.gba \
+    models/ \
+    memory_db/ \
+    .pokeagent_cache/ \
+    .env
+
+# Transfer pokeagent-extras.tar.gz to the new machine (USB, scp, cloud, etc.)
+
+# === On the NEW machine ===
+
+# 3. Clone the repo
+git clone https://github.com/kingkw1/pokeagent-emerald.git
+cd pokeagent-emerald
+
+# 4. Extract the gitignored extras into the repo root
+tar xzf /path/to/pokeagent-extras.tar.gz
+
+# 5. Install system deps + Python environment (see Setup section above)
+sudo apt install -y tesseract-ocr
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+
+# 6. Verify
+source .venv/bin/activate
+pytest
+python run.py --manual --load-state Emerald-GBAdvance/truck_start.state
+```
+
+> **Tip — travelling light:** If you skip `models/` (~20 GB), the agent still works — it just won't have local perception/RL models. The default Gemini VLM backend runs remotely and doesn't need them. You can always copy the models over later.
 
 ## Usage
 
@@ -139,6 +239,7 @@ python run.py --agent-auto
 |------|---------|-------------|
 | `--rom PATH` | `Emerald-GBAdvance/rom.gba` | Path to the GBA ROM |
 | `--load-state PATH` | — | Load a save state on startup |
+| `--load-checkpoint` | off | Resume from the last `.pokeagent_cache/` checkpoint |
 | `--backend NAME` | `gemini` | VLM backend (`gemini`, `openai`, `openrouter`, `local`, `ollama`) |
 | `--model-name NAME` | `gemini-2.0-flash` | Model to use |
 | `--manual` | off | Start in manual (keyboard) mode |
