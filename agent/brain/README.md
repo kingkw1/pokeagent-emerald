@@ -13,6 +13,19 @@ On each frame:
 5. **Triggers healing** when party HP drops below 50% (routes to nearest PokeCenter).
 6. **Logs milestones** to ChromaDB on completion for cross-session progress awareness.
 
+## Real-World Architectural Parallels
+
+This project is a Pokémon game agent. The engineering problems it solves are
+not Pokémon-specific.
+
+| Agent Mechanic | Enterprise Parallel |
+|----------------|---------------------|
+| **Neuro-symbolic router** — `routing_condition()` dispatches to deterministic nodes (NavBot, BattleBot) for known states and only calls the LLM for genuinely ambiguous ones | Inference cost management in production agentic systems — rule-based pre-screening reduces LLM API spend by 70–90% vs. naive full-LLM routing |
+| **Dynamic PokeCenter identification** — Gemini VLM receives a stitched overhead map image and returns pixel coordinates of the nearest healing location | Multimodal visual search and coordinate routing for robotics, warehouse automation, and vision-guided navigation systems |
+| **Hybrid Push/Pull milestone state** — LangGraph manages the objective pointer (push); the agent submits completions via tool calls after RAM verification (pull) | Verifiable workflow automation for high-stakes, hallucination-prone environments: financial transaction pipelines, compliance workflows, medical record processing |
+| **Karpathy meta-loops + RewardVector** — per-step reward signal with configurable weights, logged to JSONL for offline regression analysis | Automated pipeline evaluation and CI/CD optimization — any production system where you need to detect agentic regression across deployments |
+| **TelemetryLogger** — tracks VLM API calls, token consumption, and step latency per step and per objective | MLOps instrumentation for inference cost attribution, SLA monitoring, and capacity planning in multi-tenant LLM deployments |
+
 ## Architecture
 
 ```
@@ -55,6 +68,7 @@ Agent.step()
 | Generic healing subsystem | ✅ Stable |
 | Milestone completion logging | ✅ Stable |
 | LangGraph migration | 🔲 In roadmap |
+| Telemetry (VLM call + token + latency tracking) | 🔲 In roadmap |
 
 Historical phase documentation (Phases 1–5 design decisions, implementation
 details, tabled items): [`docs/development/BRAIN_PHASES_1_5_REFERENCE.md`](../../docs/development/BRAIN_PHASES_1_5_REFERENCE.md)

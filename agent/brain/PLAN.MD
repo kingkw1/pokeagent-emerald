@@ -24,6 +24,7 @@ NPC navigation, healing subsystem) are documented in
 | LangGraph graph | 🔲 Not started | This roadmap |
 | RunDataManager / BackupManager | 🔲 Not started | Phase 0 prerequisite |
 | AgentState schema | 🔲 Not started | Phase 1 |
+| TelemetryLogger (VLM call + token tracking) | 🔲 Not started | Phase 1 |
 | NavBot node | 🔲 Not started | Phase 2 |
 | BattleBot / ComsBot / Verification nodes | 🔲 Not started | Phase 3 |
 | Router + graph assembly | 🔲 Not started | Phase 4 |
@@ -166,9 +167,10 @@ Create `agent/graph/` directory with the following structure:
 ```
 agent/graph/
     __init__.py
-    state.py          # AgentState TypedDict + RewardVector
+    state.py          # AgentState TypedDict + RewardVector + TelemetrySnapshot
     router.py         # routing_condition function
     graph.py          # build_graph() → CompiledGraph
+    telemetry.py      # TelemetryLogger — VLM call + token + latency tracking
     nodes/
         __init__.py
         nav_bot.py
@@ -237,7 +239,111 @@ class AgentState(TypedDict):
     last_action: Optional[str]
     last_buttons: list[str]
     step_count: int
+
+    # Telemetry (populated by TelemetryLogger each step)
+    telemetry: Optional["TelemetrySnapshot"]
 ```
+
+### 1.3 TelemetryLogger
+
+Tracks VLM API calls, token consumption, and step latency per step and per
+objective. The core MLOps instrument: enables quantifying the cost savings of
+the neuro-symbolic router vs. a naive full-VLM approach.
+
+```python
+# agent/graph/state.py
+from dataclasses import dataclass, field
+
+@dataclass
+class TelemetrySnapshot:
+    vlm_calls: int = 0            # Gemini API calls this step
+    input_tokens: int = 0         # Prompt tokens (from response.usage_metadata)
+    output_tokens: int = 0        # Completion tokens
+    step_latency_ms: float = 0.0  # Wall-clock time for graph.invoke()
+    node_fired: str = ""          # Which node handled this step
+```
+
+```python
+# agent/graph/telemetry.py
+import json, time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from datetime import datetime
+from agent.graph.state import TelemetrySnapshot
+
+# Gemini Flash pricing as of model release (update if pricing changes)
+_INPUT_COST_PER_1K  = 0.000075   # USD per 1K input tokens
+_OUTPUT_COST_PER_1K = 0.000300   # USD per 1K output tokens
+
+class TelemetryLogger:
+    def __init__(self, log_dir: str = "run_logs"):
+        self._log_path = (Path(log_dir) /
+                         f"telemetry_{datetime.now():%Y%m%d_%H%M%S}.jsonl")
+        self._log_path.parent.mkdir(exist_ok=True)
+        self._total_vlm_calls  = 0
+        self._total_input_tok  = 0
+        self._total_output_tok = 0
+        self._total_steps      = 0
+        self._step_start: float | None = None
+        self._current: TelemetrySnapshot = TelemetrySnapshot()
+
+    # --- call from Agent.step() before graph.invoke() ---
+    def begin_step(self) -> None:
+        self._step_start = time.perf_counter()
+        self._current = TelemetrySnapshot()
+
+    # --- call from any node that makes a VLM call ---
+    def record_vlm_call(self, input_tokens: int, output_tokens: int,
+                        node: str) -> None:
+        self._current.vlm_calls    += 1
+        self._current.input_tokens  += input_tokens
+        self._current.output_tokens += output_tokens
+        self._current.node_fired    = node
+        self._total_vlm_calls  += 1
+        self._total_input_tok  += input_tokens
+        self._total_output_tok += output_tokens
+
+    # --- call from Agent.step() after graph.invoke() ---
+    def end_step(self, step: int, milestone_index: int,
+                 last_action: str) -> TelemetrySnapshot:
+        elapsed = (time.perf_counter() - self._step_start) * 1000
+        self._current.step_latency_ms = elapsed
+        self._total_steps += 1
+        with open(self._log_path, "a") as f:
+            entry = {
+                "step":            step,
+                "milestone_index": milestone_index,
+                "last_action":     last_action,
+                **asdict(self._current),
+            }
+            json.dump(entry, f)
+            f.write("\n")
+        return self._current
+
+    def summary(self) -> dict:
+        vlm_rate = self._total_vlm_calls / max(self._total_steps, 1)
+        cost = (self._total_input_tok  / 1000 * _INPUT_COST_PER_1K +
+                self._total_output_tok / 1000 * _OUTPUT_COST_PER_1K)
+        return {
+            "total_steps":            self._total_steps,
+            "total_vlm_calls":        self._total_vlm_calls,
+            "vlm_call_rate":          round(vlm_rate, 4),
+            "vlm_savings_vs_naive":   f"{(1 - vlm_rate) * 100:.1f}%",
+            "total_input_tokens":     self._total_input_tok,
+            "total_output_tokens":    self._total_output_tok,
+            "estimated_cost_usd":     round(cost, 4),
+        }
+```
+
+**Integration points:**
+- `Agent.step()` calls `telemetry.begin_step()` before `graph.invoke()` and
+  `telemetry.end_step()` after.
+- `map_stitcher_relay_node` calls `telemetry.record_vlm_call()` after each
+  Gemini response, passing token counts from `response.usage_metadata`.
+- `RecoveryPlanner.generate_recovery_plan()` similarly calls
+  `telemetry.record_vlm_call()` when it fires.
+- `TelemetryLogger` is passed into nodes that need it via the factory pattern
+  (same as `make_verification_node`, `make_map_stitcher_relay_node`).
 
 ### Phase 1 Tests
 
@@ -247,7 +353,7 @@ class AgentState(TypedDict):
 class TestAgentStateSchema:
     # Instantiate AgentState with all required fields — no TypeError
     # Verify TypedDict keys match expected set
-    # Verify optional fields accept None
+    # Verify optional fields (reward, telemetry) accept None
 
 class TestRewardVectorDelta:
     # compute_delta(prev, curr) with known state_data dicts
@@ -263,6 +369,38 @@ class TestRewardVectorTotal:
 class TestRewardVectorSerialization:
     # asdict(RewardVector(...)) produces JSON-serializable dict
     # Round-trip through json.dumps / json.loads
+```
+
+**Automated — `tests/test_telemetry.py`:**
+
+```python
+class TestTelemetrySnapshotDefaults:
+    # TelemetrySnapshot() has vlm_calls=0, latency=0.0, node_fired=""
+
+class TestBeginEndStep:
+    # begin_step() resets current snapshot
+    # end_step() returns snapshot with non-zero step_latency_ms
+    # end_step() writes one JSONL line to log file
+    # JSONL line contains step, milestone_index, last_action, all snapshot fields
+
+class TestRecordVlmCall:
+    # record_vlm_call(100, 50, "map_stitcher_relay") increments totals
+    # Multiple calls in one step accumulate correctly
+    # node_fired reflects the last-called node
+
+class TestSummaryVlmRate:
+    # 10 steps, 1 VLM call → vlm_call_rate=0.1, savings="90.0%"
+    # 10 steps, 0 VLM calls → vlm_call_rate=0.0, savings="100.0%"
+    # 10 steps, 10 VLM calls → vlm_call_rate=1.0, savings="0.0%"
+
+class TestSummaryCostEstimate:
+    # 1000 input tokens + 200 output tokens → estimated_cost_usd > 0
+    # Zero tokens → estimated_cost_usd == 0.0
+
+class TestLogRoundtrip:
+    # All JSONL entries are parseable
+    # All numeric fields are float or int
+    # begin_step() / end_step() cycle 5 times → 5 lines in log
 ```
 
 ---
@@ -753,18 +891,26 @@ class KarpathyMetaAgent:
                           f"reward_log_{datetime.now():%Y%m%d_%H%M%S}.jsonl")
         self._log_path.parent.mkdir(exist_ok=True)
 
-    def wrap_step(self, prev_state: dict, curr_state: AgentState) -> AgentState:
+    def wrap_step(self, prev_state: dict, curr_state: AgentState,
+                  telemetry: "TelemetryLogger") -> AgentState:
         reward = RewardVector.compute_delta(prev_state, curr_state["state_data"])
+        tel    = curr_state.get("telemetry") or TelemetrySnapshot()
         with open(self._log_path, "a") as f:
             json.dump({
                 "step":                    curr_state["step_count"],
                 "milestone_index":         curr_state["milestone_index"],
+                # --- reward ---
                 "milestone_delta":         reward.milestone_delta,
                 "manhattan_delta":         reward.manhattan_delta,
                 "party_level_sum_delta":   reward.party_level_sum_delta,
                 "pokédollar_delta":        reward.pokédollar_delta,
                 "total":                   reward.total,
-                "last_action":             curr_state["last_action"],
+                # --- telemetry ---
+                "vlm_calls":               tel.vlm_calls,
+                "input_tokens":            tel.input_tokens,
+                "output_tokens":           tel.output_tokens,
+                "step_latency_ms":         tel.step_latency_ms,
+                "node_fired":              tel.node_fired or curr_state["last_action"],
             }, f)
             f.write("\n")
         return {**curr_state, "reward": reward}
@@ -808,17 +954,27 @@ for i in 1 2 3; do
 done
 ```
 
-*Inspect reward logs:*
+*Inspect reward + telemetry logs:*
 ```bash
 for f in run_logs/reward_log_*.jsonl; do
   echo "=== $f ==="
   python -c "
-import json, sys
+import json
 lines = [json.loads(l) for l in open('$f')]
-total_r = sum(l['total'] for l in lines)
+steps      = len(lines)
+total_r    = sum(l['total'] for l in lines)
 milestones = sum(l['milestone_delta'] for l in lines)
-avg_manhattan = sum(l['manhattan_delta'] for l in lines) / len(lines)
-print(f'Steps: {len(lines)}  |  Total reward: {total_r:.2f}  |  Milestones: {milestones}  |  Avg manhattan delta: {avg_manhattan:.4f}')
+avg_mh     = sum(l['manhattan_delta'] for l in lines) / steps
+vlm_calls  = sum(l.get('vlm_calls', 0) for l in lines)
+vlm_rate   = vlm_calls / steps
+tok_in     = sum(l.get('input_tokens', 0) for l in lines)
+tok_out    = sum(l.get('output_tokens', 0) for l in lines)
+cost       = tok_in / 1000 * 0.000075 + tok_out / 1000 * 0.0003
+avg_lat    = sum(l.get('step_latency_ms', 0) for l in lines) / steps
+print(f'Steps: {steps}  |  Reward: {total_r:.2f}  |  Milestones: {milestones}')
+print(f'VLM calls: {vlm_calls} ({vlm_rate*100:.1f}% of steps)  |  Savings vs naive: {(1-vlm_rate)*100:.1f}%')
+print(f'Tokens: {tok_in}in / {tok_out}out  |  Est. cost: USD {cost:.4f}')
+print(f'Avg step latency: {avg_lat:.1f}ms')
 "
 done
 ```
@@ -827,13 +983,21 @@ done
 - [ ] `total reward > 0` in at least 2 of 3 runs
 - [ ] `milestone_delta > 0` at least once per run (at least 1 milestone fires)
 - [ ] `avg manhattan_delta > 0` on nav_bot steps (agent moving toward goal)
+- [ ] `vlm_call_rate < 0.30` — VLM should fire on fewer than 30% of steps
+      (pure-VLM baseline is 1.0; the router's value is quantified here)
+- [ ] `avg step latency < 3000ms` — deterministic nodes (nav/battle/coms)
+      should complete in < 100ms; latency spikes indicate VLM overhead
 
 *Subjective evaluation:*
 - Do runs with higher total reward correspond to better agent behaviour?
 - Is `milestone_delta` the dominant term? A single milestone (+10.0) should
   outweigh movement noise across an entire run.
-- Are there steps with `total < -1.0`? These are regressions — note what
-  context (`last_action`) was recorded at those steps.
+- Are there steps with `total < -1.0`? These are regressions — note the
+  `node_fired` field at those steps.
+- What is the VLM savings percentage? Target: ≥ 70% reduction vs. a naive
+  full-VLM agent. This is the headline portfolio metric: *"neuro-symbolic
+  routing reduced Gemini API calls by X% while maintaining task completion,
+  saving $Y per hour at production scale."*
 
 ---
 
@@ -864,11 +1028,13 @@ Deferred until the LangGraph graph is running:
 | `agent/graph/nodes/coms_bot.py` | 3 | 🔲 |
 | `agent/graph/nodes/verification.py` | 3 | 🔲 |
 | `agent/graph/nodes/map_stitcher_relay.py` | 3 | 🔲 |
+| `agent/graph/telemetry.py` | 1 | 🔲 |
 | `agent/graph/karpathy_meta_agent.py` | 5 | 🔲 |
 | `utils/run_data_manager.py` | 0 | 🔲 |
 | `utils/backup_manager.py` | 0 | 🔲 |
 | `tests/test_run_data_manager.py` | 0 | 🔲 |
 | `tests/test_agent_state.py` | 1 | 🔲 |
+| `tests/test_telemetry.py` | 1 | 🔲 |
 | `tests/test_nav_bot_node.py` | 2 | 🔲 |
 | `tests/test_battle_bot_node.py` | 3 | 🔲 |
 | `tests/test_coms_bot_node.py` | 3 | 🔲 |
