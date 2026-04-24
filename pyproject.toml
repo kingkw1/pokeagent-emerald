@@ -46,6 +46,9 @@ dependencies = [
     "onnxruntime<1.24",
     "sentence-transformers>=2.2.0",
     "pandas>=1.5.0",
+    # LangGraph (Phase 0 — LangGraph migration)
+    "langgraph>=1.1.0",
+    "langchain-core>=0.3.0",
 ]
 
 [project.optional-dependencies]

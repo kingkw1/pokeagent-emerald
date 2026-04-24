@@ -50,6 +50,7 @@ from .brain.planner import RecoveryPlanner
 from .brain.strategic_planner import StrategicPlanner
 from .brain.walkthrough_db import WalkthroughDB
 from .objective_manager import ObjectiveManager
+from utils.backup_manager import BackupManager
 
 # Set up module logging
 logger = logging.getLogger(__name__)
@@ -116,7 +117,12 @@ class Agent:
                 strategic_planner=self.strategic_planner,
                 npc_registry=self.npc_registry,
                 episodic_memory=self.episodic_memory,
+                backup_manager=BackupManager(),
             )
+            # Point BackupManager at the live checkpoint written every ~10 steps.
+            # Using checkpoint.state (not the original --load-state file) means
+            # each backup captures the actual game state near the milestone boundary.
+            self.objective_manager.current_state_file = ".pokeagent_cache/checkpoint.state"
             self.planner = RecoveryPlanner(vlm=self.vlm, memory=self.episodic_memory, verbose=True)
             
             # Pre-seed knowledge for mid-game save states

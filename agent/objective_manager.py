@@ -243,7 +243,7 @@ class ObjectiveManager:
     without complex state management dependencies.
     """
     
-    def __init__(self, strategic_planner=None, npc_registry=None, episodic_memory=None):
+    def __init__(self, strategic_planner=None, npc_registry=None, episodic_memory=None, backup_manager=None):
         """Initialize with core storyline objectives.
 
         Args:
@@ -256,6 +256,9 @@ class ObjectiveManager:
             npc_registry: Optional ``NpcRegistry`` instance (Phase 4.4d).
                 When provided, ``_resolve_npc_coords`` uses semantic role
                 lookups instead of hardcoded ``graphics_id`` constants.
+            backup_manager: Optional ``BackupManager`` instance (Phase 0).
+                When provided, a .state checkpoint is written to disk every
+                time a milestone fires via ``mark_goal_complete()``.
         """
         self.objectives: List[Objective] = []
         self._initialize_storyline_objectives()
@@ -282,7 +285,14 @@ class ObjectiveManager:
         
         # ── Episodic memory (for logging milestones + dialogue) ──
         self._episodic_memory = episodic_memory
-        
+
+        # ── Phase 0: Checkpoint / backup ──
+        self._backup_manager = backup_manager
+        # Set to the path of the currently loaded .state file so BackupManager
+        # can copy it on each milestone.  Callers should assign this after init:
+        #   obj_manager.current_state_file = args.load_state
+        self.current_state_file: Optional[str] = None
+
         # ── Blocker / Recovery (ported from GoalManager) ──
         self.blocking_patterns = BLOCKING_PATTERNS
         self._recovery_tasks: List[Dict[str, Any]] = []  # Stack of recovery sub-goals
@@ -504,6 +514,14 @@ class ObjectiveManager:
                     {"type": "milestone", "goal_id": goal_id},
                     state_data=state_data,
                 )
+
+            # Phase 0: write .state checkpoint so the run can be restarted
+            # from any milestone boundary without replaying the opening sequence.
+            if self._backup_manager is not None and self.current_state_file:
+                self._backup_manager.create_cache_backup(
+                    state_file=self.current_state_file,
+                    milestone_name=goal_id,
+                )
     
     def is_goal_complete(self, goal_id: str) -> bool:
         """Check if a sub-goal has been completed"""
@@ -551,6 +569,14 @@ class ObjectiveManager:
                     obj.progress_notes = f"Auto-completed by emulator milestone: {obj.milestone_id}"
                     completed_ids.append(obj.id)
                     logger.info(f"✅ Auto-completed storyline objective via milestone {obj.milestone_id}: {obj.description}")
+                    # Trigger backup (and episodic memory log) via mark_goal_complete.
+                    # mark_goal_complete guards against double-firing with its
+                    # completed_goals dict, so this is safe to call here.
+                    self.mark_goal_complete(
+                        obj.milestone_id,
+                        description=obj.description,
+                        state_data=state_data,
+                    )
         
         # LOCATION-BASED MILESTONE DETECTION
         # Some locations don't have emulator milestones, so we detect them by location

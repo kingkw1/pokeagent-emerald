@@ -57,3 +57,7 @@ pandas>=1.5.0
 
 # OCR Dependencies
 pytesseract>=0.3.10
+
+# LangGraph (Phase 0 — LangGraph migration)
+langgraph>=1.1.0
+langchain-core>=0.3.0

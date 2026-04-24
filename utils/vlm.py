@@ -677,7 +677,11 @@ class VertexBackend(VLMBackend):
             
         except Exception as e:
             logger.error(f"Error in Gemini image query: {e}")
-            # Try text-only fallback for any Gemini error
+            # Don't attempt text fallback on TimeoutError — the SIGALRM has already fired
+            # and the fallback call would hang indefinitely with no new timeout set.
+            if isinstance(e, TimeoutError):
+                raise
+            # Try text-only fallback for other Gemini errors
             try:
                 logger.info(f"[{module_name}] Attempting text-only fallback due to error: {e}")
                 return self.get_text_query(text, module_name)
@@ -817,7 +821,11 @@ class GeminiBackend(VLMBackend):
             
         except Exception as e:
             logger.error(f"Error in Gemini image query: {e}")
-            # Try text-only fallback for any Gemini error
+            # Don't attempt text fallback on TimeoutError — the SIGALRM has already fired
+            # and the fallback call would hang indefinitely with no new timeout set.
+            if isinstance(e, TimeoutError):
+                raise
+            # Try text-only fallback for other Gemini errors
             try:
                 logger.info(f"[{module_name}] Attempting text-only fallback due to error: {e}")
                 return self.get_text_query(text, module_name)

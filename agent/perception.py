@@ -160,7 +160,7 @@ CRITICAL RULES:
 - Only set text_box_visible = true for NPC dialogue boxes (when an NPC is speaking to you)
 - Return only real observations from THIS image
 
-JSON response:"""
+Return ONLY the JSON object, nothing else:"""
             
             # Make VLM call with timeout protection
             def timeout_handler(signum, frame):
@@ -192,6 +192,7 @@ JSON response:"""
                 
                 if not json_match:
                     # RETRY: VLM didn't return JSON at all - try again with stricter prompt
+                    signal.alarm(0)  # Cancel any lingering alarm before retry
                     logger.debug("[PERCEPTION] No JSON in VLM response, retrying with strict prompt")
                     logger.warning(f"[PERCEPTION] VLM failed to return JSON, retrying")
                     
@@ -219,7 +220,11 @@ JSON format (fill in with observations from the image):
 
 Return ONLY the JSON, nothing else:"""
                     
-                    vlm_response = vlm.get_query(frame, retry_prompt, "PERCEPTION-RETRY")
+                    signal.alarm(30)  # Shorter timeout for retry
+                    try:
+                        vlm_response = vlm.get_query(frame, retry_prompt, "PERCEPTION-RETRY")
+                    finally:
+                        signal.alarm(0)  # Always cancel alarm after retry attempt
                     
                     # Try to extract JSON again
                     json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', vlm_response, re.DOTALL)
