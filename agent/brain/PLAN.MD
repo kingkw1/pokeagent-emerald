@@ -23,8 +23,8 @@ NPC navigation, healing subsystem) are documented in
 | Generic Healing Subsystem | ✅ Stable | Two-tier (opportunistic + threshold) |
 | LangGraph graph | 🔲 Not started | This roadmap |
 | RunDataManager / BackupManager | 🔲 Not started | Phase 0 prerequisite |
-| AgentState schema | 🔲 Not started | Phase 1 |
-| TelemetryLogger (VLM call + token tracking) | 🔲 Not started | Phase 1 |
+| AgentState schema | ✅ Stable | `agent/graph/state.py` |
+| TelemetryLogger (VLM call + token tracking) | ✅ Stable | `agent/graph/telemetry.py` |
 | NavBot node | 🔲 Not started | Phase 2 |
 | BattleBot / ComsBot / Verification nodes | 🔲 Not started | Phase 3 |
 | Router + graph assembly | 🔲 Not started | Phase 4 |
