@@ -63,7 +63,76 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of movement commands to batch together (reduces VLM calls)
+# ---------------------------------------------------------------------------
+# Script-idle polling helper
+# ---------------------------------------------------------------------------
+# During TITLE_SEQUENCE the emulator runs at ~60 FPS.  Prof Birch's dialogue
+# boxes take ~25-35 frames to fully scroll.  If an A-press lands while text
+# is still printing it only speeds up the scroll; a *second* A is needed to
+# actually advance.  This makes the step counter unreliable.
+#
+# wait_for_script_idle() polls /script_state (added to server/app.py) which
+# reads sGlobalScriptContext.mode directly from GBA RAM.  Mode 0 means the
+# script engine is stopped and the game is waiting for the A button.  We poll
+# until idle or the timeout expires, then the caller can safely send A.
+
+def wait_for_script_idle(
+    server_url: str = "http://localhost:8000",
+    timeout: float = 2.0,
+    poll_interval: float = 0.08,
+) -> bool:
+    """Block until the GBA script context is idle (safe to press A) or timeout.
+
+    Args:
+        server_url:    Base URL of the game server.
+        timeout:       Maximum seconds to wait before giving up.
+        poll_interval: Seconds between poll requests.
+
+    Returns:
+        True if the script became idle within the timeout, False if we gave up.
+    """
+    try:
+        import requests as _req
+    except ImportError:
+        return True  # Can't poll — caller proceeds optimistically
+
+    t_start = time.monotonic()
+    deadline = t_start + timeout
+    polls = 0
+    while time.monotonic() < deadline:
+        try:
+            resp = _req.get(f"{server_url}/script_state", timeout=0.5)
+            if resp.status_code == 200:
+                data = resp.json()
+                idle        = data.get("idle", True)
+                script_mode = data.get("script_mode", "?")
+                imm_mode    = data.get("immediate_mode", "?")
+                reason      = data.get("reason", "")
+                polls += 1
+                if polls == 1:
+                    # Always print the first read so we can see what the endpoint returns
+                    tag = "idle" if idle else f"BUSY (mode={script_mode} imm={imm_mode})"
+                    extra = f" [{reason}]" if reason else ""
+                    print(f"🔬 [SCRIPT_IDLE] first read → {tag}{extra}")
+                if idle:
+                    waited_ms = int((time.monotonic() - t_start) * 1000)
+                    if waited_ms > 20:
+                        print(f"🔬 [SCRIPT_IDLE] became idle after {polls} poll(s) / {waited_ms}ms")
+                    return True
+                print(f"🔬 [SCRIPT_IDLE] poll {polls}: still busy (mode={script_mode} imm={imm_mode}) — waiting…")
+            else:
+                print(f"🔬 [SCRIPT_IDLE] HTTP {resp.status_code} — proceeding")
+                return True
+        except Exception as exc:
+            # Server busy / transient error — treat as idle to avoid blocking
+            print(f"🔬 [SCRIPT_IDLE] request error ({exc}) — proceeding")
+            return True
+        time.sleep(poll_interval)
+
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+    print(f"🔬 [SCRIPT_IDLE] timeout after {elapsed_ms}ms / {polls} poll(s) — proceeding anyway")
+    return False
+
 MAX_MOVEMENT_BATCH_SIZE = 10  # ~1.3 seconds of movement at 60 FPS
 
 # Global tracker for dismissed player monologues (shared across all functions)
@@ -618,9 +687,31 @@ class OpenerBot:
             if has_visual_dialogue:
                 return ['A']
             elif location == 'TITLE_SEQUENCE':
-                # During title sequence, perception often fails to detect dialogue visually.
-                # Pressing A is always safe here — it advances menus, dialogue, and
-                # title screens without any risk of breaking game state.
+                # Track total calls in TITLE_SEQUENCE so we can time the naming shortcut.
+                # S0 contributes 5 presses (fixed counter), S1 has ~6 Birch dialogue boxes
+                # before the naming keyboard appears.  Step 12+ = naming keyboard territory.
+                if not hasattr(action_clear_dialogue, '_title_steps'):
+                    action_clear_dialogue._title_steps = 0
+                action_clear_dialogue._title_steps += 1
+                steps = action_clear_dialogue._title_steps
+
+                name_done = s.get('milestones', {}).get('PLAYER_NAME_SET', {}).get('completed', False)
+
+                # Once PLAYER_NAME_SET fires we're on the naming keyboard.
+                # Stop pressing A here — S1 will immediately transition to S2_GENDER_NAME_SELECT
+                # which uses action_special_naming to handle the keyboard properly.
+                if name_done:
+                    return ['A']  # safe no-op while transition fires
+
+                # Before name is set, keep pressing A to clear Birch's dialogue boxes.
+                # Steps 1-16 are all dialogue (14 to boy/girl + 1 for boy + 1 more).
+                # The naming keyboard opens at step 17, at which point PLAYER_NAME_SET
+                # fires and the branch above takes over.
+                return ['A']
+                # Note: wait_for_script_idle() is NOT called here.
+                # The GBA title intro uses a callback-based scene manager, not
+                # sGlobalScriptContext, so global_mode is always 0 throughout
+                # TITLE_SEQUENCE and the script-idle signal is meaningless here.
                 return ['A']
             elif game_state == 'dialog':
                 # Visual indicators say no dialogue, but game_state stuck as 'dialog'
@@ -1033,8 +1124,27 @@ class OpenerBot:
             if v.get('visual_elements', {}).get('text_box_visible', False):
                 print("🎮 [NAMING] Clearing general dialogue with A")
                 return ['A']
-                
-            return None
+            
+            # --- Counter-based fallback (VLM is off during TITLE_SEQUENCE) ---
+            # We enter S2 the moment the naming keyboard opens (PLAYER_NAME_SET fires).
+            # VLM is skipped so all the visual checks above produce empty strings.
+            #
+            # Exactly ONE B→START→A is needed:
+            #   B:     safe no-op when no chars typed; deletes last char if any
+            #   START: jumps cursor to END/OK on the naming keyboard
+            #   A:     confirms END → shows "Is this your name? YES/NO"
+            #
+            # After that, plain A confirms YES and clears all post-naming dialogue
+            # until the location changes away from TITLE_SEQUENCE (S2 transition).
+            # Sending a second B→START→A would press B on the YES/NO screen which
+            # selects NO, cancelling the name and sending us back to the keyboard.
+            action_special_naming._naming_step += 1
+            step = action_special_naming._naming_step
+            if step == 1:
+                print(f"🎮 [NAMING] Counter step 1 → B→START→A (confirm name on keyboard)")
+                return ['B', 'START', 'A']
+            print(f"🎮 [NAMING] Counter step {step} → A (post-naming dialogue)")
+            return ['A']
 
         def action_special_clock(s, v):
             """
@@ -1275,6 +1385,21 @@ class OpenerBot:
         def trans_has_dialogue(next_state: str) -> Callable:
             """Transition when dialogue IS active (inverse of trans_no_dialogue)."""
             def check_fn(s, v):
+                location = s.get('player', {}).get('location', '')
+
+                # TITLE_SEQUENCE: VLM is skipped so text_box_visible is always False.
+                # Use a press counter instead — after pressing A a few times we are
+                # guaranteed to be inside Prof Birch's intro dialogue.
+                if location == 'TITLE_SEQUENCE':
+                    if not hasattr(check_fn, '_title_seq_presses'):
+                        check_fn._title_seq_presses = 0
+                    check_fn._title_seq_presses += 1
+                    if check_fn._title_seq_presses >= 5:
+                        print(f"🔍 [TRANS_DIALOGUE] TITLE_SEQUENCE: auto-transitioning to {next_state} after {check_fn._title_seq_presses} A-presses")
+                        check_fn._title_seq_presses = 0  # reset for potential future reuse
+                        return next_state
+                    return None
+
                 screen_context = v.get('screen_context', '').lower()
                 text_box_visible = v.get('visual_elements', {}).get('text_box_visible', False)
                 continue_prompt_visible = v.get('visual_elements', {}).get('continue_prompt_visible', False)
@@ -1421,8 +1546,17 @@ class OpenerBot:
                         trans_name_set_plus_frames._name_was_set = False
                         return 'S4_MOM_DIALOG_1F'
                     
-                    # Still in TITLE_SEQUENCE after waiting - wait more
-                    print(f"🔍 [S1_TRANS] ⚠️ Still in '{location}' after {frames_waited} frames, continuing to wait...")
+                    # Still in TITLE_SEQUENCE after waiting - wait more, but only up to a hard cap.
+                    # The memory reader has map-buffer corruption during the intro animation so
+                    # location may never update away from TITLE_SEQUENCE.  After 25 frames total
+                    # we know name confirmation is done and the truck/intro cutscene has started.
+                    hard_cap = frames_to_wait + 15  # 25 frames total
+                    if frames_waited >= hard_cap:
+                        print(f"🔍 [S1_TRANS] ✅ Hard cap reached ({frames_waited} frames) — forcing S3_TRUCK_RIDE")
+                        trans_name_set_plus_frames._frames_since_name_set = 0
+                        trans_name_set_plus_frames._name_was_set = False
+                        return 'S3_TRUCK_RIDE'
+                    print(f"🔍 [S1_TRANS] ⚠️ Still in '{location}' after {frames_waited} frames, waiting (cap={hard_cap})...")
             
             return None
             
@@ -1578,7 +1712,14 @@ class OpenerBot:
             return check_fn
 
         # --- State Machine Definition ---
-        
+
+        # Pre-instantiate S0 transition functions so their internal state (e.g. the
+        # _title_seq_presses counter in trans_has_dialogue) persists across steps.
+        # If these are created inside the lambda they'd be re-created every call and
+        # any accumulated counter state would be lost.
+        _s0_trans_naming   = trans_detect_naming_screen('S2_GENDER_NAME_SELECT')
+        _s0_trans_dialogue = trans_has_dialogue('S1_PROF_DIALOG')
+
         return {
             # === Phase 1: Title & Naming ===
             'S0_TITLE_SCREEN': BotState(
@@ -1587,27 +1728,39 @@ class OpenerBot:
                 action_fn=action_clear_dialogue,  # Use clear_dialogue to handle naming shortcut
                 # Transition to S1 if dialogue appears, OR to S2 if naming screen appears
                 next_state_fn=lambda s, v: (
-                    trans_detect_naming_screen('S2_GENDER_NAME_SELECT')(s, v) or
-                    trans_has_dialogue('S1_PROF_DIALOG')(s, v)
+                    _s0_trans_naming(s, v) or
+                    _s0_trans_dialogue(s, v)
                 )
             ),
             'S1_PROF_DIALOG': BotState(
                 name='S1_PROF_DIALOG',
-                description='Professor Birch intro cutscene - press A until PLAYER_NAME_SET + 10 more frames',
+                description='Professor Birch intro cutscene - press A until naming keyboard opens (PLAYER_NAME_SET)',
                 action_fn=action_clear_dialogue,
-                next_state_fn=lambda s, v: trans_name_set_plus_frames(s, v, frames_to_wait=10),
+                # Transition to S2 the moment PLAYER_NAME_SET fires — that milestone fires
+                # when the naming screen opens, so S2/action_special_naming takes over
+                # immediately and handles the keyboard correctly.
+                next_state_fn=lambda s, v: (
+                    'S2_GENDER_NAME_SELECT'
+                    if s.get('milestones', {}).get('PLAYER_NAME_SET', {}).get('completed', False)
+                    else None
+                ),
                 max_attempts=200,
                 timeout_seconds=600.0,
             ),
             'S2_GENDER_NAME_SELECT': BotState(
                 name='S2_GENDER_NAME_SELECT',
-                description='Gender and Name selection screens - use shortcut to skip',
+                description='Gender/name selection + all post-naming professor dialogue',
                 action_fn=action_special_naming,
-                # CRITICAL: Don't transition until naming screen is GONE (no more "YOUR NAME?" visible)
-                # AND milestone is set (name has been applied)
+                # Stay in S2 until the location actually changes away from TITLE_SEQUENCE.
+                # That only happens after every post-naming dialogue box is cleared and
+                # the truck cutscene loads.  This works regardless of whether VLM is on or off.
                 next_state_fn=lambda s, v: (
-                    trans_naming_complete_and_visual_cleared('S3_TRUCK_RIDE')(s, v)
-                )
+                    'S3_TRUCK_RIDE'
+                    if s.get('player', {}).get('location', 'TITLE_SEQUENCE') not in ('TITLE_SEQUENCE', '', None)
+                    else None
+                ),
+                max_attempts=200,
+                timeout_seconds=600.0,
             ),
 
             # === Phase 2: Truck & House (The "Stuck in House" Fix) ===

@@ -85,11 +85,12 @@ def perception_step(frame, state_data, vlm, recent_actions=None):
     game_state = game_data.get('state', 'unknown')
     in_battle = game_data.get('in_battle', False)
 
-    # During title sequence use a much shorter VLM timeout so timeouts fail fast.
-    # (Position is always (0,0) and there is no walkable map, but dialogue text IS
-    # meaningful — the VLM is the most reliable way to detect the Prof Birch textbox.)
+    # Skip VLM entirely during TITLE_SEQUENCE.
+    # - Gemini latency is variable (often >5s) and wastes quota on every intro step.
+    # - The opener bot handles the entire intro deterministically via its own OCR.
+    # - `trans_has_dialogue` uses a press-counter fallback (see opener_bot.py) so it
+    #   doesn't need VLM to fire the S0→S1 state transition.
     _is_title_seq = current_location == 'TITLE_SEQUENCE'
-    _vlm_timeout = 5 if _is_title_seq else 15
 
     # Try VLM-based structured extraction first
     visual_data = None
@@ -100,7 +101,7 @@ def perception_step(frame, state_data, vlm, recent_actions=None):
     import signal
     
     try:
-        if frame is not None:
+        if frame is not None and not _is_title_seq:
             logger.info("[PERCEPTION] Attempting VLM-based structured extraction...")
             
             # Get movement options for VLM context
@@ -173,7 +174,7 @@ Return ONLY the JSON object, nothing else:"""
             
             # Set up timeout (15 seconds for cloud API; local GPU models use a separate config)
             signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(_vlm_timeout)  # 5s for title sequence, 15s otherwise
+            signal.alarm(15)  # Cloud API (gemini-2.0-flash) responds in 1-3s; 15s is generous
             
             try:
                 logger.debug("[PERCEPTION] Calling VLM for visual analysis")
@@ -628,12 +629,16 @@ Answer in format: "1: YES/NO, 2: YES/NO" """
         logger.warning(f"[PERCEPTION] VLM setup failed: {e}, using fallback")
         visual_data = None
     
-    # Fallback to programmatic analysis if VLM failed
+    # Fallback to programmatic analysis if VLM was skipped or failed
     if visual_data is None:
-        print(f"🔧 [PERCEPTION] VLM failed - using programmatic fallback")
+        if _is_title_seq:
+            print(f"⏭️  [PERCEPTION] VLM skipped (TITLE_SEQUENCE) - using programmatic fallback")
+        else:
+            print(f"🔧 [PERCEPTION] VLM failed - using programmatic fallback")
         logger.info("[PERCEPTION] Using programmatic fallback analysis")
         visual_data = create_programmatic_visual_data(game_state, in_battle, current_location, game_data)
-        print(f"🔧 [PERCEPTION] Fallback result: {visual_data.get('screen_context', 'unknown')}")
+        if not _is_title_seq:
+            print(f"🔧 [PERCEPTION] Fallback result: {visual_data.get('screen_context', 'unknown')}")
         
         # CRITICAL FIX: During title sequence, use OCR to detect dialogue
         # VLM often fails during intro cutscene, but OCR is reliable for text detection

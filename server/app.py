@@ -1300,6 +1300,37 @@ async def get_dispatch_state():
     return _graph_state
 
 
+@app.get("/script_state")
+async def get_script_state():
+    """Return whether the GBA script engine is idle (waiting for A-press).
+
+    Reads ``sGlobalScriptContext.mode`` directly from emulator RAM.  When the
+    text-printer has finished scrolling and is waiting for A, the script
+    context mode is 0 (SCRIPT_MODE_STOPPED).  While text is still animating
+    the mode is 1 (SCRIPT_MODE_BYTECODE) or 2 (SCRIPT_MODE_NATIVE).
+
+    Returns:
+        {"idle": bool, "script_mode": int, "immediate_mode": int}
+        ``idle=True`` means it is safe to send the next A-press.
+    """
+    try:
+        if env and hasattr(env, 'memory_reader') and env.memory_reader:
+            mr = env.memory_reader
+            global_mode = mr._read_u8(mr.addresses.SCRIPT_CONTEXT_GLOBAL + mr.addresses.SCRIPT_MODE_OFFSET)
+            # Only global_mode is checked. SCRIPT_CONTEXT_IMMEDIATE reads a value of 36
+            # which is not a valid ScriptMode (0/1/2), indicating the address is wrong.
+            # global_mode==0 means sGlobalScriptContext is stopped — safe to press A.
+            # NOTE: during TITLE_SEQUENCE the intro uses a scene manager, not the script
+            # engine, so global_mode is always 0 there. This endpoint is only meaningful
+            # for normal overworld dialogue.
+            idle = (global_mode == 0)
+            return {"idle": idle, "script_mode": int(global_mode)}
+    except Exception as e:
+        logger.info(f"[script_state] read failed: {e}")
+    # Fallback: report idle so the caller doesn't block forever
+    return {"idle": True, "script_mode": 0}
+
+
 @app.get("/agent_stream")
 async def stream_agent_thinking():
     """Stream agent thinking in real-time using Server-Sent Events"""
