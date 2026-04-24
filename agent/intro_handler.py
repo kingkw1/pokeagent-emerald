@@ -110,18 +110,18 @@ def check_intro_screens(state_data, latest_observation, recent_actions, mileston
     # ------------------------------------------------------------------
     intro_complete = milestones.get('INTRO_CUTSCENE_COMPLETE', False)
     is_in_moving_van = "MOVING_VAN" in str(player_location).upper()
-    override_step_limit = 15
-
     on_route_101 = 'ROUTE 101' in str(player_location).upper()
     has_pokemon = state_data.get('player', {}).get('party', [])
     advanced_location = on_route_101 or 'ROUTE' in str(player_location).upper()
     player_has_pokemon = len(has_pokemon) > 0 if has_pokemon else False
 
+    # POST-NAME OVERRIDE: keep pressing A until location changes or intro completes.
+    # No step-count limit — the other guards (intro_complete, advanced_location,
+    # player_has_pokemon, is_in_moving_van) are sufficient to scope this correctly.
     if (milestones.get('PLAYER_NAME_SET', False) and
             not intro_complete and
             not advanced_location and
             not player_has_pokemon and
-            current_step <= override_step_limit and
             not is_in_moving_van):
         logger.info(f"[INTRO] Post-name override active — step {current_step}, loc={player_location}")
         print(f"🔧 [OVERRIDE] Step {current_step} — post-name override: pressing A")
@@ -130,15 +130,11 @@ def check_intro_screens(state_data, latest_observation, recent_actions, mileston
     # ------------------------------------------------------------------
     # VLM NAVIGATION MODE GATING
     # ------------------------------------------------------------------
-    if intro_complete or current_step > override_step_limit or is_in_moving_van or advanced_location:
+    if intro_complete or is_in_moving_van or advanced_location:
         # VLM mode — fall through
-        if current_step % 5 == 0 or current_step in [16, 21, 27] or advanced_location:
+        if current_step % 5 == 0 or advanced_location:
             print(f"🤖 [VLM MODE] Step {current_step} — VLM Navigation Active")
         return None  # fall through to VLM
 
-    # Early-game legacy path
-    print(f"🎯 [EARLY MODE] Step {current_step} — Legacy navigation active")
-    if not is_title_screen and len(recent_actions or []) < 5:
-        logger.info(f"[INTRO] NOT title screen — loc='{player_location}' state='{game_state_value}'")
-
+    # Early-game legacy path (TITLE_SEQUENCE, no milestones yet)
     return None  # fall through to VLM

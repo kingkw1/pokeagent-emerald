@@ -31,13 +31,20 @@ def retry_with_exponential_backoff(
     max_retries: int = 10,
     errors: tuple = (Exception,),
 ):
-    """Retry a function with exponential backoff."""
+    """Retry a function with exponential backoff.
+
+    TimeoutError (SIGALRM) is never retried — doing so would run the next
+    attempt with no alarm protecting it, potentially hanging indefinitely.
+    """
     def wrapper(*args, **kwargs):
         num_retries = 0
         delay = initial_delay
         while True:
             try:
                 return func(*args, **kwargs)
+            except TimeoutError:
+                # Never retry on SIGALRM; propagate immediately.
+                raise
             except errors as e:
                 num_retries += 1
                 if num_retries > max_retries:
@@ -759,11 +766,18 @@ class GeminiBackend(VLMBackend):
     
     @retry_with_exponential_backoff
     def _call_generate_content(self, content_parts):
-        """Calls the generate_content method with exponential backoff."""
-        response = self.model.generate_content(content_parts)
+        """Calls the generate_content method with exponential backoff.
+
+        Uses a 15-second SDK-level timeout as a belt-and-suspenders guard
+        alongside the SIGALRM set in perception.py.
+        """
+        response = self.model.generate_content(
+            content_parts,
+            request_options={"timeout": 15},  # SDK-level hard cap per attempt
+        )
         response.resolve()
         return response
-    
+
     def get_query(self, img: Union[Image.Image, np.ndarray], text: str, module_name: str = "Unknown") -> str:
         """Process an image and text prompt using Gemini API"""
         start_time = time.time()

@@ -5,7 +5,6 @@ import re
 import signal
 from utils.vlm import VLM
 from utils.state_formatter import format_state_for_llm, format_state_summary
-from agent.system_prompt import system_prompt
 
 # Set up module logging
 logger = logging.getLogger(__name__)
@@ -85,7 +84,13 @@ def perception_step(frame, state_data, vlm, recent_actions=None):
     current_location = player_data.get('location', 'Unknown')
     game_state = game_data.get('state', 'unknown')
     in_battle = game_data.get('in_battle', False)
-    
+
+    # During title sequence use a much shorter VLM timeout so timeouts fail fast.
+    # (Position is always (0,0) and there is no walkable map, but dialogue text IS
+    # meaningful — the VLM is the most reliable way to detect the Prof Birch textbox.)
+    _is_title_seq = current_location == 'TITLE_SEQUENCE'
+    _vlm_timeout = 5 if _is_title_seq else 15
+
     # Try VLM-based structured extraction first
     visual_data = None
     
@@ -166,16 +171,16 @@ Return ONLY the JSON object, nothing else:"""
             def timeout_handler(signum, frame):
                 raise TimeoutError("VLM call timed out")
             
-            # Set up timeout (60 seconds for local model on GPU)
+            # Set up timeout (15 seconds for cloud API; local GPU models use a separate config)
             signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(60)  # Increased timeout for local models on GPU
+            signal.alarm(_vlm_timeout)  # 5s for title sequence, 15s otherwise
             
             try:
                 logger.debug("[PERCEPTION] Calling VLM for visual analysis")
                 # print(f"🖼️ [PERCEPTION] Frame type: {type(frame)}")
                 # print(f"📝 [PERCEPTION] Extraction prompt length: {len(extraction_prompt)} chars")
                 
-                vlm_response = vlm.get_query(frame, system_prompt + extraction_prompt, "PERCEPTION-EXTRACT")
+                vlm_response = vlm.get_query(frame, extraction_prompt, "PERCEPTION-EXTRACT")
                 signal.alarm(0)  # Cancel timeout
                 
                 # print(f"🔍 [PERCEPTION] VLM Raw Response:")
@@ -220,7 +225,7 @@ JSON format (fill in with observations from the image):
 
 Return ONLY the JSON, nothing else:"""
                     
-                    signal.alarm(30)  # Shorter timeout for retry
+                    signal.alarm(10)  # Shorter timeout for retry
                     try:
                         vlm_response = vlm.get_query(frame, retry_prompt, "PERCEPTION-RETRY")
                     finally:
@@ -452,9 +457,7 @@ Return ONLY the JSON, nothing else:"""
                         # Try a much simpler VLM call to detect dialogue and red triangle
                         try:
                             signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(30)
-                            
-                            # Ask two simple questions
+                            signal.alarm(10)
                             simple_prompt = """Look at this Pokemon game screenshot. Answer these 2 questions:
 
 1. Is there a white text box at the bottom of the screen? (YES/NO)
@@ -532,7 +535,7 @@ Answer in format: "1: YES/NO, 2: YES/NO" """
                                 
                                 # Make second VLM call with timeout
                                 signal.signal(signal.SIGALRM, timeout_handler)
-                                signal.alarm(30)  # Shorter timeout for simple query
+                                signal.alarm(10)  # Shorter timeout for simple query
                                 
                                 dialogue_check_response = vlm.get_query(frame, simple_dialogue_prompt, "DIALOGUE_CHECK")
                                 signal.alarm(0)  # Cancel timeout

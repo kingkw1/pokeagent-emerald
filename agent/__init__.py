@@ -388,7 +388,11 @@ class Agent:
                     self.position_history = [current_position]
                 self._was_in_dialogue_for_stuck = in_dialogue_now
 
-                if not in_battle_now and not in_dialogue_now and len(self.position_history) >= 6:
+                pos_x, pos_y, pos_loc = current_position
+                # TITLE_SEQUENCE always has position (0,0) — it's not real navigation.
+                # Oscillation detection here is a false positive; skip it entirely.
+                _in_title_seq = pos_loc == 'TITLE_SEQUENCE'
+                if not in_battle_now and not in_dialogue_now and not _in_title_seq and len(self.position_history) >= 6:
                     # Check if last 6 positions contain only 2 unique positions
                     recent_positions = self.position_history[-6:]
                     unique_positions = set(recent_positions)
@@ -402,7 +406,6 @@ class Agent:
                         # update_brain() will see is_blocked=True, fire RAG + LLM,
                         # push a recovery task, and get_next_action_directive() will
                         # execute it before resuming milestone navigation.
-                        pos_x, pos_y, pos_loc = current_position
                         self.objective_manager.signal_blocker(
                             reason="Navigation Stuck",
                             context=f"Agent oscillating at ({pos_x}, {pos_y}) in {pos_loc}. A* may be failing or path is blocked.",

@@ -617,6 +617,11 @@ class OpenerBot:
             
             if has_visual_dialogue:
                 return ['A']
+            elif location == 'TITLE_SEQUENCE':
+                # During title sequence, perception often fails to detect dialogue visually.
+                # Pressing A is always safe here — it advances menus, dialogue, and
+                # title screens without any risk of breaking game state.
+                return ['A']
             elif game_state == 'dialog':
                 # Visual indicators say no dialogue, but game_state stuck as 'dialog'
                 # This is a known issue - don't press A, let transition logic handle it
@@ -1590,7 +1595,9 @@ class OpenerBot:
                 name='S1_PROF_DIALOG',
                 description='Professor Birch intro cutscene - press A until PLAYER_NAME_SET + 10 more frames',
                 action_fn=action_clear_dialogue,
-                next_state_fn=lambda s, v: trans_name_set_plus_frames(s, v, frames_to_wait=10)
+                next_state_fn=lambda s, v: trans_name_set_plus_frames(s, v, frames_to_wait=10),
+                max_attempts=200,
+                timeout_seconds=600.0,
             ),
             'S2_GENDER_NAME_SELECT': BotState(
                 name='S2_GENDER_NAME_SELECT',
