@@ -74,6 +74,21 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 FRAME_CACHE_FILE = os.path.join(CACHE_DIR, "frame_cache.json")
 frame_cache_counter = 0
 
+# Dispatch graph state — updated by Agent.step() in Phase 4, read by the SSE stream.
+# Thread-safe: dict replacement is atomic in CPython.
+_graph_state: dict = {"active_node": "nav_bot", "routing_reason": "navigation"}
+
+
+def set_active_graph_node(node: str, reason: str = "navigation") -> None:
+    """Update the active dispatch-graph node shown on the stream overlay.
+
+    Called by Agent.step() once LangGraph is wired (Phase 4). Safe to call
+    from any thread.
+    """
+    global _graph_state
+    _graph_state = {"active_node": node, "routing_reason": reason}
+
+
 # Server runs headless - display handled by client
 
 # Threading locks for thread safety
@@ -1278,6 +1293,13 @@ async def test_stream():
     
     return StreamingResponse(simple_stream(), media_type="text/event-stream")
 
+
+@app.get("/dispatch_state")
+async def get_dispatch_state():
+    """Return the current active dispatch-graph node for the stream overlay."""
+    return _graph_state
+
+
 @app.get("/agent_stream")
 async def stream_agent_thinking():
     """Stream agent thinking in real-time using Server-Sent Events"""
@@ -1369,7 +1391,9 @@ async def stream_agent_thinking():
                                 "response": interaction.get("response", ""),
                                 "duration": interaction.get("duration", 0),
                                 "timestamp": interaction.get("timestamp", ""),
-                                "is_new": True
+                                "is_new": True,
+                                "active_node": _graph_state["active_node"],
+                                "routing_reason": _graph_state["routing_reason"],
                             }
                             
                             yield f"data: {json.dumps(event_data)}\n\n"
@@ -1378,7 +1402,7 @@ async def stream_agent_thinking():
                     
                     # Send periodic heartbeat to keep connection alive (every 10 cycles = 5 seconds)
                     elif heartbeat_counter % 10 == 0:
-                        yield f"data: {json.dumps({'heartbeat': True, 'timestamp': time.time(), 'step': current_step})}\n\n"
+                        yield f"data: {json.dumps({'heartbeat': True, 'timestamp': time.time(), 'step': current_step, 'active_node': _graph_state['active_node'], 'routing_reason': _graph_state['routing_reason']})}\n\n"
                     
                     # Wait before checking again
                     await asyncio.sleep(0.5)
