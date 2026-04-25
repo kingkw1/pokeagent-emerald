@@ -453,6 +453,20 @@ class BattleBot:
             print(f"⚔️ [BATTLE TYPE] GYM BATTLE - Fighting trainer!")
             return BattleType.TRAINER
         
+        # PRIORITY 2 (RAM): Check battle type flags directly from GBA memory — reliable, no VLM needed
+        battle_type_flags = battle_info.get('battle_type_flags', 0)
+        is_trainer_ram = battle_info.get('is_trainer_battle', False)
+        if battle_type_flags != 0:  # only trust if flags are non-zero (0 means unread/invalid)
+            if is_trainer_ram:
+                self._current_battle_type = BattleType.TRAINER
+                logger.info(f"⚔️ [BATTLE TYPE] TRAINER BATTLE detected via RAM flags (0x{battle_type_flags:04X})")
+                print(f"⚔️ [BATTLE TYPE] TRAINER BATTLE - Fighting to win! (RAM flags)")
+                return BattleType.TRAINER
+            else:
+                # RAM explicitly says not a trainer battle → wild
+                logger.info(f"🌿 [BATTLE TYPE] WILD BATTLE detected via RAM flags (0x{battle_type_flags:04X})")
+                # Don't return yet — still let dialogue override if it says 'Wild X appeared'
+
         # TILE LOGIC DISABLED - unreliable, defaults to WILD unless dialogue proves TRAINER
         assumed_type = BattleType.WILD  # SAFE DEFAULT: Try to run, fail if trainer
         logger.info(f"🌿 [BATTLE TYPE] Defaulting to WILD (tile logic disabled - safer to fail running than fight wild)")
@@ -483,8 +497,9 @@ class BattleBot:
                 self._dialogue_history.pop(0)
         
         # Check BOTH current dialogue and dialogue history for battle type patterns
-        dialogue_combined = ' '.join(self._dialogue_history).lower()
-        current_dialogue_lower = dialogue_text.lower() if dialogue_text else ''
+        # Normalize newlines → spaces so "sent\nout" matches keyword "sent out"
+        dialogue_combined = ' '.join(d.replace('\n', ' ').replace('\r', ' ') for d in self._dialogue_history).lower()
+        current_dialogue_lower = dialogue_text.replace('\n', ' ').replace('\r', ' ').lower() if dialogue_text else ''
         all_dialogue = (current_dialogue_lower + ' ' + dialogue_combined).strip()
         
         logger.info(f"🔍 [BATTLE TYPE DETECT] Checking dialogue for battle type keywords...")
