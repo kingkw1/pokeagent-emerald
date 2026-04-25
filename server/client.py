@@ -252,6 +252,15 @@ def run_multiprocess_client(server_port=8000, args=None):
                                                 print(f"🎮 Agent: {action} (server error: {response.status_code})")
                                         except requests.exceptions.RequestException as e:
                                             print(f"🎮 Agent: {action} (connection error: {e})")
+                                        # Update dispatch graph panel
+                                        try:
+                                            requests.post(
+                                                f"{server_url}/dispatch_state",
+                                                json={"active_node": result.get('active_node', 'nav_bot'), "routing_reason": result.get('routing_reason', 'navigation')},
+                                                timeout=2
+                                            )
+                                        except Exception:
+                                            pass
                                         step_count += 1
                                         print(f"🎮 Step {step_count}: {result['action']}")
                         
@@ -440,6 +449,15 @@ def run_multiprocess_client(server_port=8000, args=None):
                                                     print(f"🎮 Agent: {action} (sent successfully)")
                                                     print(f"🎮 Step {step_count}: {result['action']}")
                                                     last_agent_time = current_time
+                                                    # Update dispatch graph panel
+                                                    try:
+                                                        requests.post(
+                                                            f"{server_url}/dispatch_state",
+                                                            json={"active_node": result.get('active_node', 'nav_bot'), "routing_reason": result.get('routing_reason', 'navigation')},
+                                                            timeout=2
+                                                        )
+                                                    except Exception:
+                                                        pass
                                                     
                                                     # Auto-save checkpoint after each step for persistence
                                                     try:

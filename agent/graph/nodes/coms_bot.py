@@ -108,7 +108,15 @@ def coms_bot_node(state: AgentState) -> AgentState:
     else:
         # Normal dialogue — wait for script idle then press A.
         location: str = state_data.get("player", {}).get("location", "")
-        if location not in _SKIP_SCRIPT_IDLE_LOCATIONS:
+        game: dict = state_data.get("game", {})
+        # Skip the script-idle wait when RAM confirms we are not in dialogue
+        # (covers save-state residual script-context values like mode=155 that
+        # would otherwise cause a 2-second timeout on every overworld step).
+        ram_in_dialog: bool = game.get("in_dialog", False) or (
+            game.get("game_state", "") in ("dialog", "dialogue")
+        )
+        skip_idle = location in _SKIP_SCRIPT_IDLE_LOCATIONS or not ram_in_dialog
+        if not skip_idle:
             try:
                 wait_for_script_idle()
             except Exception as exc:

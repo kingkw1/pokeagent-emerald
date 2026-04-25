@@ -1300,6 +1300,16 @@ async def get_dispatch_state():
     return _graph_state
 
 
+@app.post("/dispatch_state")
+async def post_dispatch_state(request: Request):
+    """Update the active dispatch-graph node (called by client.py after each agent step)."""
+    body = await request.json()
+    node = body.get("active_node", "nav_bot")
+    reason = body.get("routing_reason", "navigation")
+    set_active_graph_node(node, reason)
+    return {"status": "ok", "active_node": node, "routing_reason": reason}
+
+
 @app.get("/script_state")
 async def get_script_state():
     """Return whether the GBA script engine is idle (waiting for A-press).

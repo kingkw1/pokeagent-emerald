@@ -534,11 +534,9 @@ class Agent:
                 self._step_count += 1
 
                 action_output = result.get("last_buttons") or []
-                logger.info(
-                    "[GRAPH] node=%s  buttons=%s  milestone=%s",
-                    result.get("last_action"),
-                    action_output,
-                    self._graph_milestone_index,
+                node_name = result.get("last_action") or "?"
+                print(
+                    f"🕸️  [GRAPH] node={node_name:<10} buttons={action_output}  ctx={graph_context}"
                 )
 
                 # Return in the expected format for the client
@@ -546,7 +544,11 @@ class Agent:
                 if not action_output:
                     return None  # Signal to client that no action is needed this frame
 
-                return {'action': action_output}
+                return {
+                    'action': action_output,
+                    'active_node': node_name,
+                    'routing_reason': graph_context,
+                }
 
                 
             except Exception as e:

@@ -762,8 +762,20 @@
         pollFrameUpdate();
 
         // ── Dispatch graph ────────────────────────────────────────────────
+        // Map last_action values (set by each node) → HTML element IDs
+        const ACTION_TO_NODE_ID = {
+            'NAVIGATE': 'nav_bot',
+            'PASS':     'nav_bot',
+            'BATTLE':   'battle_bot',
+            'DIALOGUE': 'coms_bot',
+            'HEAL_ROUTE': 'map_stitcher_relay',
+        };
+
         function updateDispatchGraph(activeNode, routingReason) {
             const nodeIds = ['dispatch', 'nav_bot', 'battle_bot', 'coms_bot', 'map_stitcher_relay', 'verification', 'end'];
+
+            // Resolve last_action string → element ID (fall back to direct ID match)
+            const nodeId = ACTION_TO_NODE_ID[activeNode] || activeNode;
 
             // Reset all nodes to dim (base style only)
             nodeIds.forEach(id => {
@@ -776,12 +788,12 @@
             if (dispatchEl) dispatchEl.classList.add('visited');
 
             // Highlight the active specialist node
-            if (activeNode) {
-                const el = document.getElementById(`gn-${activeNode}`);
+            if (nodeId) {
+                const el = document.getElementById(`gn-${nodeId}`);
                 if (el) el.classList.add('active');
 
                 // For direct-to-verify paths, also light up verify → end
-                if (['nav_bot', 'battle_bot', 'coms_bot'].includes(activeNode)) {
+                if (['nav_bot', 'battle_bot', 'coms_bot'].includes(nodeId)) {
                     const verifyEl = document.getElementById('gn-verification');
                     const endEl   = document.getElementById('gn-end');
                     if (verifyEl) verifyEl.classList.add('visited');
