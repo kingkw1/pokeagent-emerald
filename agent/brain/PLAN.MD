@@ -31,7 +31,9 @@ NPC navigation, healing subsystem) are documented in
 | Healing flow test | 🔲 Not yet run | Requires low-HP save state |
 | BattleBot VLM timing (script-idle gate) | 🔲 Planned | See § 3.1 improvement note |
 | BattleBot inter-battle reset (LangGraph) | ✅ Fixed | `notify_battle_ended()` called on in_battle True→False in `__init__.py` |
-| Karpathy meta-agent + RewardVector | 🔲 Not started | Phase 5 |
+| Milestone reform + dialogue logging | 🔲 Not started | Phase 5 — premature ROM-flag firing; ComsBot transcript capture |
+| Healing system unification | 🔲 Not started | Phase 6 — replace DAD_HP_CHECK + VLM PokéCenter search with location_graph lookup |
+| Karpathy meta-agent + RewardVector | 🔲 Deferred | See [`KARPATHY_PLAN.MD`](KARPATHY_PLAN.MD) — after main-game completion |
 
 ---
 
@@ -65,13 +67,14 @@ nav_bot  battle_bot  coms_bot     map_stitcher_relay
 - **nav_bot** — wraps `pathfinding.py`; injects NPC obstacles; returns button list
 - **battle_bot** — wraps `agent/battle_bot.py`; type-effectiveness move selection
 - **coms_bot** — dialogue handler; delegates to OpenerBot for complex flows
-- **map_stitcher_relay** — low-HP trigger; asks Gemini VLM for PokeCenter pixel
-  coords via stitched map image; resolves to tile coords; hands off to nav_bot
+- **map_stitcher_relay** — low-HP trigger; looks up nearest PokéCenter entrance
+  coords via `find_nearest_pokemon_center()` + `get_entrance_coords()` in
+  `location_graph.py`; sets `goal_coords` for NavBot (VLM fallback for unknown cities)
 - **verification_node** — reads RAM after each action; advances milestone pointer
-  when completion condition is met
+  when completion condition is met; for dialogue milestones waits for
+  `dialogue_completed` event from ComsBot (see Phase 5)
 
-`karpathy_meta_agent` wraps the full loop to compute `RewardVector` deltas per
-step and log them for offline analysis.
+`karpathy_meta_agent` is a deferred passive wrapper — see [`KARPATHY_PLAN.MD`](KARPATHY_PLAN.MD).
 
 ---
 
@@ -621,32 +624,71 @@ def make_verification_node(obj_manager: ObjectiveManager):
 
 ### 3.4 MapStitcherRelay Node
 
-Handles the healing decision. Gets the stitched overhead map, asks Gemini
-Flash where the nearest PokeCenter is, converts pixel answer to tile coords,
-sets `goal_coords` for NavBot.
+Handles the healing navigation decision. Instead of asking a VLM to find the
+PokéCenter on a stitched map image, the node looks up the known entrance
+coordinates from `location_graph.py` using the two existing helpers:
+
+- `find_nearest_pokemon_center(current_location)` — returns the graph key
+  of the nearest `POKEMON_CENTER_1F` node (e.g. `"PETALBURG_CITY_POKEMON_CENTER_1F"`)
+- `get_entrance_coords(city, building)` — returns the overworld `(x, y)` tile
+  you walk onto to enter the building
+
+Currently covered cities: Oldale Town, Petalburg City, Rustboro City.
+Unknown cities fall back to the original VLM overhead-map approach.
 
 ```python
 # agent/graph/nodes/map_stitcher_relay.py
-from utils.map_stitcher_singleton import get_instance
+from agent.location_graph import find_nearest_pokemon_center, get_entrance_coords
 from agent.graph.state import AgentState
 
 def make_map_stitcher_relay_node(vlm):
     def map_stitcher_relay_node(state: AgentState) -> AgentState:
-        stitcher = get_instance()
-        map_image = stitcher.get_overhead_image()  # PIL Image
+        state_data = state.get("state_data") or {}
+        player_data = state_data.get("player", {})
+        current_location = player_data.get("location", "").upper().replace(" ", "_")
+
+        # --- Primary: location_graph coordinate lookup ---
+        pc_key = find_nearest_pokemon_center(current_location)
+        if pc_key:
+            # Derive city from PC key (e.g. PETALBURG_CITY_POKEMON_CENTER_1F → PETALBURG_CITY)
+            city = pc_key.replace("_POKEMON_CENTER_1F", "").replace("_1F", "")
+            coords = get_entrance_coords(city, pc_key)
+            if coords:
+                return {**state,
+                        "goal_coords": coords,
+                        "goal_location": pc_key,
+                        "context": "navigation",
+                        "last_action": "HEAL_ROUTE"}
+
+        # --- Fallback: VLM on stitched overhead map ---
+        # Used when current city is not yet in location_graph.
+        from utils.map_stitcher_singleton import get_instance
+        map_image = None
+        try:
+            stitcher = get_instance()
+            if hasattr(stitcher, "get_overhead_image"):
+                map_image = stitcher.get_overhead_image()
+        except Exception:
+            pass
+        map_image = map_image or state.get("frame")
+        if map_image is None:
+            return state
 
         prompt = (
             "This is the player's current known map. "
             "Mark the pixel location of the nearest Pokemon Center entrance. "
             'Respond as JSON: {"center_x": int, "center_y": int}'
         )
-        response = vlm.get_query(map_image, prompt)
+        try:
+            response = vlm.get_query(map_image, prompt)
+        except Exception:
+            return state
 
-        # GBA screen: 240×160 px, 16px/tile, player at screen center (120, 80)
-        player_x = state["state_data"]["player"]["x"]
-        player_y = state["state_data"]["player"]["y"]
-        tile_x = player_x + (response["center_x"] - 120) // 16
-        tile_y = player_y + (response["center_y"] - 80) // 16
+        pos = player_data.get("position") or {}
+        player_x = int(pos.get("x", 0))
+        player_y = int(pos.get("y", 0))
+        tile_x = player_x + (int(response["center_x"]) - 120) // 16
+        tile_y = player_y + (int(response["center_y"]) - 80) // 16
 
         return {**state,
                 "goal_coords": (tile_x, tile_y),
@@ -705,16 +747,25 @@ class TestOutOfBoundsIndex:
 **Automated — `tests/test_map_stitcher_relay.py`:**
 
 ```python
-class TestPixelToTile:
-    # Mock VLM returns {"center_x": 120, "center_y": 80} (screen center)
-    # Player at (10, 10) → goal_coords = (10, 10)
+class TestLocationGraphLookup:
+    # current_location="PETALBURG_CITY" → goal_coords = entrance of PETALBURG_CITY_POKEMON_CENTER_1F
+    # last_action = "HEAL_ROUTE", context = "navigation"
+    # VLM is NOT called (mock never invoked)
 
-class TestOffCenterPokeCenter:
-    # Mock VLM returns {"center_x": 136, "center_y": 80} (1 tile right)
-    # Player at (10, 10) → goal_coords = (11, 10)
+class TestOldaleLookup:
+    # current_location="OLDALE_TOWN" → goal_coords = known Oldale PC entrance coords
+
+class TestRustboroLookup:
+    # current_location="RUSTBORO_CITY" → goal_coords = known Rustboro PC entrance coords
 
 class TestContextReset:
     # After relay node, context is "navigation" (not "healing_needed")
+
+class TestVlmFallback:
+    # current_location="UNKNOWN_CITY" (not in location_graph)
+    # Mock VLM returns {"center_x": 120, "center_y": 80}
+    # Player at (10, 10) → goal_coords = (10, 10)
+    # VLM IS called (location_graph lookup failed)
 ```
 
 **Manual — BattleBot Integration Test:**
@@ -964,130 +1015,273 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 
 ---
 
-## Phase 5: Karpathy Meta-Agent + RewardVector
+## Phase 5: Milestone Completion Reform + Dialogue Logging
 
-### Implementation
+### Background — the premature-completion bug
 
+`MILESTONE_PROGRESSION` entries for dialogue milestones (e.g. `DAD_FIRST_MEETING`,
+`GYM_EXPLANATION`) currently carry a `milestone_id` that maps directly to a ROM
+script-event flag. Pokémon Emerald sets that flag the moment the map loads, not
+when the dialogue finishes. `check_storyline_milestones()` polls those flags every
+step, so both milestones fire the instant the gym warp triggers — before the agent
+has interacted with Norman at all.
+
+### 5.1 Completion-type field in MILESTONE_PROGRESSION
+
+Add a `completion_type` field to each milestone definition:
+
+| `completion_type` | How completion is detected |
+|---|---|
+| `"location"` | Player coordinate or RAM map-ID matches target (existing behaviour) |
+| `"battle"` | `in_battle True→False` at the expected location (existing behaviour) |
+| `"dialogue"` | `dialogue_completed` flag in `AgentState`, set by ComsBot on dialogue exit |
+
+For dialogue milestones, the ROM flag is treated as a *trigger* (the scene has
+started) rather than a *completion*. The verification node only advances
+`milestone_index` when `state["dialogue_completed"] == True` (set by ComsBot
+after the full sequence finishes) AND the milestone's `dialogue_keywords` are
+present in the captured transcript.
+
+**Example — DAD_FIRST_MEETING:**
 ```python
-# agent/graph/karpathy_meta_agent.py
-import json
-from pathlib import Path
-from datetime import datetime
-from agent.graph.state import AgentState, RewardVector
+{"milestone": "DAD_FIRST_MEETING",
+ "completion_type": "dialogue",
+ "dialogue_keywords": ["I'm the Petalburg Gym Leader", "Norman", "heal"],
+ "target_location": "PETALBURG_CITY_GYM",
+ ...}
+```
 
-class KarpathyMetaAgent:
-    def __init__(self, log_dir: str = "run_logs"):
-        self._log_path = (Path(log_dir) /
-                          f"reward_log_{datetime.now():%Y%m%d_%H%M%S}.jsonl")
-        self._log_path.parent.mkdir(exist_ok=True)
+### 5.2 TransitionEvaluator
 
-    def wrap_step(self, prev_state: dict, curr_state: AgentState,
-                  telemetry: "TelemetryLogger") -> AgentState:
-        reward = RewardVector.compute_delta(prev_state, curr_state["state_data"])
-        tel    = curr_state.get("telemetry") or TelemetrySnapshot()
-        with open(self._log_path, "a") as f:
-            json.dump({
-                "step":                    curr_state["step_count"],
-                "milestone_index":         curr_state["milestone_index"],
-                # --- reward ---
-                "milestone_delta":         reward.milestone_delta,
-                "manhattan_delta":         reward.manhattan_delta,
-                "party_level_sum_delta":   reward.party_level_sum_delta,
-                "pokédollar_delta":        reward.pokédollar_delta,
-                "total":                   reward.total,
-                # --- telemetry ---
-                "vlm_calls":               tel.vlm_calls,
-                "input_tokens":            tel.input_tokens,
-                "output_tokens":           tel.output_tokens,
-                "step_latency_ms":         tel.step_latency_ms,
-                "node_fired":              tel.node_fired or curr_state["last_action"],
-            }, f)
-            f.write("\n")
-        return {**curr_state, "reward": reward}
+A lightweight component called at every major context transition
+(`dialogue → navigation`, `battle → navigation`). For dialogue transitions:
+
+1. Query ChromaDB for the last N entries tagged with the current milestone context.
+2. Assemble the full transcript.
+3. LLM call: *"Given this transcript, was the '{milestone_description}' completed?
+   Did the character say one of these phrases: {keywords}? Reply: YES / NO / PARTIAL."*
+4. If YES: set `state["dialogue_completed"] = True`.
+5. If PARTIAL: do not complete; set a retry flag — ComsBot will attempt to
+   re-engage the NPC on the next step.
+6. Verification node reads `dialogue_completed` and advances `milestone_index`.
+
+The LLM call is gated: it only fires once per dialogue session (on the
+`dialogue → navigation` edge), not every step. Expected cost: ~1 extra LLM
+call per story dialogue interaction.
+
+### 5.3 ComsBot Dialogue Capture
+
+Add a capture loop inside `coms_bot_node`:
+
+1. **Wait for frame settle:** before extracting text, confirm `script_mode == 0`
+   (text animation complete). Use the existing `wait_for_script_idle()` logic.
+2. **Extract text:** VLM call with a structured prompt:
+   `"Extract the speaker name and exact dialogue text from this GBA screenshot.
+   Respond as JSON: {\"speaker\": str, \"text\": str, \"has_more\": bool}"`
+3. **Log to ChromaDB:** store `{text, speaker, milestone_context, step, map_id,
+   player_pos}` as a single document. Tag with current `milestone_index` for
+   later TransitionEvaluator retrieval.
+4. **Track session:** the session starts when `context` transitions to
+   `"dialogue"` and ends when it transitions away. On session end, emit a
+   `DialogueSession` object with the full ordered transcript.
+5. **Set `dialogue_completed`** in `AgentState` when the session ends —
+   `TransitionEvaluator` then does the LLM verdict call.
+
+**ChromaDB collection:** `dialogue_transcripts`  
+**Document schema:**
+```json
+{
+  "text": "...",
+  "speaker": "Norman",
+  "step": 42,
+  "milestone": "DAD_FIRST_MEETING",
+  "map_id": 2049,
+  "player_x": 16,
+  "player_y": 10
+}
 ```
 
 ### Phase 5 Tests
 
-**Automated — `tests/test_reward_vector.py`:**
+**Automated — `tests/test_milestone_completion.py`:**
 
 ```python
-class TestComputeDelta:
-    # prev: milestone_index=2, player pos=(10,10), party=[Lv7], money=500
-    # curr: milestone_index=3, player pos=(8,10), party=[Lv8], money=600
-    # Expected: milestone_delta=1, manhattan_delta=+2.0, level_delta=1, money_delta=100
+class TestLocationMilestoneUnchanged:
+    # completion_type="location" milestone still completes on coordinate match
+    # No dialogue_completed field required
 
-class TestTotalWeighting:
-    # milestone_delta=1, others=0 → total=10.0
-    # All zeros → total=0.0
-    # Negative manhattan_delta (moving away) does not exceed milestone contribution
+class TestDialogueMilestoneGated:
+    # completion_type="dialogue" milestone does NOT complete on ROM flag alone
+    # milestone_index unchanged when dialogue_completed=False
 
-class TestRewardLogging:
-    # KarpathyMetaAgent.wrap_step() writes valid JSONL entry
-    # Entry contains all required fields
-    # File created under correct log_dir
+class TestDialogueMilestoneCompletes:
+    # dialogue_completed=True + keywords present → milestone_index advances
 
-class TestRewardLogRoundtrip:
-    # All entries are JSON-parseable
-    # All numeric fields are float or int (not string)
+class TestTransitionEvaluatorYes:
+    # Transcript contains expected keywords → returns YES → dialogue_completed=True
+
+class TestTransitionEvaluatorNo:
+    # Transcript missing keywords → returns NO → dialogue_completed=False
+    # milestone_index unchanged
 ```
 
-**Manual — Multi-Run Reward Evaluation:**
+**Automated — `tests/test_dialogue_capture.py`:**
 
-*Purpose:* Confirm the reward signal is non-zero, correlates with progress, and
-is useful for offline analysis.
+```python
+class TestCaptureLogsToChromaDB:
+    # coms_bot_node with active dialogue → ChromaDB write called
+    # Document contains speaker, text, milestone, step fields
 
-*Run the agent 3 times:*
+class TestCaptureWaitsForIdle:
+    # script_mode=1 (animation) → A not pressed, text not extracted
+    # script_mode=0 → A pressed, text extracted
+
+class TestSessionTranscriptAssembled:
+    # 3 dialogue turns → DialogueSession has 3 entries in order
+    # dialogue_completed flag set on session exit
+```
+
+**Manual — Dad Meeting Smoke Test:**
+
+*Command:*
 ```bash
-for i in 1 2 3; do
-  python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
-    --agent-auto --max-steps 300
-done
+python run.py --load-state Emerald-GBAdvance/house_start_save.state --agent-auto
 ```
 
-*Inspect reward + telemetry logs:*
-```bash
-for f in run_logs/reward_log_*.jsonl; do
-  echo "=== $f ==="
-  python -c "
-import json
-lines = [json.loads(l) for l in open('$f')]
-steps      = len(lines)
-total_r    = sum(l['total'] for l in lines)
-milestones = sum(l['milestone_delta'] for l in lines)
-avg_mh     = sum(l['manhattan_delta'] for l in lines) / steps
-vlm_calls  = sum(l.get('vlm_calls', 0) for l in lines)
-vlm_rate   = vlm_calls / steps
-tok_in     = sum(l.get('input_tokens', 0) for l in lines)
-tok_out    = sum(l.get('output_tokens', 0) for l in lines)
-cost       = tok_in / 1000 * 0.000075 + tok_out / 1000 * 0.0003
-avg_lat    = sum(l.get('step_latency_ms', 0) for l in lines) / steps
-print(f'Steps: {steps}  |  Reward: {total_r:.2f}  |  Milestones: {milestones}')
-print(f'VLM calls: {vlm_calls} ({vlm_rate*100:.1f}% of steps)  |  Savings vs naive: {(1-vlm_rate)*100:.1f}%')
-print(f'Tokens: {tok_in}in / {tok_out}out  |  Est. cost: USD {cost:.4f}')
-print(f'Avg step latency: {avg_lat:.1f}ms')
-"
-done
+*Pass criteria:*
+- [ ] Agent enters Petalburg Gym and walks to Norman
+- [ ] `[COMS_BOT]` fires and logs at least 2 transcript entries
+- [ ] `DAD_FIRST_MEETING` does NOT complete on gym map-entry; completes only
+      after dialogue session ends with `dialogue_completed=True`
+- [ ] `GYM_EXPLANATION` similarly requires a completed dialogue session
+- [ ] Agent exits gym and proceeds toward Route 104 South
+
+---
+
+## Phase 6: Healing System Unification
+
+### 6.1 What DAD_HP_CHECK was (and why it is being removed)
+
+The `DAD_HP_CHECK` block in `get_next_action_directive()` is a vestigial hack:
+*"If the player's Pokémon HP is below 100% when they arrive in Petalburg City,
+navigate to Norman (the player's in-game father / gym leader) in the gym."*
+
+The intent was to exploit the fact that Norman heals your party as part of the
+opening cutscene. Rather than implementing a general healing system, the code
+special-cased Petalburg by detecting HP < 100% and routing directly to the gym.
+
+**Why it causes bugs now:**
+- It fires even after `DAD_FIRST_MEETING` and `GYM_EXPLANATION` are marked
+  complete (because `_past_opening` is checked unreliably).
+- It sets `goal_coords` to Norman's tile `(15, 8)`, which is a wall tile in
+  the overworld map, causing infinite pathfinding failures (the stuck loop seen
+  in the logs at steps 6–11).
+- It bypasses the general PokéCenter system entirely.
+
+**The correct approach:** Norman's healing is now handled naturally by the
+Phase 5 dialogue milestone system — the agent interacts with Norman because the
+`DAD_FIRST_MEETING` milestone directs it to, not because of an HP check.
+
+### 6.2 Unified Healing Predicate
+
+Replace the split `DAD_HP_CHECK` + `healing_needed` context + VLM relay with a
+single decision chain:
+
+```
+needs_healing(state) → bool
+    True if any party Pokémon HP < HP_THRESHOLD
+         OR any Pokémon has a move at 0 PP
+
+is_healing_safe_location(state) → bool
+    True if player is in a city/town (not on a route or in grass)
+
+is_danger_threshold(state) → bool
+    True if any party Pokémon HP < DANGER_THRESHOLD (e.g. 30%)
+         — on roads, trigger return-to-city even without a visible PC
 ```
 
-*Objective pass criteria:*
-- [ ] `total reward > 0` in at least 2 of 3 runs
-- [ ] `milestone_delta > 0` at least once per run (at least 1 milestone fires)
-- [ ] `avg manhattan_delta > 0` on nav_bot steps (agent moving toward goal)
-- [ ] `vlm_call_rate < 0.30` — VLM should fire on fewer than 30% of steps
-      (pure-VLM baseline is 1.0; the router's value is quantified here)
-- [ ] `avg step latency < 3000ms` — deterministic nodes (nav/battle/coms)
-      should complete in < 100ms; latency spikes indicate VLM overhead
+**Router logic (replacing Phase 4.1 HP check):**
+```python
+HP_THRESHOLD   = 1.0    # opportunistic: heal whenever not at full HP
+DANGER_THRESHOLD = 0.30  # emergency: return to last city if below this
 
-*Subjective evaluation:*
-- Do runs with higher total reward correspond to better agent behaviour?
-- Is `milestone_delta` the dominant term? A single milestone (+10.0) should
-  outweigh movement noise across an entire run.
-- Are there steps with `total < -1.0`? These are regressions — note the
-  `node_fired` field at those steps.
-- What is the VLM savings percentage? Target: ≥ 70% reduction vs. a naive
-  full-VLM agent. This is the headline portfolio metric: *"neuro-symbolic
-  routing reduced Gemini API calls by X% while maintaining task completion,
-  saving $Y per hour at production scale."*
+if needs_healing(state):
+    if is_healing_safe_location(state):
+        return "map_stitcher_relay"   # city → navigate to PC
+    elif is_danger_threshold(state):
+        # On a road and dangerously low — return to last known city
+        state["goal_location"] = state.get("last_city_visited", "OLDALE_TOWN")
+        return "nav_bot"
+# else: continue with normal routing
+```
+
+### 6.3 `last_city_visited` in AgentState
+
+Add to `AgentState`:
+```python
+last_city_visited: Optional[str]   # e.g. "PETALBURG_CITY"
+```
+
+`nav_bot_node` updates this whenever it detects a city map (`is_city(location)`).
+The router reads it to plan a return route when `is_danger_threshold()` is True
+on a route tile.
+
+### 6.4 MapStitcherRelay as coordinate-lookup (already updated in § 3.4)
+
+The location_graph lookup is the primary path; VLM is the fallback for unknown
+cities. No further changes needed — Phase 3.4 already documents the updated
+implementation.
+
+**Cities to add to location_graph (deferred):**
+- Dewford Town PC
+- Slateport City PC
+- Mauville City PC
+(Add as encountered during main-game run.)
+
+### Phase 6 Tests
+
+**Automated — `tests/test_healing_predicate.py`:**
+
+```python
+class TestNeedsHealingHp:
+    # 24/27 HP → needs_healing=True
+    # 27/27 HP → needs_healing=False
+
+class TestNeedsHealingPp:
+    # Move at 0/15 PP → needs_healing=True
+    # All moves have PP > 0 and HP=100% → needs_healing=False
+
+class TestDangerThreshold:
+    # 8/27 HP (29%) → is_danger_threshold=True
+    # 9/27 HP (33%) → is_danger_threshold=False
+
+class TestRouterHealingInCity:
+    # needs_healing=True, location=PETALBURG_CITY → routes to map_stitcher_relay
+
+class TestRouterHealingOnRoad:
+    # needs_healing=True, location=ROUTE_102, HP above danger threshold
+    # → routes to nav_bot (no emergency return triggered)
+
+class TestRouterEmergencyReturn:
+    # needs_healing=True, location=ROUTE_102, HP below danger threshold
+    # → routes to nav_bot with goal_location = last_city_visited
+
+class TestLastCityVisited:
+    # nav_bot_node in PETALBURG_CITY → updates last_city_visited in state
+```
+
+**Manual — Healing Smoke Test:**
+
+*Setup:* Load a save state with party HP < 100% in Petalburg City.
+
+*Pass criteria:*
+- [ ] Router routes to `map_stitcher_relay` immediately
+- [ ] `map_stitcher_relay` looks up Petalburg City PC coords from location_graph
+  (no VLM call, no 2-second delay)
+- [ ] `[NAVBOT]` navigates to PC entrance
+- [ ] Nurse Joy dialogue completes; party HP restored to max
+- [ ] Agent exits PC and resumes prior navigation goal
+- [ ] `DAD_HP_CHECK` code no longer present / no longer fires
 
 ---
 
@@ -1117,9 +1311,9 @@ Deferred until the LangGraph graph is running:
 | `agent/graph/nodes/battle_bot.py` | 3 | 🔲 |
 | `agent/graph/nodes/coms_bot.py` | 3 | 🔲 |
 | `agent/graph/nodes/verification.py` | 3 | 🔲 |
-| `agent/graph/nodes/map_stitcher_relay.py` | 3 | 🔲 |
+| `agent/graph/nodes/map_stitcher_relay.py` | 3 | ✅ (coord lookup) |
 | `agent/graph/telemetry.py` | 1 | 🔲 |
-| `agent/graph/karpathy_meta_agent.py` | 5 | 🔲 |
+| `agent/graph/karpathy_meta_agent.py` | Deferred | See [`KARPATHY_PLAN.MD`](KARPATHY_PLAN.MD) |
 | `utils/run_data_manager.py` | 0 | 🔲 |
 | `utils/backup_manager.py` | 0 | 🔲 |
 | `tests/test_run_data_manager.py` | 0 | 🔲 |
@@ -1131,4 +1325,7 @@ Deferred until the LangGraph graph is running:
 | `tests/test_verification_node.py` | 3 | 🔲 |
 | `tests/test_map_stitcher_relay.py` | 3 | 🔲 |
 | `tests/test_graph_router.py` | 4 | 🔲 |
-| `tests/test_reward_vector.py` | 5 | 🔲 |
+| `tests/test_milestone_completion.py` | 5 | 🔲 |
+| `tests/test_dialogue_capture.py` | 5 | 🔲 |
+| `tests/test_healing_predicate.py` | 6 | 🔲 |
+| `tests/test_reward_vector.py` | Deferred | See [`KARPATHY_PLAN.MD`](KARPATHY_PLAN.MD) |
