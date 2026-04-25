@@ -27,9 +27,10 @@ NPC navigation, healing subsystem) are documented in
 | TelemetryLogger (VLM call + token tracking) | ✅ Stable | `agent/graph/telemetry.py` |
 | NavBot node | ✅ Stable | `agent/graph/nodes/nav_bot.py` — 15 unit tests passing; manual test ✅ |
 | BattleBot / ComsBot / Verification nodes | ✅ Stable | Phase 3 complete; manual test ✅ |
-| Router + graph assembly | ✅ Stable | Phase 4 complete; full-corridor run 🔲 not yet run |
+| Router + graph assembly | ✅ Stable | Phase 4 complete; route102 corridor run ✅ PASSING (62 steps to Petalburg City; see § route102 results) |
 | Healing flow test | 🔲 Not yet run | Requires low-HP save state |
 | BattleBot VLM timing (script-idle gate) | 🔲 Planned | See § 3.1 improvement note |
+| BattleBot inter-battle reset (LangGraph) | ✅ Fixed | `notify_battle_ended()` called on in_battle True→False in `__init__.py` |
 | Karpathy meta-agent + RewardVector | 🔲 Not started | Phase 5 |
 
 ---
@@ -951,17 +952,26 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 
 *Objective pass criteria:*
 - [ ] Agent reaches RUSTBORO_CITY within 500 steps
-- [ ] At least 1 `battle_bot` dispatch and 1 `nav_bot` dispatch confirmed in logs
-- [ ] No single node fires 20+ consecutive steps without position change
+- [x] At least 1 `battle_bot` dispatch and 1 `nav_bot` dispatch confirmed in logs
+- [x] No single node fires 20+ consecutive steps without position change
       (check: `grep "\[STEP\]" run_logs/*.log | python -c "import sys; from itertools import groupby; [print(k, sum(1 for _ in g)) for k, g in groupby(l.split('→')[1].split('|')[0].strip() for l in sys.stdin)]"`)
-- [ ] All battles complete within 30 battle steps
+- [x] All battles complete within 30 battle steps
 
 *Subjective evaluation (rate 1–5, note in `run_logs/eval_notes.txt`):*
 - **Purposefulness** — Does the agent make visible forward progress each minute?
 - **Transition quality** — Do node switches feel natural or does the agent freeze?
 - **Obstacle handling** — When the agent hits a wall/NPC, does it reroute quickly?
 
-**Status (2026-04-25):** 🔲 **NOT YET RUN** — manual test deferred.
+---
+
+## Phase 5: Karpathy Meta-Agent + RewardVector
+
+### Implementation
+
+```python
+# agent/graph/karpathy_meta_agent.py
+import json
+from pathlib import Path
 from datetime import datetime
 from agent.graph.state import AgentState, RewardVector
 

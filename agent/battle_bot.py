@@ -1679,3 +1679,30 @@ def get_battle_bot() -> BattleBot:
     if _global_battle_bot is None:
         _global_battle_bot = BattleBot()
     return _global_battle_bot
+
+
+def notify_battle_ended() -> None:
+    """Notify BattleBot that the battle has ended (called by Agent.step() on
+    the in_battle True→False transition).
+
+    In the LangGraph architecture the router stops routing to battle_bot_node
+    as soon as in_battle becomes False, so BattleBot's internal cleanup block
+    (``elif not in_battle and self._battle_started:``) never executes.  Calling
+    this function ensures _battle_started and _unknown_state_count are always
+    reset between battles regardless of routing.
+    """
+    bot = get_battle_bot()
+    if bot._battle_started:
+        logger.info("[BATTLE BOT] notify_battle_ended(): resetting state after battle")
+        bot._battle_started = False
+        bot._post_battle_dialogue = False
+        bot._current_battle_type = bot._current_battle_type.__class__.WILD
+        bot._battle_type_locked = False
+        bot._run_attempts = 0
+        bot._dialogue_history = []
+        bot._is_birch_rescue_battle = False
+        bot._battle_start_tile = None
+        bot._current_opponent = None
+        bot._unknown_state_count = 0
+        bot._wild_battle_dialogue_turns = 0
+        bot._pending_move = None

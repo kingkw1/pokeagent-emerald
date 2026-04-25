@@ -380,6 +380,11 @@ class Agent:
                     logger.info("[STUCK DETECTION] Battle ended — clearing position history (post-battle grace)")
                     print("🔄 [STUCK DETECTION] Battle ended — resetting position history")
                     self.position_history = [current_position]
+                    # Notify BattleBot to reset its internal state.  The LangGraph
+                    # router stops routing to battle_bot_node once in_battle=False,
+                    # so BattleBot's own cleanup block never fires without this.
+                    from agent.battle_bot import notify_battle_ended
+                    notify_battle_ended()
                 self._was_in_battle_for_stuck = in_battle_now
 
                 # ── Post-dialogue grace: clear stale position history ──
