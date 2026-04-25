@@ -364,10 +364,14 @@ class BattleBot:
             self._battle_started = False
             self._post_battle_dialogue = False
             self._current_battle_type = BattleType.WILD  # Reset to WILD for next battle
+            self._battle_type_locked = False  # Reset lock for next battle
             self._run_attempts = 0
             self._dialogue_history = []
+            self._is_birch_rescue_battle = False  # Reset for next battle
             self._battle_start_tile = None
             self._current_opponent = None  # Reset opponent tracking
+            self._unknown_state_count = 0  # Reset VLM hallucination counter
+            self._wild_battle_dialogue_turns = 0  # Reset wild battle dialogue counter
             self._pending_move = None  # Reset pending move
         
         # Update battle state tracking for next step
@@ -1315,6 +1319,7 @@ class BattleBot:
                 # This allows WILD (default) to upgrade to TRAINER when trainer dialogue appears
                 if latest_battle_type == BattleType.TRAINER:
                     self._battle_type_locked = True
+                    self._unknown_state_count = 0  # Reset: may have incremented on WILD path before type was known
                     logger.info(f"� [BATTLE TYPE] LOCKED as TRAINER - will not change for this battle")
                     print(f"🔒 [BATTLE TYPE] Locked as TRAINER")
             else:

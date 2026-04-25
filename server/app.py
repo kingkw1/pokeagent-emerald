@@ -1333,7 +1333,12 @@ async def get_script_state():
             # NOTE: during TITLE_SEQUENCE the intro uses a scene manager, not the script
             # engine, so global_mode is always 0 there. This endpoint is only meaningful
             # for normal overworld dialogue.
-            idle = (global_mode == 0)
+            # Modes 1 (SCRIPT_MODE_BYTECODE) and 2 (SCRIPT_MODE_NATIVE) are the
+            # only defined "script is executing" states.  Mode 0 is STOPPED
+            # (normal idle).  Any value outside {0, 1, 2} (e.g. 21 seen during
+            # post-battle movement animations) is not a script-engine state and
+            # should not block the caller.
+            idle = global_mode not in (1, 2)
             return {"idle": idle, "script_mode": int(global_mode)}
     except Exception as e:
         logger.info(f"[script_state] read failed: {e}")

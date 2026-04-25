@@ -50,14 +50,9 @@ def nav_bot_node(state: AgentState) -> AgentState:
     should_interact: bool = state.get("should_interact", False)
 
     player_pos = state_data.get("player", {}).get("position", {})
-    logger.debug(
-        "[NAVBOT] step=%s  goal=(%s, %s)  pos=(%s, %s)",
-        state.get("step_count"),
-        goal_x,
-        goal_y,
-        player_pos.get("x"),
-        player_pos.get("y"),
-    )
+    pos_x = player_pos.get("x", "?")
+    pos_y = player_pos.get("y", "?")
+    print(f"[NAVBOT] step={state.get('step_count')}  pos=({pos_x}, {pos_y})  goal=({goal_x}, {goal_y})")
 
     # pathfind_to_goal calls update_npc_obstacles internally.
     # Pass npc_coords so the target NPC's tile stays walkable.
