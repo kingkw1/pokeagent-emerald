@@ -21,13 +21,15 @@ NPC navigation, healing subsystem) are documented in
 | NPC Navigation (3-tier) | ✅ Stable | Tiers 1 + 2 complete; Tier 3 tabled |
 | NPC Identity Registry | ✅ Stable | Adaptive `graphics_id` discovery |
 | Generic Healing Subsystem | ✅ Stable | Two-tier (opportunistic + threshold) |
-| LangGraph graph | 🔲 Not started | This roadmap |
-| RunDataManager / BackupManager | 🔲 Not started | Phase 0 prerequisite |
+| LangGraph graph | ✅ Stable | All 6 nodes wired, router complete |
+| RunDataManager / BackupManager | ✅ Stable | Phase 0 complete |
 | AgentState schema | ✅ Stable | `agent/graph/state.py` |
 | TelemetryLogger (VLM call + token tracking) | ✅ Stable | `agent/graph/telemetry.py` |
-| NavBot node | ✅ Stable | `agent/graph/nodes/nav_bot.py` — 15 unit tests passing |
-| BattleBot / ComsBot / Verification nodes | 🔲 Not started | Phase 3 |
-| Router + graph assembly | 🔲 Not started | Phase 4 |
+| NavBot node | ✅ Stable | `agent/graph/nodes/nav_bot.py` — 15 unit tests passing; manual test ✅ |
+| BattleBot / ComsBot / Verification nodes | ✅ Stable | Phase 3 complete; manual test ✅ |
+| Router + graph assembly | ✅ Stable | Phase 4 complete; full-corridor run 🔲 not yet run |
+| Healing flow test | 🔲 Not yet run | Requires low-HP save state |
+| BattleBot VLM timing (script-idle gate) | 🔲 Planned | See § 3.1 improvement note |
 | Karpathy meta-agent + RewardVector | 🔲 Not started | Phase 5 |
 
 ---
@@ -482,12 +484,11 @@ python run.py --load-state tests/save_states/rival_battle_save.state --agent-aut
 - [ ] `[NAVBOT]` logged every step *(deferred — requires Phase 4 wiring)*
 - [x] A button pressed when adjacent to May
 
-**Result (2026-04-24):** ✅ Functionally passing — the underlying pathfinding
+**Result (2026-04-24 → 2026-04-25):** ✅ **PASSING** — the underlying pathfinding
 and interaction logic is correct (navigated x=5→9 in one 4-step batch, pressed
-A on the rival, advanced dialogue). `[NAVBOT]` prefix was absent because
-`nav_bot_node` is not yet wired into `Agent.step()` — the legacy
-`directive_nav` / `action_step()` stack handled all steps. This is the
-expected state before Phase 4 integration.
+A on the rival, advanced dialogue). `[NAVBOT]` prefix now present after
+Phase 4 integration: logs `pos` and `goal` every navigation step (confirmed
+in `run_20260425_101934.log` at steps 1, 15, 16). Both pass criteria met.
 
 *Fail indicators:*
 - Agent walks north or south (y changes significantly): `goal_coords` not
@@ -513,6 +514,28 @@ def battle_bot_node(state: AgentState) -> AgentState:
     buttons = _bot.get_action(state["state_data"], state["perception"])
     return {**state, "last_action": "BATTLE", "last_buttons": buttons}
 ```
+
+**Improvement opportunity — VLM timing in battle:**
+
+The same `sGlobalScriptContext.mode` signal used by ComsBot's
+`wait_for_script_idle()` (see § 3.2) is also meaningful inside battle.
+In practice, `[MENU STATE] UNKNOWN` is returned every step because the
+VLM receives the screenshot mid-animation (attack flash, damage numbers
+scrolling, HP bar animating) rather than after the frame has settled.
+
+The fix is to gate the VLM call inside `BattleBot.get_action()` on a
+script-idle check analogous to `wait_for_script_idle()`. The endpoint
+already handles battle correctly: `mode=0` means the engine is waiting
+for input (menu is fully rendered), while `mode=1/2` means an animation
+or move-execution script is still running. Values outside `{0,1,2}`
+(e.g. `mode=21` observed during post-battle movement) should be treated
+as idle (not a script-execution state).
+
+Expected outcome: VLM sees a clean static menu frame, `[MENU STATE]`
+returns `FIGHT`/`DIALOGUE`/`RUN` reliably, and the unknown-state
+fallback counter stays near zero. This should eliminate the 5-step
+delay before the VLM fallback takes over and reduce total battle length
+by roughly 30%.
 
 ### 3.2 ComsBot Node
 
@@ -710,14 +733,29 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 - Battle ends, `[NAVBOT]` resumes
 
 *Pass criteria:*
-- [ ] `[BATTLE_BOT]` fires exclusively during battle
-- [ ] Battle completes within 30 battle-steps (win or flee)
-- [ ] Navigation resumes after battle (position changes post-battle)
+- [x] `[BATTLE_BOT]` fires exclusively during battle
+- [x] Battle completes within 30 battle-steps (won in 10–11 battle steps)
+- [x] Navigation resumes after battle (position changes post-battle)
+
+**Result (2026-04-25):** ✅ **PASSING** — confirmed across two runs
+(`run_20260425_101223.log`, `run_20260425_101934.log`). Trainer
+(YOUNGSTER CALVIN / POOCHYENA) correctly identified via `"sent out"`
+keyword. ABSORB selected via type-effectiveness (Grass > Dark/Normal).
+Battle won in 10–11 steps, NavBot resumed immediately after. Two bugs
+fixed during this session: (1) RAM battle-type flags promoted to
+priority 2; (2) newline normalization in dialogue keyword matching.
 
 *Fail indicators:*
 - Same move selected every turn regardless of type: effectiveness lookup broken
 - Console freezes on a battle step: stuck in menu
 - `[NAVBOT]` fires during battle: `routing_condition` not reading `is_in_battle`
+
+**Known limitation (tracked):** The VLM consistently returns `UNKNOWN`
+for battle menu state — the fallback species-identification and
+type-effectiveness path handles every battle correctly, but the primary
+VLM menu path never fires. Root cause is likely that the VLM receives
+a screenshot during an animation or mid-typewriter frame rather than a
+static menu frame. See the improvement note in § 3.1 below.
 
 ---
 
@@ -760,6 +798,8 @@ python run.py --load-state [low_hp_save] --agent-auto --max-steps 300
 - Wrong building targeted: pixel-to-tile conversion off — log `player x/y`
   and the raw VLM `center_x/center_y` to diagnose
 - Agent stuck inside PokeCenter: exit warp detection not firing
+
+**Status (2026-04-25):** 🔲 **NOT YET RUN** — requires a low-HP save state.
 
 ---
 
@@ -921,16 +961,7 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 - **Transition quality** — Do node switches feel natural or does the agent freeze?
 - **Obstacle handling** — When the agent hits a wall/NPC, does it reroute quickly?
 
----
-
-## Phase 5: Karpathy Meta-Agent + RewardVector
-
-### Implementation
-
-```python
-# agent/graph/karpathy_meta_agent.py
-import json
-from pathlib import Path
+**Status (2026-04-25):** 🔲 **NOT YET RUN** — manual test deferred.
 from datetime import datetime
 from agent.graph.state import AgentState, RewardVector
 
