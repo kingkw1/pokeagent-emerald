@@ -524,6 +524,34 @@ def coms_bot_node(state: AgentState) -> AgentState:
     return {**state, "last_action": "DIALOGUE", "last_buttons": buttons}
 ```
 
+**Implementation note — wait for script idle before pressing A:**
+
+The GBA's `sGlobalScriptContext.mode` (read via `GET /script_state` on the
+game server) tells you whether the typewriter text animation is still running:
+
+| `script_mode` value | Meaning |
+|---|---|
+| `0` (SCRIPT_MODE_STOPPED) | Text fully rendered — safe to press A |
+| `1` (SCRIPT_MODE_BYTECODE) | Script bytecode executing — animation in progress |
+| `2` (SCRIPT_MODE_NATIVE) | Native C callback executing — animation in progress |
+
+Pressing A while `mode != 0` sends the input during the animation frame, which
+the game may silently ignore (the A-press lands between rendered characters and
+gets consumed before the continue-prompt is visible). This was the root cause of
+non-deterministic dialogue skipping during the opener sequence.
+
+`wait_for_script_idle()` in `agent/opener_bot.py` is the reference
+implementation: it polls `/script_state` at ~80 Hz until `idle=True` or a
+timeout expires, then returns control to the caller.
+
+**ComsBot should call this before every A press** for normal overworld NPC
+dialogue. Exceptions:
+- **TITLE_SEQUENCE / intro scene manager** — `global_mode` is always `0` here
+  (the intro uses the GBA callback system, not `sGlobalScriptContext`), so the
+  endpoint is meaningless and should be skipped.
+- **Naming / keyboard screens** — these are menu-driven, not script-driven;
+  `script_mode` is not meaningful.
+
 ### 3.3 VerificationNode
 
 Reads RAM after each action. If the current milestone's `completion_condition`
