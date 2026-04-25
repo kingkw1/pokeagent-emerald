@@ -144,6 +144,14 @@ class Agent:
                 # Write a marker so we don't re-seed on next boot
                 self.episodic_memory.log_event("seed_complete", _SEED_MARKER)
                 print(f"🧠 [Brain] Seeded {len(rules)} rules.")
+
+            # ── Phase 4: LangGraph dispatch graph ──────────────────────
+            from agent.graph.graph import build_graph
+            self._graph = build_graph(self.objective_manager, self.vlm)
+            self._step_count: int = 0
+            self._prev_state_snapshot: dict | None = None
+            self._graph_milestone_index: int = 0
+            print("   🕸️  LangGraph dispatch graph: READY")
     
     def step(self, game_state):
         """
@@ -464,7 +472,7 @@ class Agent:
                 memory_output = current_memory + new_memory_entry
                 self.context['memory'] = memory_output
                 
-                # 4. Action - choose button press
+                # 4. Action — LangGraph dispatch graph
                 # Inject completed milestone IDs so battle_bot can detect
                 # Birch rescue vs post-rescue wild battles without needing
                 # a direct reference to the ObjectiveManager.
@@ -475,38 +483,71 @@ class Agent:
                 ]
                 state_data.setdefault('game', {})['milestones_completed'] = completed_ids
 
-                action_output = action_step(
-                    self.context.get('memory', ''),
-                    planning_output,
-                    perception_output,
-                    frame,
-                    state_data,
-                    recent_actions,  # Use actual recent_actions from server
-                    self.vlm,
-                    self.context.get('visual_dialogue_active', False),  # Pass VLM dialogue detection
-                    objective_manager=self.objective_manager,  # Direct reference — no more planning_step attribute hack
+                # Get the current navigation directive to populate goal_coords
+                directive_raw = self.objective_manager.get_next_action_directive(state_data)
+                if isinstance(directive_raw, dict):
+                    from agent.objective_manager import Directive
+                    directive_raw = Directive.from_dict(directive_raw)
+
+                goal_coords = directive_raw.goal_coords if directive_raw else None
+                goal_location = (
+                    (directive_raw.target_location or directive_raw.location)
+                    if directive_raw else None
                 )
-                
-                # SAFETY CHECK: Ensure action_output is valid
-                # NOTE: Empty list [] means "wait/do nothing" and should NOT trigger fallback
-                # Only None means "failed to decide" and needs fallback
-                if action_output is None:
-                    # Check if we're in dialogue - if so, don't press A (might be player monologue)
-                    visual_dialogue = self.context.get('visual_dialogue_active', False)
-                    if visual_dialogue:
-                        logger.warning("[AGENT] Action step returned None during dialogue - likely player monologue, not pressing A")
-                        # Return empty list to signal no action needed
-                        action_output = []
-                    else:
-                        logger.warning("[AGENT] Action step returned None, using fallback")
-                        action_output = ['A']  # Safe fallback action only when NOT in dialogue
-                
+                npc_coords = directive_raw.npc_coords if directive_raw else None
+                should_interact = bool(directive_raw.should_interact) if directive_raw else False
+
+                # Derive routing context from the reliable VLM-based signal.
+                # The RAM in_dialog flag is unreliable (save states can have
+                # residual script context with non-zero mode values) so we use
+                # the hybrid visual_dialogue_active check computed above.
+                in_battle_now = state_data.get('game', {}).get('in_battle', False)
+                if in_battle_now:
+                    graph_context = "battle"
+                elif visual_dialogue_active:
+                    graph_context = "dialogue"
+                else:
+                    graph_context = "navigation"
+
+                from agent.graph.state import AgentState as _AgentState
+                agent_state = _AgentState(
+                    frame=frame,
+                    state_data=state_data,
+                    perception=perception_output,
+                    goal_coords=goal_coords,
+                    goal_location=goal_location,
+                    npc_coords=npc_coords,
+                    should_interact=should_interact,
+                    milestone_index=self._graph_milestone_index,
+                    context=graph_context,
+                    reward=None,
+                    prev_state_snapshot=self._prev_state_snapshot,
+                    last_action=None,
+                    last_buttons=[],
+                    step_count=self._step_count,
+                    telemetry=None,
+                )
+
+                result = self._graph.invoke(agent_state)
+                self._prev_state_snapshot = state_data
+                self._graph_milestone_index = result.get("milestone_index", self._graph_milestone_index)
+                self._step_count += 1
+
+                action_output = result.get("last_buttons") or []
+                logger.info(
+                    "[GRAPH] node=%s  buttons=%s  milestone=%s",
+                    result.get("last_action"),
+                    action_output,
+                    self._graph_milestone_index,
+                )
+
                 # Return in the expected format for the client
                 # Handle empty action list (no action needed)
                 if not action_output:
                     return None  # Signal to client that no action is needed this frame
-                
+
                 return {'action': action_output}
+
                 
             except Exception as e:
                 print(f"❌ Agent error: {e}")

@@ -36,18 +36,19 @@ def routing_condition(state: AgentState) -> str:
     if context == "healing_needed":
         return "map_stitcher_relay"
 
-    # 2. Battle state
-    is_in_battle = game.get("is_in_battle", False) or (
+    # 2. Battle state — RAM flag is reliable for battle detection.
+    is_in_battle = game.get("in_battle", False) or (
         game.get("game_state", "") == "battle"
     )
     if is_in_battle:
         return "battle_bot"
 
-    # 3. Dialogue state
-    is_in_dialog = game.get("is_in_dialog", False) or (
-        game.get("game_state", "") in ("dialog", "dialogue")
-    )
-    if is_in_dialog:
+    # 3. Dialogue state — use context field (set from VLM-based visual_dialogue_active
+    # in Agent.step()) as the primary signal.  RAM in_dialog is unreliable: save
+    # states can have residual script-context values that make is_in_dialog()=True
+    # even on the open overworld.  Fall back to RAM game_state only as a secondary
+    # confirmation when context itself says dialogue.
+    if context == "dialogue":
         return "coms_bot"
 
     # 4. Default: navigation

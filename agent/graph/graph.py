@@ -1,71 +1,42 @@
 """
 agent/graph/graph — LangGraph StateGraph assembly.
 
-``build_graph()`` returns a compiled LangGraph graph that implements the
-full dispatch loop described in PLAN.MD Phase 4.  During Phase 1 the graph
-is a stub: only the dispatch node and its conditional edges exist; the
-specialist nodes (nav_bot, battle_bot, etc.) are placeholder pass-throughs
-that will be replaced in Phases 2–3.
-
-Phase 4 wires in the real node implementations.
+``build_graph(obj_manager, vlm)`` returns a compiled LangGraph graph that
+implements the full dispatch loop described in PLAN.MD Phase 4.
 """
 
 from __future__ import annotations
-
-from typing import Callable
 
 from langgraph.graph import END, StateGraph
 
 from agent.graph.router import routing_condition
 from agent.graph.state import AgentState
+from agent.graph.nodes.nav_bot import nav_bot_node
+from agent.graph.nodes.battle_bot import battle_bot_node
+from agent.graph.nodes.coms_bot import coms_bot_node
+from agent.graph.nodes.verification import make_verification_node
+from agent.graph.nodes.map_stitcher_relay import make_map_stitcher_relay_node
 
 
-# ---------------------------------------------------------------------------
-# Placeholder nodes (replaced in Phases 2–3)
-# ---------------------------------------------------------------------------
-
-
-def _passthrough_node(state: AgentState) -> AgentState:
-    """Generic stub node — returns state unchanged."""
-    return state
-
-
-# ---------------------------------------------------------------------------
-# Graph factory
-# ---------------------------------------------------------------------------
-
-
-def build_graph(
-    nav_bot_node: Callable | None = None,
-    battle_bot_node: Callable | None = None,
-    coms_bot_node: Callable | None = None,
-    verification_node: Callable | None = None,
-    map_stitcher_relay_node: Callable | None = None,
-) -> "langgraph.graph.graph.CompiledGraph":  # type: ignore[name-defined]
+def build_graph(obj_manager, vlm) -> "langgraph.graph.graph.CompiledGraph":  # type: ignore[name-defined]
     """Assemble and compile the dispatch StateGraph.
 
-    Keyword args accept real node callables so that Phases 2–3 can inject
-    them without modifying this file.  Any argument left as ``None`` falls
-    back to a pass-through stub.
+    Args:
+        obj_manager: ``ObjectiveManager`` instance (used by verification node).
+        vlm: ``VLM`` instance (used by map_stitcher_relay node).
 
     Returns:
         A compiled LangGraph graph ready for ``graph.invoke(state)``.
     """
-    _nav = nav_bot_node or _passthrough_node
-    _battle = battle_bot_node or _passthrough_node
-    _coms = coms_bot_node or _passthrough_node
-    _verify = verification_node or _passthrough_node
-    _relay = map_stitcher_relay_node or _passthrough_node
-
     builder = StateGraph(AgentState)
 
     # ---- Nodes ----
-    builder.add_node("dispatch", _passthrough_node)
-    builder.add_node("nav_bot", _nav)
-    builder.add_node("battle_bot", _battle)
-    builder.add_node("coms_bot", _coms)
-    builder.add_node("map_stitcher_relay", _relay)
-    builder.add_node("verification", _verify)
+    builder.add_node("dispatch", lambda s: s)
+    builder.add_node("nav_bot", nav_bot_node)
+    builder.add_node("battle_bot", battle_bot_node)
+    builder.add_node("coms_bot", coms_bot_node)
+    builder.add_node("verification", make_verification_node(obj_manager))
+    builder.add_node("map_stitcher_relay", make_map_stitcher_relay_node(vlm))
 
     # ---- Entry point ----
     builder.set_entry_point("dispatch")
