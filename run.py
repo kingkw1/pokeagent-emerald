@@ -116,7 +116,7 @@ def main():
     # Agent configuration
     parser.add_argument("--backend", type=str, default="gemini", 
                        help="VLM backend (openai, gemini, local, openrouter)")
-    parser.add_argument("--model-name", type=str, default="gemini-2.0-flash", 
+    parser.add_argument("--model-name", type=str, default="gemini-2.5-flash", 
                        help="Model name to use")
     parser.add_argument("--simple", action="store_true", 
                        help="Simple mode: direct frame->action without 4-module architecture")

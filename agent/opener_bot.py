@@ -1185,11 +1185,16 @@ class OpenerBot:
                 print(f"🕐 [CLOCK] Clock dialogue detected, pressing A")
                 return ['A']
                 
-            # General dialogue clearing
+            # General dialogue clearing - prefer VLM, fall back to memory-based game_state
             if v.get('visual_elements', {}).get('text_box_visible', False):
                 print(f"🕐 [CLOCK] Text box visible, pressing A")
                 return ['A']
-                
+
+            game_state = s.get('game', {}).get('game_state', '')
+            if game_state == 'dialog':
+                print(f"🕐 [CLOCK] game_state='dialog' (memory fallback), pressing A")
+                return ['A']
+
             return None
 
         def action_special_starter(s, v):
@@ -1583,21 +1588,25 @@ class OpenerBot:
                 if not in_area:
                     return None
                 
-                # Check for dialogue
+                # Check for dialogue - prefer VLM, fall back to memory-based game_state
                 text_box_visible = v.get('visual_elements', {}).get('text_box_visible', False)
-                if not text_box_visible:
+                game_state = s.get('game', {}).get('game_state', '')
+                memory_dialogue = (game_state == 'dialog')
+
+                if not text_box_visible and not memory_dialogue:
                     return None
-                
-                # CRITICAL: Ignore player monologue hallucinations
-                dialogue_text = v.get('on_screen_text', {}).get('dialogue') or ''  # Handle None from hallucination filter
-                is_player_monologue = dialogue_text.strip().upper().startswith('PLAYER:')
-                
-                if is_player_monologue:
-                    print(f"🔍 [TRANS_AREA_DIALOGUE] Player monologue detected - ignoring (likely VLM hallucination)")
-                    return None
-                
+
+                # CRITICAL: Ignore player monologue hallucinations (VLM only; memory fallback skips this)
+                if text_box_visible:
+                    dialogue_text = v.get('on_screen_text', {}).get('dialogue') or ''  # Handle None from hallucination filter
+                    is_player_monologue = dialogue_text.strip().upper().startswith('PLAYER:')
+                    if is_player_monologue:
+                        print(f"🔍 [TRANS_AREA_DIALOGUE] Player monologue detected - ignoring (likely VLM hallucination)")
+                        return None
+
+                source = 'VLM' if text_box_visible else 'memory(game_state=dialog)'
                 # Real dialogue in the area - transition!
-                print(f"🔍 [TRANS_AREA_DIALOGUE] In area, real dialogue detected - transitioning to {next_state}")
+                print(f"🔍 [TRANS_AREA_DIALOGUE] In area, real dialogue detected ({source}) - transitioning to {next_state}")
                 return next_state
             return check_fn
         
@@ -1806,7 +1815,11 @@ class OpenerBot:
                 name='S7_SET_CLOCK',
                 description='Setting the clock and subsequent Mom dialogue',
                 action_fn=action_special_clock,
-                next_state_fn=trans_no_dialogue('S8_NAV_TO_STAIRS_2F')
+                # min_wait_steps=15: when VLM is down, visuals appear clear immediately but
+                # game_state='dialog' is REAL (post-clock Mom dialogue). The default 2-step escape
+                # would prematurely start S8 with dialogue still active. 15 steps gives
+                # action_special_clock time to press A through all post-clock dialogue pages.
+                next_state_fn=trans_no_dialogue('S8_NAV_TO_STAIRS_2F', min_wait_steps=15)
             ),
             # === Phase 3 (Post-Clock): Exit House and Visit Rival ===
             # SPLIT INTO TWO STATES for batched navigation
