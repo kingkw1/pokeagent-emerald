@@ -24,6 +24,11 @@ from agent.pathfinding import pathfind_to_goal
 
 logger = logging.getLogger(__name__)
 
+_DIRECTION_TO_BUTTON = {
+    "north": "UP", "south": "DOWN", "east": "RIGHT", "west": "LEFT",
+    "up": "UP",   "down": "DOWN",  "right": "RIGHT", "left": "LEFT",
+}
+
 
 def nav_bot_node(state: AgentState) -> AgentState:
     """Navigate toward ``goal_coords`` using multi-tier pathfinding.
@@ -39,6 +44,14 @@ def nav_bot_node(state: AgentState) -> AgentState:
         Updated AgentState with ``last_action`` and ``last_buttons`` set.
     """
     goal_coords: Optional[tuple] = state.get("goal_coords")
+    goal_location: Optional[str] = state.get("goal_location") or ""
+
+    # Handle CROSS_BOUNDARY directives: no goal_coords, but a direction to press.
+    if not goal_coords and goal_location.startswith("CROSS_BOUNDARY:"):
+        direction = goal_location.split(":", 1)[1].strip().lower()
+        button = _DIRECTION_TO_BUTTON.get(direction, "LEFT")
+        print(f"[NAVBOT] step={state.get('step_count')}  CROSS_BOUNDARY → {button}")
+        return {**state, "last_action": "NAVIGATE", "last_buttons": [button]}
 
     if not goal_coords:
         logger.debug("[NAVBOT] No goal_coords — passing.")

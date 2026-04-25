@@ -490,10 +490,17 @@ class Agent:
                     directive_raw = Directive.from_dict(directive_raw)
 
                 goal_coords = directive_raw.goal_coords if directive_raw else None
-                goal_location = (
-                    (directive_raw.target_location or directive_raw.location)
-                    if directive_raw else None
-                )
+                # _translate_planner_directive converts NAVIGATE_DIRECTION and CROSS_BOUNDARY
+                # into {'goal_direction': direction, ...} with no goal_coords and no action field.
+                # Detect this by checking goal_direction directly and encode it for nav_bot_node.
+                goal_direction = (directive_raw.goal_direction or "") if directive_raw else ""
+                if goal_direction and goal_coords is None:
+                    goal_location = f"CROSS_BOUNDARY:{goal_direction}"
+                else:
+                    goal_location = (
+                        (directive_raw.target_location or directive_raw.location)
+                        if directive_raw else None
+                    )
                 npc_coords = directive_raw.npc_coords if directive_raw else None
                 should_interact = bool(directive_raw.should_interact) if directive_raw else False
 

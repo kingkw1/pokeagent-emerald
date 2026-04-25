@@ -481,7 +481,7 @@ python run.py --load-state tests/save_states/rival_battle_save.state --agent-aut
 
 *Pass criteria (objective):*
 - [x] Agent reaches (10, 3) ± 1 tile within 15 steps *(2 steps in live run)*
-- [ ] `[NAVBOT]` logged every step *(deferred — requires Phase 4 wiring)*
+- [x] `[NAVBOT]` logged every step *(requires Phase 4 wiring)*
 - [x] A button pressed when adjacent to May
 
 **Result (2026-04-24 → 2026-04-25):** ✅ **PASSING** — the underlying pathfinding
