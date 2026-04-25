@@ -80,7 +80,7 @@ Recovery tasks are consumed at the **top** of `get_next_action_directive()`, pre
 
 ### VLM Integration
 
-The default VLM backend is **Google Gemini Flash** (`gemini-2.0-flash`). The system also supports OpenAI, OpenRouter, Ollama, and local HuggingFace models — selectable via CLI flags.
+The default VLM backend is **Google Gemini Flash** (`gemini-2.5-flash`). The system also supports OpenAI, OpenRouter, Ollama, and local HuggingFace models — selectable via CLI flags.
 
 ## Key Features
 
@@ -257,7 +257,7 @@ python run.py --agent-auto
 | `--load-state PATH` | — | Load a save state on startup |
 | `--load-checkpoint` | off | Resume from the last `.pokeagent_cache/` checkpoint |
 | `--backend NAME` | `gemini` | VLM backend (`gemini`, `openai`, `openrouter`, `local`, `ollama`) |
-| `--model-name NAME` | `gemini-2.0-flash` | Model to use |
+| `--model-name NAME` | `gemini-2.5-flash` | Model to use |
 | `--manual` | off | Start in manual (keyboard) mode |
 | `--headless` | off | Run without the Pygame display |
 | `--simple` | off | Simple mode — direct frame→action without the full 4-module pipeline |

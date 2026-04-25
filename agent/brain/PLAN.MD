@@ -552,6 +552,20 @@ dialogue. Exceptions:
 - **Naming / keyboard screens** — these are menu-driven, not script-driven;
   `script_mode` is not meaningful.
 
+**RAM fallback for routing (separate concern):** `script_idle` governs *when*
+to press A. A distinct, related pattern governs *whether* dialogue is active at
+all when VLM perception has failed. `state_data["game"]["game_state"] == "dialog"`
+is read directly from GBA RAM and is reliable even when VLM times out or returns
+a fallback `overworld` result. `routing_condition` already uses `is_in_dialog`
+(which is this same RAM field) to route to ComsBot — so the router is
+correctly insulated from VLM failures. However, **within** ComsBot's action
+logic, transition functions and action handlers should also consult
+`game_state == 'dialog'` as a fallback when `text_box_visible` (VLM-sourced)
+is `False`. Without this, a VLM timeout causes the bot to treat active dialogue
+as overworld, skipping A presses and blocking movement indefinitely. See
+`trans_area_and_dialogue()` and `action_special_clock()` in `agent/opener_bot.py`
+for the reference implementation of this dual-check pattern.
+
 ### 3.3 VerificationNode
 
 Reads RAM after each action. If the current milestone's `completion_condition`
