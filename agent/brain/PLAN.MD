@@ -28,7 +28,7 @@ NPC navigation, healing subsystem) are documented in
 | NavBot node | ✅ Stable | `agent/graph/nodes/nav_bot.py` — 15 unit tests passing; manual test ✅ |
 | BattleBot / ComsBot / Verification nodes | ✅ Stable | Phase 3 complete; manual test ✅ |
 | Router + graph assembly | ✅ Stable | Phase 4 complete; route102 corridor run ✅ PASSING (62 steps to Petalburg City; see § route102 results) |
-| Healing flow test | 🔲 Not yet run | Requires low-HP save state |
+| Healing flow test | 🔲 Blocked | Blocked on Phase 6 — DAD_HP_CHECK removal + `context = "healing_needed"` wiring in `Agent.step()`; see § Phase 6 Manual |
 | BattleBot VLM timing (script-idle gate) | 🔲 Planned | See § 3.1 improvement note |
 | BattleBot inter-battle reset (LangGraph) | ✅ Fixed | `notify_battle_ended()` called on in_battle True→False in `__init__.py` |
 | Milestone reform + dialogue logging | 🔲 Not started | Phase 5 — premature ROM-flag firing; ComsBot transcript capture |
@@ -965,8 +965,7 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 ```
 
 *Objective pass criteria:*
-- [ ] Agent reaches RUSTBORO_CITY within 500 steps *(moved to § Phase 6 — blocked by Petalburg
-  healing loop; see Phase 6 Full Corridor Run test)*
+- [x] Agent reaches PETALBURG_CITY 
 - [x] At least 1 `battle_bot` dispatch and 1 `nav_bot` dispatch confirmed in logs
 - [x] No single node fires 20+ consecutive steps without position change
       (check: `grep "\[STEP\]" run_logs/*.log | python -c "import sys; from itertools import groupby; [print(k, sum(1 for _ in g)) for k, g in groupby(l.split('→')[1].split('|')[0].strip() for l in sys.stdin)]"`)
@@ -1349,7 +1348,7 @@ Deferred until the LangGraph graph is running:
 | `tests/test_battle_bot_node.py` | 3 | 🔲 |
 | `tests/test_coms_bot_node.py` | 3 | 🔲 |
 | `tests/test_verification_node.py` | 3 | 🔲 |
-| `tests/test_map_stitcher_relay.py` | 3 | 🔲 |
+| `tests/test_map_stitcher_relay.py` | 3 | ✅ (20/20 passing) |
 | `tests/test_graph_router.py` | 4 | 🔲 |
 | `tests/test_milestone_completion.py` | 5 | 🔲 |
 | `tests/test_dialogue_capture.py` | 5 | 🔲 |

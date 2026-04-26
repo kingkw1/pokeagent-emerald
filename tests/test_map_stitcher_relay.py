@@ -2,9 +2,10 @@
 Tests for Phase 3 — MapStitcherRelay node.
 
 Covers:
-  TestPixelToTile       — pixel-to-tile coordinate conversion
-  TestOffCenterPokeCenter — off-centre pixel offsets translate correctly
-  TestContextReset      — output state fields are set correctly
+  TestLocationGraphLookup — location_graph coordinate path (no VLM)
+  TestPixelToTile         — VLM fallback pixel-to-tile coordinate conversion
+  TestOffCenterPokeCenter — VLM fallback off-centre pixel offsets
+  TestContextReset        — output state fields are set correctly
 """
 
 from __future__ import annotations
@@ -23,11 +24,17 @@ from agent.graph.state import AgentState
 
 
 def _make_state(**overrides) -> AgentState:
-    """Return a minimal valid AgentState for map-stitcher-relay scenarios."""
+    """Return a minimal valid AgentState for map-stitcher-relay scenarios.
+
+    Default location is "UNKNOWN_CITY_XYZ" — deliberately absent from
+    location_graph so VLM-fallback tests exercise the VLM path.
+    Use ``state_data={"player": {"location": "PETALBURG CITY", ...}}``
+    overrides for location_graph path tests.
+    """
     base: AgentState = {
         "frame": MagicMock(),   # simulate a PIL Image
         "state_data": {
-            "player": {"position": {"x": 10, "y": 10}, "location": "ROUTE_101"},
+            "player": {"position": {"x": 10, "y": 10}, "location": "UNKNOWN_CITY_XYZ"},
             "game": {},
         },
         "perception": {},
@@ -54,7 +61,101 @@ def _mock_stitcher_no_overhead() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# TestPixelToTile
+# TestLocationGraphLookup
+# ---------------------------------------------------------------------------
+
+
+def _make_city_state(location: str, player_x: int = 10, player_y: int = 10) -> AgentState:
+    """State helper with a real city location for location_graph path tests."""
+    state = _make_state()
+    state["state_data"] = {
+        "player": {"position": {"x": player_x, "y": player_y}, "location": location},
+        "game": {},
+    }
+    return state
+
+
+class TestLocationGraphLookup:
+    """location_graph path: no VLM call, deterministic coords from graph data."""
+
+    def test_petalburg_city_returns_pc_entrance(self):
+        """Petalburg City → PC entrance at (6, 8)."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("Petalburg City")
+        result = node(state)
+        assert result["goal_coords"] == (6, 8)
+        assert result["last_action"] == "HEAL_ROUTE"
+        assert result["context"] == "navigation"
+        mock_vlm.get_query.assert_not_called()
+
+    def test_petalburg_city_normalises_spaces(self):
+        """Location with spaces is normalised before lookup."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        # Game state returns location with spaces and mixed case
+        state = _make_city_state("PETALBURG CITY")
+        result = node(state)
+        assert result["goal_coords"] == (6, 8)
+        mock_vlm.get_query.assert_not_called()
+
+    def test_petalburg_city_sets_goal_location(self):
+        """goal_location is the PC graph key after location_graph lookup."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("Petalburg City")
+        result = node(state)
+        assert result["goal_location"] == "PETALBURG_CITY_POKEMON_CENTER_1F"
+
+    def test_oldale_town_returns_pc_entrance(self):
+        """Oldale Town → PC entrance at (6, 16)."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("OLDALE TOWN")
+        result = node(state)
+        assert result["goal_coords"] == (6, 16)
+        mock_vlm.get_query.assert_not_called()
+
+    def test_rustboro_city_returns_pc_entrance(self):
+        """Rustboro City → PC entrance at (16, 38)."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("RUSTBORO CITY")
+        result = node(state)
+        assert result["goal_coords"] == (16, 38)
+        mock_vlm.get_query.assert_not_called()
+
+    def test_player_position_not_used_for_coords(self):
+        """goal_coords comes from graph, not relative to player position."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        # Player at a wildly different position — coords should still be (6, 8)
+        state = _make_city_state("PETALBURG CITY", player_x=99, player_y=99)
+        result = node(state)
+        assert result["goal_coords"] == (6, 8)
+
+    def test_goal_coords_is_tuple(self):
+        """goal_coords from location_graph is a tuple, not a list."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("PETALBURG CITY")
+        result = node(state)
+        assert isinstance(result["goal_coords"], tuple)
+
+    def test_non_output_fields_unchanged(self):
+        """milestone_index and step_count are untouched."""
+        mock_vlm = MagicMock()
+        node = make_map_stitcher_relay_node(mock_vlm)
+        state = _make_city_state("PETALBURG CITY")
+        state["milestone_index"] = 7
+        state["step_count"] = 42
+        result = node(state)
+        assert result["milestone_index"] == 7
+        assert result["step_count"] == 42
+
+
+# ---------------------------------------------------------------------------
+# TestPixelToTile  (VLM fallback — location not in graph)
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +201,7 @@ class TestPixelToTile:
 
 
 # ---------------------------------------------------------------------------
-# TestOffCenterPokeCenter
+# TestOffCenterPokeCenter  (VLM fallback — location not in graph)
 # ---------------------------------------------------------------------------
 
 
@@ -161,7 +262,7 @@ class TestOffCenterPokeCenter:
 
 
 # ---------------------------------------------------------------------------
-# TestContextReset
+# TestContextReset  (covers both paths)
 # ---------------------------------------------------------------------------
 
 
