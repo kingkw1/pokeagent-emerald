@@ -811,47 +811,10 @@ static menu frame. See the improvement note in § 3.1 below.
 
 ---
 
-**Manual — Healing Flow Test:**
-
-*Purpose:* Confirm MapStitcherRelay routes the agent to a PokeCenter when HP
-is below threshold.
-
-*Setup — create a low-HP state (choose one):*
-```bash
-# Option A: fight manually until HP < 50%
-python run.py --load-state Emerald-GBAdvance/route102_hackathon.state --manual
-
-# Option B: temporarily lower the threshold to trigger immediately
-# In agent/graph/router.py: HP_HEAL_THRESHOLD = 1.0
-```
-
-*Command:*
-```bash
-python run.py --load-state [low_hp_save] --agent-auto --max-steps 300
-```
-
-*Observe:*
-- `[HEALING]` trigger log when HP threshold crossed
-- `[MAP_STITCHER_RELAY]` fires — logs stitched map VLM call
-- VLM response includes pixel coordinates
-- `goal_coords` updated to PokeCenter tile
-- `[NAVBOT]` routes toward PokeCenter
-- `[COMS_BOT]` fires on Nurse Joy dialogue
-- Party HP = max after exit
-
-*Pass criteria:*
-- [ ] Healing triggered when any party member HP < threshold
-- [ ] Agent navigates to the correct PokeCenter for the current city
-- [ ] Party HP is full after Nurse Joy interaction
-- [ ] Agent exits PokeCenter and resumes prior navigation goal
-
-*Fail indicators:*
-- Healing never triggers: check `routing_condition` HP threshold logic
-- Wrong building targeted: pixel-to-tile conversion off — log `player x/y`
-  and the raw VLM `center_x/center_y` to diagnose
-- Agent stuck inside PokeCenter: exit warp detection not firing
-
-**Status (2026-04-25):** 🔲 **NOT YET RUN** — requires a low-HP save state.
+> **Healing Flow Test** — Originally written here after § 3.4 MapStitcherRelay implementation.
+> Moved to **§ Phase 6** (Healing System Unification) because it requires DAD_HP_CHECK removal
+> and `context = "healing_needed"` wiring in `Agent.step()` before it can produce meaningful
+> results. See *Phase 6 Manual — Healing Smoke Test* for the full test spec and current status.
 
 ---
 
@@ -1002,7 +965,8 @@ python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
 ```
 
 *Objective pass criteria:*
-- [ ] Agent reaches RUSTBORO_CITY within 500 steps
+- [ ] Agent reaches RUSTBORO_CITY within 500 steps *(moved to § Phase 6 — blocked by Petalburg
+  healing loop; see Phase 6 Full Corridor Run test)*
 - [x] At least 1 `battle_bot` dispatch and 1 `nav_bot` dispatch confirmed in logs
 - [x] No single node fires 20+ consecutive steps without position change
       (check: `grep "\[STEP\]" run_logs/*.log | python -c "import sys; from itertools import groupby; [print(k, sum(1 for _ in g)) for k, g in groupby(l.split('→')[1].split('|')[0].strip() for l in sys.stdin)]"`)
@@ -1272,16 +1236,78 @@ class TestLastCityVisited:
 
 **Manual — Healing Smoke Test:**
 
-*Setup:* Load a save state with party HP < 100% in Petalburg City.
+*(Originally written in § 3.4 after MapStitcherRelay implementation; moved here because it
+requires Phase 6 — DAD_HP_CHECK removal + `context = "healing_needed"` wiring in
+`Agent.step()` — before it can produce meaningful results.)*
+
+*Purpose:* Confirm the unified healing system routes the agent to a PokéCenter when HP is
+below threshold, using the location_graph lookup (no VLM call).
+
+*Setup — create a low-HP state (choose one):*
+```bash
+# Option A: fight manually until HP < 50%
+python run.py --load-state Emerald-GBAdvance/route102_hackathon.state --manual
+
+# Option B: temporarily lower the threshold to trigger immediately
+# In agent/objective_manager.py: HP_HEAL_THRESHOLD = 1.0
+```
+
+*Command:*
+```bash
+python run.py --load-state [low_hp_save] --agent-auto --max-steps 300
+```
+
+*Observe:*
+- `[HEALING]` trigger log when HP threshold crossed (not `[DAD HP]`)
+- `[MAP_STITCHER_RELAY]` fires — logs location_graph lookup, no VLM delay
+- `goal_coords` updated to PokéCenter entrance tile from graph
+- `[NAVBOT]` routes toward PokéCenter
+- `[COMS_BOT]` fires on Nurse Joy dialogue
+- Party HP = max after exit
 
 *Pass criteria:*
-- [ ] Router routes to `map_stitcher_relay` immediately
-- [ ] `map_stitcher_relay` looks up Petalburg City PC coords from location_graph
-  (no VLM call, no 2-second delay)
-- [ ] `[NAVBOT]` navigates to PC entrance
-- [ ] Nurse Joy dialogue completes; party HP restored to max
-- [ ] Agent exits PC and resumes prior navigation goal
 - [ ] `DAD_HP_CHECK` code no longer present / no longer fires
+- [ ] `map_stitcher_relay` looks up PokéCenter coords from location_graph (no VLM call, no 2-second delay)
+- [ ] Healing triggered when any party member HP < threshold in a city/town
+- [ ] Agent navigates to the correct PokéCenter for the current city
+- [ ] Party HP is full after Nurse Joy interaction
+- [ ] Agent exits PokéCenter and resumes prior navigation goal
+
+*Fail indicators:*
+- `[DAD HP]` still appears in logs: DAD_HP_CHECK not fully removed
+- Healing never triggers: check `needs_healing()` predicate and `Agent.step()` context wiring
+- Wrong building targeted: location_graph missing city — check `find_nearest_pokemon_center()` return value
+- Agent stuck inside PokéCenter: exit warp detection not firing
+
+**Status:** 🔲 **NOT YET RUN** — blocked on Phase 6 implementation (remove DAD_HP_CHECK, wire
+`context = "healing_needed"` in `Agent.step()`).
+
+---
+
+**Manual — Full Corridor Run (Route 102 → Rustboro City):**
+
+*(The `[ ] Agent reaches RUSTBORO_CITY` criterion was originally the first pass criterion of
+the § Phase 4 Manual Full Run test. Moved here because completing the full corridor requires
+healing to work — the agent currently loops between DAD_HP_CHECK and Petalburg Gym before
+reaching Route 104 South. All other Phase 4 criteria were ✅ confirmed in the route102 run
+at 62 steps to Petalburg City.)*
+
+*Purpose:* Confirm the agent completes the entire opening corridor — Route 102 → Oldale Town
+→ Petalburg City (gym dialogue + healing) → Route 104 → Rustboro City — end-to-end.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
+    --agent-auto --max-steps 500
+```
+
+*Pass criteria:*
+- [ ] Agent reaches RUSTBORO_CITY within 500 steps
+- [ ] Healing triggers in Petalburg City (if HP < threshold) → PokéCenter, not gym
+- [ ] `DAD_FIRST_MEETING` milestone completes only after Norman dialogue, not on gym map entry
+- [ ] Agent proceeds from Petalburg to Route 104 South after gym dialogue
+
+**Status:** 🔲 **BLOCKED** — requires Phase 5 (milestone reform) + Phase 6 (healing unification).
 
 ---
 
