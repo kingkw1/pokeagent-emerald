@@ -65,7 +65,11 @@ def nav_bot_node(state: AgentState) -> AgentState:
     player_pos = state_data.get("player", {}).get("position", {})
     pos_x = player_pos.get("x", "?")
     pos_y = player_pos.get("y", "?")
-    print(f"[NAVBOT] step={state.get('step_count')}  pos=({pos_x}, {pos_y})  goal=({goal_x}, {goal_y})")
+    goal_desc = state.get("goal_description") or ""
+    milestone_label = state.get("active_milestone") or ""
+    desc_suffix = f"  ← {goal_desc}" if goal_desc else ""
+    ms_suffix = f"  [{milestone_label}]" if milestone_label else ""
+    print(f"[NAVBOT] step={state.get('step_count')}  pos=({pos_x}, {pos_y})  goal=({goal_x}, {goal_y}){ms_suffix}{desc_suffix}")
 
     # pathfind_to_goal calls update_npc_obstacles internally.
     # Pass npc_coords so the target NPC's tile stays walkable.
@@ -76,7 +80,25 @@ def nav_bot_node(state: AgentState) -> AgentState:
         npc_coords=npc_coords,
     ) or []
 
-    # Append A-press when the player is adjacent to the target NPC.
+    # Fallback: when all A* tiers fail, push one step toward the goal so the
+    # agent keeps moving and expands the explored map.  This prevents the
+    # agent from returning an empty action list (which causes the client to
+    # skip the frame, leaving the agent permanently stuck when the map hasn't
+    # been explored in the goal direction yet).
+    if not buttons:
+        dx = goal_x - (pos_x if isinstance(pos_x, int) else int(pos_x))
+        dy = goal_y - (pos_y if isinstance(pos_y, int) else int(pos_y))
+        if abs(dy) >= abs(dx):
+            fallback_dir = "DOWN" if dy > 0 else "UP"
+        else:
+            fallback_dir = "RIGHT" if dx > 0 else "LEFT"
+        print(f"[NAVBOT] ⚠️ pathfinding failed — directional fallback: {fallback_dir}")
+        buttons = [fallback_dir]
+
+    # When adjacent to the target NPC, face it then press A.
+    # Prepending the face-direction is safe: pressing a direction button when
+    # already facing that way does nothing except confirm the facing, then A
+    # interacts correctly.
     if should_interact and npc_coords:
         px = player_pos.get("x")
         py = player_pos.get("y")
@@ -84,7 +106,20 @@ def nav_bot_node(state: AgentState) -> AgentState:
         if px is not None and py is not None:
             dist = abs(int(px) - nx) + abs(int(py) - ny)
             if dist <= 1:
-                logger.debug("[NAVBOT] Adjacent to NPC at (%s, %s) — appending A.", nx, ny)
-                buttons = list(buttons) + ["A"]
+                dx = nx - int(px)
+                dy = ny - int(py)
+                if dy < 0:
+                    face = "UP"
+                elif dy > 0:
+                    face = "DOWN"
+                elif dx > 0:
+                    face = "RIGHT"
+                else:
+                    face = "LEFT"
+                logger.debug("[NAVBOT] Adjacent to NPC at (%s, %s) — facing %s then A.", nx, ny, face)
+                # REPLACE movement buttons: already adjacent, just face and A.
+                # Appending would double-move (e.g. RIGHT + RIGHT + A) when
+                # pathfinding already queued a step toward the NPC's tile.
+                buttons = [face, "A"]
 
     return {**state, "last_action": "NAVIGATE", "last_buttons": buttons}

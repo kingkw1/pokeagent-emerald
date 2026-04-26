@@ -384,7 +384,7 @@ LOCATION_GRAPH: Dict[str, Dict[str, Any]] = {
                 "type": "warp_tile",
                 "direction": "interact",
                 "entry_coords": (7, 9),
-                "exit_coords": (6, 8),     # Pokemon Center door
+                "exit_coords": (20, 16),   # PC door tile — step UP onto this to trigger warp (confirmed from warp log)
                 "description": "Enter Pokemon Center",
                 "requirements": None,
             },

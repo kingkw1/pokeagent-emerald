@@ -31,7 +31,7 @@ NPC navigation, healing subsystem) are documented in
 | Healing flow test | 🔲 Blocked | Blocked on Phase 6 — DAD_HP_CHECK removal + `context = "healing_needed"` wiring in `Agent.step()`; see § Phase 6 Manual |
 | BattleBot VLM timing (script-idle gate) | 🔲 Planned | See § 3.1 improvement note |
 | BattleBot inter-battle reset (LangGraph) | ✅ Fixed | `notify_battle_ended()` called on in_battle True→False in `__init__.py` |
-| Milestone reform + dialogue logging | 🔲 Not started | Phase 5 — premature ROM-flag firing; ComsBot transcript capture |
+| Milestone reform + dialogue logging | ✅ Stable | Phase 5 — completion_type gating, TransitionEvaluator, ComsBot transcript capture |
 | Healing system unification | 🔲 Not started | Phase 6 — replace DAD_HP_CHECK + VLM PokéCenter search with location_graph lookup |
 | Karpathy meta-agent + RewardVector | 🔲 Deferred | See [`KARPATHY_PLAN.MD`](KARPATHY_PLAN.MD) — after main-game completion |
 

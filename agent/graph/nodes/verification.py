@@ -10,6 +10,20 @@ action the node re-reads RAM via
 ``ObjectiveManager.check_storyline_milestones()`` and advances the progression
 counter when the current milestone is satisfied.
 
+Phase 5.1 — completion_type gating
+-----------------------------------
+Each milestone in ``MILESTONE_PROGRESSION`` now carries a ``completion_type``
+field:
+
+* ``"location"`` / ``"battle"`` — existing behaviour: ROM flag in
+  ``state_data["milestones"]`` drives completion (via
+  ``check_storyline_milestones``).
+* ``"dialogue"`` — ROM flag is treated as a scene *trigger* only
+  (``check_storyline_milestones`` skips auto-completion for these).
+  Advancement only happens when ``state["dialogue_completed"] == True``,
+  which is set by ``Agent.step()`` on the dialogue→navigation transition
+  after ``TransitionEvaluator`` confirms the expected keywords were spoken.
+
 Usage
 -----
 ::
@@ -55,18 +69,44 @@ def make_verification_node(
             return state
 
         milestone = MILESTONE_PROGRESSION[idx]
+        milestone_id: str = milestone["milestone"]
+        completion_type: str = milestone.get("completion_type", "location")
         state_data: dict = state.get("state_data") or {}
 
-        # Drive RAM-based auto-completion for objectives tied to emulator flags.
-        # check_storyline_milestones also calls mark_goal_complete internally
-        # when it detects completion, so we do not need to call it separately.
+        # ------------------------------------------------------------------
+        # Phase 5.1: dialogue-type milestones
+        # ------------------------------------------------------------------
+        if completion_type == "dialogue":
+            if state.get("dialogue_completed"):
+                logger.info(
+                    "[VERIFICATION] Dialogue milestone '%s' confirmed complete "
+                    "(dialogue_completed=True) — advancing index %s → %s.",
+                    milestone_id,
+                    idx,
+                    idx + 1,
+                )
+                obj_manager.mark_goal_complete(
+                    milestone_id,
+                    description=milestone.get("description", ""),
+                    state_data=state_data,
+                )
+                # Reset dialogue_completed so the flag is not re-consumed next step.
+                return {**state, "milestone_index": idx + 1, "dialogue_completed": False}
+
+            logger.debug(
+                "[VERIFICATION] Dialogue milestone '%s' waiting for dialogue_completed flag.",
+                milestone_id,
+            )
+            return state
+
+        # ------------------------------------------------------------------
+        # location / battle milestones — existing ROM-flag behaviour
+        # ------------------------------------------------------------------
         try:
             obj_manager.check_storyline_milestones(state_data)
         except Exception as exc:
             logger.warning("[VERIFICATION] check_storyline_milestones error: %s", exc)
 
-        # Check whether the current milestone is now recorded as complete.
-        milestone_id: str = milestone["milestone"]
         if obj_manager.completed_goals.get(milestone_id, False):
             logger.info(
                 "[VERIFICATION] Milestone '%s' complete — advancing index %s → %s.",
@@ -79,3 +119,4 @@ def make_verification_node(
         return state
 
     return verification_node
+

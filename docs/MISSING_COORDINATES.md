@@ -71,7 +71,7 @@ This document tracks coordinates that need to be verified or filled in from actu
 - ⚠️ Entry from Route 104 South: `(17, 27)` - estimated, needs verification
 - ⚠️ Gym door: `(15, 8)` - from gameplay script, needs verification
 - ⚠️ Gym door (inside): `(4, 112)` - from gameplay script, needs verification (unusual Y value)
-- ⚠️ Pokemon Center door: `(6, 8)` - estimated, needs verification
+- ⚠️ Pokemon Center door: `(23, 8)` - estimated (was 6,8 — clearly wrong; gym is at 15,8 so PC must be east of gym, closer to Route 102 entry)
 - ⚠️ Pokemon Center door (inside): `(7, 9)` - estimated, needs verification
 
 ## PETALBURG CITY GYM

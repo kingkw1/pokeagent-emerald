@@ -1327,22 +1327,37 @@ class EmeraldEmulator:
                     return "PETALBURG" in str(location).upper()
                 return False
             elif milestone_id == "DAD_FIRST_MEETING":
-                # Meeting Dad happens in Petalburg Gym
+                # Meeting Dad happens in Petalburg Gym, but the ROM script flag
+                # fires the instant the gym MAP loads — before any dialogue.
+                # To avoid premature completion, require the player to have
+                # RETURNED to Petalburg City after entering the gym.
+                # This guarantees the scripted Norman cutscene ran.
                 if game_state:
                     # Must have visited Petalburg City first
                     if not self.milestone_tracker.is_completed("PETALBURG_CITY"):
                         return False
                     location = game_state.get("player", {}).get("location", "")
-                    return "PETALBURG CITY GYM" in str(location).upper() or "PETALBURG_CITY_GYM" in str(location).upper()
+                    loc_upper = str(location).upper()
+                    in_gym = "PETALBURG CITY GYM" in loc_upper or "PETALBURG_CITY_GYM" in loc_upper
+                    in_city = "PETALBURG CITY" in loc_upper and not in_gym
+                    # Track that the player has entered the gym at least once
+                    if in_gym:
+                        self._petalburg_gym_visited_for_dad = True
+                    # Fire only after the player has LEFT the gym (post-cutscene exit)
+                    return in_city and getattr(self, '_petalburg_gym_visited_for_dad', False)
                 return False
             elif milestone_id == "GYM_EXPLANATION":
-                # Gym explanation happens after meeting Dad in the gym
+                # Gym explanation (Wally tutorial) happens after meeting Dad.
+                # Require DAD_FIRST_MEETING completed AND the player has
+                # subsequently returned to the city (same exit-after-entry logic).
                 if game_state:
-                    # Must have met Dad and still be in gym
                     if not self.milestone_tracker.is_completed("DAD_FIRST_MEETING"):
                         return False
                     location = game_state.get("player", {}).get("location", "")
-                    return "PETALBURG CITY GYM" in str(location).upper() or "PETALBURG_CITY_GYM" in str(location).upper()
+                    loc_upper = str(location).upper()
+                    in_gym = "PETALBURG CITY GYM" in loc_upper or "PETALBURG_CITY_GYM" in loc_upper
+                    # Player must be outside the gym after DAD_FIRST_MEETING completed
+                    return not in_gym
                 return False
                 
             # Phase 6: Pre-Gym Preparation milestones

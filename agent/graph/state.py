@@ -219,3 +219,25 @@ class AgentState(TypedDict, total=False):
     # ---- Telemetry ----
     telemetry: Optional[TelemetrySnapshot]
     """Populated by TelemetryLogger.end_step() after each graph.invoke()."""
+
+    # ---- Phase 5: Dialogue completion tracking ----
+    dialogue_completed: Optional[bool]
+    """True on the step immediately after a dialogue session ends and
+    TransitionEvaluator confirmed the milestone keywords were spoken.
+    Set by Agent.step() on the dialogue→navigation transition;
+    consumed (and reset) by verification_node."""
+
+    dialogue_transcript: list
+    """Ordered list of dialogue turns captured this session.
+    Each entry: {\"speaker\": str, \"text\": str, \"step\": int}.
+    Accumulated by coms_bot_node when a VLM instance is available."""
+
+    # ---- Navigation goal observability ----
+    goal_description: Optional[str]
+    """Short human-readable description of what the nav_bot is currently
+    navigating toward (e.g. 'Enter Petalburg Gym to meet Dad').
+    Populated by Agent.step() from the active directive's description field."""
+
+    active_milestone: Optional[str]
+    """ID of the milestone the agent is currently working toward
+    (e.g. 'DAD_FIRST_MEETING').  Printed by nav_bot_node for observability."""

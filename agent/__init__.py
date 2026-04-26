@@ -49,7 +49,7 @@ from .brain.npc_registry import NpcRegistry
 from .brain.planner import RecoveryPlanner
 from .brain.strategic_planner import StrategicPlanner
 from .brain.walkthrough_db import WalkthroughDB
-from .objective_manager import ObjectiveManager
+from .objective_manager import ObjectiveManager, MILESTONE_PROGRESSION
 from utils.backup_manager import BackupManager
 
 # Set up module logging
@@ -147,7 +147,12 @@ class Agent:
 
             # ── Phase 4: LangGraph dispatch graph ──────────────────────
             from agent.graph.graph import build_graph
-            self._graph = build_graph(self.objective_manager, self.vlm)
+            from agent.graph.transition_evaluator import TransitionEvaluator
+            from agent.graph.nodes.coms_bot import get_session_transcript, clear_session_transcript
+            self._get_session_transcript = get_session_transcript
+            self._clear_session_transcript = clear_session_transcript
+            self._transition_evaluator = TransitionEvaluator(vlm=self.vlm)
+            self._graph = build_graph(self.objective_manager, self.vlm, self.episodic_memory)
             self._step_count: int = 0
             self._prev_state_snapshot: dict | None = None
             self._graph_milestone_index: int = 0
@@ -401,6 +406,36 @@ class Agent:
                     self.position_history = [current_position]
                 self._was_in_dialogue_for_stuck = in_dialogue_now
 
+                # ── Phase 5.2: TransitionEvaluator — dialogue milestone completion ──
+                dialogue_completed = False
+                if hasattr(self, '_transition_evaluator'):
+                    prev_in_dialogue = getattr(self, '_prev_in_dialogue_for_transition', False)
+                    if prev_in_dialogue and not in_dialogue_now:
+                        # Dialogue session just ended — evaluate the accumulated transcript.
+                        transcript = self._get_session_transcript()
+                        self._clear_session_transcript()
+                        if transcript:
+                            ms_idx = self._graph_milestone_index
+                            if ms_idx < len(MILESTONE_PROGRESSION):
+                                current_ms = MILESTONE_PROGRESSION[ms_idx]
+                                if current_ms.get("completion_type") == "dialogue":
+                                    verdict = self._transition_evaluator.evaluate(
+                                        milestone_id=current_ms["milestone"],
+                                        milestone_description=current_ms.get("description", ""),
+                                        keywords=current_ms.get("dialogue_keywords", []),
+                                        transcript=transcript,
+                                    )
+                                    dialogue_completed = (verdict == "YES")
+                                    logger.info(
+                                        "[AGENT] TransitionEvaluator verdict for '%s': %s",
+                                        current_ms["milestone"], verdict,
+                                    )
+                                    print(
+                                        f"🎯 [PHASE5] Dialogue milestone '{current_ms['milestone']}': "
+                                        f"verdict={verdict}, completed={dialogue_completed}"
+                                    )
+                    self._prev_in_dialogue_for_transition = in_dialogue_now
+
                 pos_x, pos_y, pos_loc = current_position
                 # TITLE_SEQUENCE always has position (0,0) — it's not real navigation.
                 # Oscillation detection here is a false positive; skip it entirely.
@@ -509,6 +544,12 @@ class Agent:
                 npc_coords = directive_raw.npc_coords if directive_raw else None
                 should_interact = bool(directive_raw.should_interact) if directive_raw else False
 
+                # Observability: extract goal description and active milestone for navbot logging.
+                goal_description = (directive_raw.description or "") if directive_raw else ""
+                active_milestone = (directive_raw.milestone or "") if directive_raw else ""
+                if active_milestone or goal_description:
+                    print(f"🎯 [GOAL] milestone={active_milestone}  → {goal_description}")
+
                 # Derive routing context from the reliable VLM-based signal.
                 # The RAM in_dialog flag is unreliable (save states can have
                 # residual script context with non-zero mode values) so we use
@@ -538,6 +579,10 @@ class Agent:
                     last_buttons=[],
                     step_count=self._step_count,
                     telemetry=None,
+                    dialogue_completed=dialogue_completed,
+                    dialogue_transcript=[],
+                    goal_description=goal_description,
+                    active_milestone=active_milestone,
                 )
 
                 result = self._graph.invoke(agent_state)

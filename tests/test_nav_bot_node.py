@@ -91,7 +91,13 @@ class TestNavBotNodeBasic:
         assert result["context"] == "navigation"
 
     def test_pathfind_returns_none_yields_empty_buttons(self):
-        """If pathfind_to_goal returns None, last_buttons is empty list."""
+        """If pathfind_to_goal returns None, nav_bot uses a directional fallback.
+
+        The fallback moves one step toward the goal to keep the agent moving and
+        expand the explored map even when A* has no solution.
+        The default _make_state places the player at (5, 5); goal is (10, 3).
+        dx=5, dy=-2 → abs(dx) > abs(dy) → fallback direction is 'RIGHT'.
+        """
         state = _make_state(goal_coords=(10, 3))
         with patch(
             "agent.graph.nodes.nav_bot.pathfind_to_goal",
@@ -99,7 +105,7 @@ class TestNavBotNodeBasic:
         ):
             result = nav_bot_node(state)
         assert result["last_action"] == "NAVIGATE"
-        assert result["last_buttons"] == []
+        assert result["last_buttons"] == ["RIGHT"]
 
 
 # ---------------------------------------------------------------------------

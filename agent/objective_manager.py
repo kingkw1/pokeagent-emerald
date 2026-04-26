@@ -49,62 +49,90 @@ OPENING_SEQUENCE_LAST_INDEX = 18  # GYM_EXPLANATION (index 18)
 
 MILESTONE_PROGRESSION = [
     # [0-2] SPLIT 01: Game start
-    {"milestone": "GAME_RUNNING", "target_location": None, "description": "Game initialized"},
-    {"milestone": "PLAYER_NAME_SET", "target_location": None, "description": "Player named"},
-    {"milestone": "INTRO_CUTSCENE_COMPLETE", "target_location": None, "description": "Intro complete"},
-    
+    {"milestone": "GAME_RUNNING", "completion_type": "location", "target_location": None, "description": "Game initialized"},
+    {"milestone": "PLAYER_NAME_SET", "completion_type": "location", "target_location": None, "description": "Player named"},
+    {"milestone": "INTRO_CUTSCENE_COMPLETE", "completion_type": "location", "target_location": None, "description": "Intro complete"},
+
     # [3-7] SPLIT 02: Tutorial sequence
-    {"milestone": "LITTLEROOT_TOWN", "target_location": "LITTLEROOT_TOWN", "description": "Arrive in Littleroot"},
-    {"milestone": "PLAYER_HOUSE_ENTERED", "target_location": None, "description": "Enter player house"},
-    {"milestone": "PLAYER_BEDROOM", "target_location": None, "description": "Go upstairs to bedroom"},
-    {"milestone": "RIVAL_HOUSE", "target_location": None, "description": "Visit rival's house"},
-    {"milestone": "RIVAL_BEDROOM", "target_location": None, "description": "Go to rival's bedroom"},
-    
+    {"milestone": "LITTLEROOT_TOWN", "completion_type": "location", "target_location": "LITTLEROOT_TOWN", "description": "Arrive in Littleroot"},
+    {"milestone": "PLAYER_HOUSE_ENTERED", "completion_type": "location", "target_location": None, "description": "Enter player house"},
+    {"milestone": "PLAYER_BEDROOM", "completion_type": "location", "target_location": None, "description": "Go upstairs to bedroom"},
+    {"milestone": "RIVAL_HOUSE", "completion_type": "location", "target_location": None, "description": "Visit rival's house"},
+    {"milestone": "RIVAL_BEDROOM", "completion_type": "location", "target_location": None, "description": "Go to rival's bedroom"},
+
     # [8-10] SPLIT 03: Getting starter
-    {"milestone": "ROUTE_101", "target_location": "ROUTE_101", "description": "Find Prof. Birch on Route 101"},
-    {"milestone": "STARTER_CHOSEN", "target_location": None, "description": "Choose starter Pokemon"},
-    {"milestone": "BIRCH_LAB_VISITED", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Visit Birch's Lab"},
-    
+    {"milestone": "ROUTE_101", "completion_type": "location", "target_location": "ROUTE_101", "description": "Find Prof. Birch on Route 101"},
+    {"milestone": "STARTER_CHOSEN", "completion_type": "location", "target_location": None, "description": "Choose starter Pokemon"},
+    {"milestone": "BIRCH_LAB_VISITED", "completion_type": "location", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Visit Birch's Lab"},
+
     # [11-14] SPLIT 03: Rival battle sequence & Return to lab for Pokedex
-    {"milestone": "OLDALE_TOWN", "target_location": "OLDALE_TOWN", "description": "Travel to Oldale Town"},
-    {"milestone": "ROUTE_103", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Go to Route 103"},
-    {"milestone": "RIVAL_BATTLE_1", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Battle rival May", "special": "rival_battle"},
-    {"milestone": "RECEIVED_POKEDEX", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Return to Birch for Pokedex"},
-    
+    {"milestone": "OLDALE_TOWN", "completion_type": "location", "target_location": "OLDALE_TOWN", "description": "Travel to Oldale Town"},
+    {"milestone": "ROUTE_103", "completion_type": "location", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Go to Route 103"},
+    {"milestone": "RIVAL_BATTLE_1", "completion_type": "battle", "target_location": "ROUTE_103", "target_coords_fn": lambda: get_poi_coords("ROUTE_103", "rival_may"), "description": "Battle rival May", "special": "rival_battle"},
+    {"milestone": "RECEIVED_POKEDEX", "completion_type": "location", "target_location": "PROFESSOR_BIRCHS_LAB", "description": "Return to Birch for Pokedex"},
+
     # [15-18] SPLIT 04: Petalburg City sequence
-    {"milestone": "ROUTE_102", "target_location": "ROUTE_102", "description": "Travel through Route 102"},
-    {"milestone": "PETALBURG_CITY", "target_location": "PETALBURG_CITY", "description": "Arrive at Petalburg City"},
-    {"milestone": "DAD_FIRST_MEETING", "target_location": "PETALBURG_CITY_GYM", "target_coords_fn": lambda: get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM"), "description": "Enter gym to meet Dad", "special": "gym_dialogue"},
-    {"milestone": "GYM_EXPLANATION", "target_location": None, "description": "Watch Wally tutorial", "special": "gym_dialogue"},
-    
+    {"milestone": "ROUTE_102", "completion_type": "location", "target_location": "ROUTE_102", "description": "Travel through Route 102"},
+    {"milestone": "PETALBURG_CITY", "completion_type": "location", "target_location": "PETALBURG_CITY", "description": "Arrive at Petalburg City"},
+    # Phase 5.1: DAD_FIRST_MEETING is a dialogue milestone.
+    # The ROM script-event flag fires on gym map load (premature); completion
+    # is only recognised by verification_node when dialogue_completed=True and
+    # the transcript contains the expected keywords.
+    {"milestone": "DAD_FIRST_MEETING",
+     "completion_type": "dialogue",
+     "dialogue_keywords": ["Gym Leader", "Norman", "heal", "Pokemon"],
+     "target_location": "PETALBURG_CITY_GYM",
+     "target_coords_fn": lambda: get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM"),
+     "description": "Enter gym to meet Dad",
+     "special": "gym_dialogue"},
+    # Phase 5.1: GYM_EXPLANATION is a dialogue milestone — same gating.
+    {"milestone": "GYM_EXPLANATION",
+     "completion_type": "dialogue",
+     "dialogue_keywords": ["Wally", "Pokemon", "catch", "teach", "Gym"],
+     "target_location": None,
+     "description": "Watch Wally tutorial",
+     "special": "gym_dialogue"},
+
     # [19-22] SPLIT 05: Road to Rustboro
-    {"milestone": "ROUTE_104_SOUTH", "target_location": "ROUTE_104_SOUTH", "description": "Travel to Route 104 South"},
-    {"milestone": "PETALBURG_WOODS", "target_location": "PETALBURG_WOODS", "description": "Navigate Petalburg Woods"},
-    {"milestone": "TEAM_AQUA_GRUNT_DEFEATED", "target_location": None, "description": "Defeat Team Aqua grunt"},
-    {"milestone": "ROUTE_104_NORTH", "target_location": "ROUTE_104_NORTH", "description": "Exit woods to Route 104 North"},
-    
+    {"milestone": "ROUTE_104_SOUTH", "completion_type": "location", "target_location": "ROUTE_104_SOUTH", "description": "Travel to Route 104 South"},
+    {"milestone": "PETALBURG_WOODS", "completion_type": "location", "target_location": "PETALBURG_WOODS", "description": "Navigate Petalburg Woods"},
+    {"milestone": "TEAM_AQUA_GRUNT_DEFEATED", "completion_type": "battle", "target_location": None, "description": "Defeat Team Aqua grunt"},
+    {"milestone": "ROUTE_104_NORTH", "completion_type": "location", "target_location": "ROUTE_104_NORTH", "description": "Exit woods to Route 104 North"},
+
     # [23-26] SPLIT 06: Rustboro Gym
-    {"milestone": "RUSTBORO_CITY", "target_location": "RUSTBORO_CITY", "description": "Arrive at Rustboro City"},
-    {"milestone": "RUSTBORO_GYM_ENTERED", "target_location": "RUSTBORO_CITY_GYM", "target_coords_fn": lambda: get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM"), "description": "Enter Rustboro Gym"},
-    {"milestone": "ROXANNE_DEFEATED", "target_location": None, "description": "Defeat Roxanne"},
-    {"milestone": "FIRST_GYM_COMPLETE", "target_location": None, "description": "First gym badge obtained"},
+    {"milestone": "RUSTBORO_CITY", "completion_type": "location", "target_location": "RUSTBORO_CITY", "description": "Arrive at Rustboro City"},
+    {"milestone": "RUSTBORO_GYM_ENTERED", "completion_type": "location", "target_location": "RUSTBORO_CITY_GYM", "target_coords_fn": lambda: get_entrance_coords("RUSTBORO_CITY", "RUSTBORO_CITY_GYM"), "description": "Enter Rustboro Gym"},
+    {"milestone": "ROXANNE_DEFEATED", "completion_type": "battle", "target_location": None, "description": "Defeat Roxanne"},
+    {"milestone": "FIRST_GYM_COMPLETE", "completion_type": "location", "target_location": None, "description": "First gym badge obtained"},
 ]
+
+# Fast lookup: milestone ID → completion_type (built once at import time).
+_MILESTONE_COMPLETION_TYPE: dict = {
+    m["milestone"]: m.get("completion_type", "location")
+    for m in MILESTONE_PROGRESSION
+}
 
 def get_highest_milestone_index(milestones: Dict[str, Any]) -> int:
     """
     Find the highest completed milestone index.
     Returns -1 if no milestones completed.
+
+    Dialogue milestones are tracked by the emulator only after the player
+    *exits* the relevant area (emulator.py fires the flag on gym exit, not
+    on gym entry), so they are reliable here and are included in the scan.
+    This ensures get_next_milestone_target() advances past dialogue milestones
+    once they complete rather than looping on them forever.
     """
     highest_index = -1
-    
+
     for i, entry in enumerate(MILESTONE_PROGRESSION):
         milestone_id = entry["milestone"]
         milestone_data = milestones.get(milestone_id, {})
         is_complete = milestone_data.get("completed", False) if isinstance(milestone_data, dict) else False
-        
+
         if is_complete:
             highest_index = i
-    
+
     return highest_index
 
 def get_next_milestone_target(milestones: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -563,6 +591,19 @@ class ObjectiveManager:
                 logger.debug(f"Objective '{obj.id}' checking milestone '{obj.milestone_id}': {milestone_data}")
                 
                 if milestone_completed:
+                    # Phase 5.1: Skip ROM auto-completion for dialogue milestones.
+                    # The ROM flag fires the moment the map loads, which is before the
+                    # agent has interacted with the NPC at all.  For these milestones,
+                    # the verification_node handles completion once dialogue_completed=True.
+                    completion_type = _MILESTONE_COMPLETION_TYPE.get(obj.milestone_id, "location")
+                    if completion_type == "dialogue":
+                        logger.debug(
+                            "[MILESTONE] ROM flag for dialogue milestone '%s' fired — "
+                            "deferring completion to TransitionEvaluator (dialogue_completed gate).",
+                            obj.milestone_id,
+                        )
+                        continue
+
                     # Auto-complete the storyline objective
                     obj.completed = True
                     obj.completed_at = datetime.now()
@@ -628,35 +669,6 @@ class ObjectiveManager:
                 self.mark_goal_complete('ROUTE_103_RIVAL_BATTLE', 'Defeated rival May on Route 103', state_data=state_data)
                 logger.info(f"✅ [BATTLE COMPLETION] Detected rival battle completion via state transition")
                 print(f"✅ [GOAL COMPLETE] ROUTE_103_RIVAL_BATTLE")
-        
-        # Detect Dad dialogue completion: Track 'A' button press when adjacent to Dad in Petalburg Gym
-        player_data = state_data.get('player', {})
-        position = player_data.get('position', {})
-        current_x = position.get('x', 0)
-        current_y = position.get('y', 0)
-        current_location = player_data.get('location', '').upper()
-        
-        # Check if in Petalburg Gym
-        in_petalburg_gym = 'PETALBURG CITY GYM' in current_location or 'PETALBURG_CITY_GYM' in current_location
-        
-        # Check if adjacent to Dad's position (looked up from location graph)
-        _norman_coords = get_poi_coords("PETALBURG_CITY_GYM", "norman") or (4, 107)
-        adjacent_to_dad = (
-            in_petalburg_gym and
-            abs(current_x - _norman_coords[0]) <= 1 and 
-            abs(current_y - _norman_coords[1]) <= 1 and
-            not (current_x == _norman_coords[0] and current_y == _norman_coords[1])  # Not on same tile
-        )
-        
-        # Check if 'A' was pressed in recent actions
-        recent_actions = state_data.get('recent_actions', [])
-        pressed_a = 'A' in recent_actions or 'a' in recent_actions
-        
-        # Mark complete if we pressed A while adjacent to Dad
-        if adjacent_to_dad and pressed_a and not self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE'):
-            self.mark_goal_complete('PETALBURG_GYM_DAD_DIALOGUE', 'Initiated dialogue with Norman at Petalburg Gym', state_data=state_data)
-            logger.info(f"✅ [DAD DIALOGUE] Detected 'A' press at position ({current_x}, {current_y}) adjacent to Dad {_norman_coords}")
-            print(f"✅ [GOAL COMPLETE] PETALBURG_GYM_DAD_DIALOGUE - Pressed A at ({current_x}, {current_y})")
         
         # Update previous state for next iteration
         old_in_battle = self._previous_state.get('in_battle', False)
@@ -944,15 +956,17 @@ class ObjectiveManager:
 
         # --- Inside Pokemon Center → talk to Nurse Joy ---
         if in_pokecenter:
-            nurse_fallback = get_poi_coords(graph_location, "nurse_joy") or (7, 3)
-            nurse_coords = self._resolve_npc_coords(
-                state_data, npc_role="nurse", fallback=nurse_fallback,
-            )
+            # Nurse Joy is always at (7, 3) in Pokemon Centers — directly behind
+            # the counter. Do NOT use _resolve_npc_coords here: it scans
+            # active_npcs which uses world-space coordinates and returns
+            # random nearby NPCs, causing the pathfinder to target wrong tiles
+            # (sometimes south of the player, triggering the entrance warp).
+            nurse_coords = get_poi_coords(graph_location, "nurse_joy") or (7, 3)
             goal_x = nurse_coords[0]
-            goal_y = nurse_coords[1] + 1  # One tile south to face up
+            goal_y = nurse_coords[1] + 1  # Stand one tile south, face north
 
-            logger.info(f"🏥 [HEAL] In Pokemon Center, nurse at {nurse_coords}")
-            print(f"🏥 [HEAL] In Pokemon Center — talking to nurse [{nurse_coords}]")
+            logger.info(f"🏥 [HEAL] In Pokemon Center, nurse at {nurse_coords}, standing at ({goal_x}, {goal_y})")
+            print(f"🏥 [HEAL] In Pokemon Center — walking to ({goal_x}, {goal_y}) to interact with nurse at {nurse_coords}")
             return {
                 'goal_coords': (goal_x, goal_y, graph_location),
                 'npc_coords': nurse_coords,
@@ -965,6 +979,7 @@ class ObjectiveManager:
         print(f"🏥 [HEAL] Heading to {pc_location}")
 
         _pc_entrance = get_entrance_coords(graph_location, pc_location)
+
         if not _pc_entrance:
             # Pokemon Center may not be directly adjacent — use planner
             _pc_entrance = None
@@ -1100,7 +1115,9 @@ class ObjectiveManager:
         location_mapping = {
             'PETALBURG CITY GYM': 'PETALBURG_CITY_GYM',
             'PETALBURG GYM': 'PETALBURG_CITY_GYM',
+            'PETALBURG CITY POKEMON CENTER': 'PETALBURG_CITY_POKEMON_CENTER_1F',
             'RUSTBORO CITY POKEMON CENTER': 'RUSTBORO_CITY_POKEMON_CENTER_1F',
+            'OLDALE TOWN POKEMON CENTER': 'OLDALE_TOWN_POKEMON_CENTER_1F',
             'RUSTBORO CITY GYM': 'RUSTBORO_CITY_GYM',
             'RUSTBORO GYM': 'RUSTBORO_CITY_GYM',
             'BIRCHS LAB': 'PROFESSOR_BIRCHS_LAB',
@@ -1263,125 +1280,6 @@ class ObjectiveManager:
                     'description': 'Exit Birch Lab',
                     'milestone': None
                 }
-        
-        # === PETALBURG CITY → Talk to Dad in gym (HP-BASED SPLIT DETECTION) ===
-        # =====================================================================
-        # PETALBURG CITY: DAD DIALOGUE DETECTION
-        # =====================================================================
-        # Phase 5.1: This entire block is opener-only scripting. When past the
-        # opening sequence, skip it — the agent navigates Petalburg via RAG.
-        # =====================================================================
-        
-        in_petalburg_city = 'PETALBURG CITY' in current_location or 'PETALBURG_CITY' in current_location.replace(' ', '_')
-        in_gym = 'PETALBURG CITY GYM' in current_location or 'PETALBURG_CITY_GYM' in current_location
-        
-        if not _past_opening and (in_petalburg_city or in_gym):
-            # Gate: if we've already initiated Norman dialogue, don't go back
-            dad_dialogue_done = self.is_goal_complete('PETALBURG_GYM_DAD_DIALOGUE')
-            
-            if dad_dialogue_done:
-                logger.info(f"✅ [DAD HP] Norman dialogue already complete — heading west")
-                print(f"✅ [DAD HP] Norman dialogue already complete — heading west to Route 104 South")
-                
-                success = self.navigation_planner.plan_journey(
-                    start_location=graph_location,
-                    end_location='ROUTE_104_SOUTH'
-                )
-                
-                if success:
-                    raw = self.navigation_planner.get_current_directive(
-                        current_location=graph_location,
-                        current_coords=(current_x, current_y)
-                    )
-                    return self._translate_planner_directive(raw, graph_location)
-                else:
-                    logger.error(f"❌ [NAV PLANNER] Failed to plan journey to Route 104 South")
-                    return None
-            
-            # Check party HP to determine if Dad dialogue is needed
-            party = state_data.get('player', {}).get('party', [])
-            needs_dad_dialogue = False
-            
-            if party:
-                for pokemon in party:
-                    current_hp = pokemon.get('current_hp', 0)
-                    max_hp = pokemon.get('max_hp', 1)
-                    if max_hp > 0 and current_hp < max_hp:
-                        needs_dad_dialogue = True
-                        logger.info(f"🎯 [DAD HP CHECK] {pokemon.get('species_name', 'UNKNOWN')}: {current_hp}/{max_hp} HP - needs healing!")
-                        print(f"🎯 [DAD HP CHECK] {pokemon.get('species_name', 'UNKNOWN')}: {current_hp}/{max_hp} HP - needs healing!")
-                        break
-            
-            logger.info(f"🎯 [DAD HP CHECK] HP < 100%: {needs_dad_dialogue}, in_city: {in_petalburg_city}, in_gym: {in_gym}")
-            print(f"🎯 [DAD HP CHECK] HP < 100%: {needs_dad_dialogue}, in_city: {in_petalburg_city}, in_gym: {in_gym}")
-            
-            if needs_dad_dialogue:
-                # HP < 100% = need to talk to Dad
-                if in_gym:
-                    # Dynamically resolve Norman's position in Petalburg Gym
-                    # Phase 4.4d: registry-first lookup, cold-start nearest NPC fallback
-                    NORMAN_FALLBACK = get_poi_coords("PETALBURG_CITY_GYM", "norman") or (4, 107)
-
-                    norman_coords = self._resolve_npc_coords(
-                        state_data,
-                        npc_role="gym_leader_norman",
-                        fallback=NORMAN_FALLBACK,
-                    )
-                    # Stand one tile south of Norman to face UP
-                    goal_x = norman_coords[0]
-                    goal_y = norman_coords[1] + 1
-
-                    logger.info(f"💚 [DAD HP] HP < 100%, in gym, Norman at {norman_coords}")
-                    print(f"💚 [DAD HP] HP < 100%, in gym, navigating to Norman [{norman_coords}]")
-                    
-                    return {
-                        'goal_coords': (goal_x, goal_y, 'PETALBURG_CITY_GYM'),
-                        'npc_coords': norman_coords,
-                        'should_interact': True,
-                        'description': f'Navigate to Norman at {norman_coords} [HP: {current_hp}/{max_hp}]'
-                    }
-                else:
-                    # In Petalburg City - navigate to gym entrance
-                    logger.info(f"💚 [DAD HP] HP < 100%, in city, navigating to gym")
-                    print(f"💚 [DAD HP] HP < 100%, in city, navigating to gym")
-                    
-                    # Use navigation planner to get to gym
-                    _gym_entrance = get_entrance_coords("PETALBURG_CITY", "PETALBURG_CITY_GYM") or (15, 8)
-                    success = self.navigation_planner.plan_journey(
-                        start_location=graph_location,
-                        end_location='PETALBURG_CITY_GYM',
-                        final_coords=_gym_entrance  # Gym entrance warp tile
-                    )
-                    
-                    if success:
-                        raw = self.navigation_planner.get_current_directive(
-                            current_location=graph_location,
-                            current_coords=(current_x, current_y)
-                        )
-                        return self._translate_planner_directive(raw, graph_location)
-                    else:
-                        logger.error(f"❌ [NAV PLANNER] Failed to plan journey to gym")
-                        return None
-            else:
-                # HP = 100% = Dad dialogue complete, head west to Route 104 South
-                logger.info(f"✅ [DAD HP] HP = 100%, heading west to Route 104 South")
-                print(f"✅ [DAD HP] HP = 100%, heading west to Route 104 South")
-                
-                # Use navigation planner to head west
-                success = self.navigation_planner.plan_journey(
-                    start_location=graph_location,
-                    end_location='ROUTE_104_SOUTH'
-                )
-                
-                if success:
-                    raw = self.navigation_planner.get_current_directive(
-                        current_location=graph_location,
-                        current_coords=(current_x, current_y)
-                    )
-                    return self._translate_planner_directive(raw, graph_location)
-                else:
-                    logger.error(f"❌ [NAV PLANNER] Failed to plan journey to Route 104 South")
-                    return None
         
         # =====================================================================
         # Phase 5.3: GENERIC POKEMON CENTER HEALING
@@ -1634,16 +1532,24 @@ class ObjectiveManager:
         final_coords = target_coords
         final_description = description
         self._last_directive_source = "milestone"  # Default
-        
-        logger.debug(f"[NAV] Before RAG: milestone_target={final_target}")
+
+        # --- RAG override guard for dialogue milestones ---
+        # Dialogue milestones (e.g. DAD_FIRST_MEETING) have an explicit
+        # target_location (the NPC's building).  The walkthrough RAG often
+        # points to the *next* region milestone instead (e.g. ROUTE_104_SOUTH),
+        # which would send the agent straight past the NPC.  Block the override.
+        _milestone_completion_type = _MILESTONE_COMPLETION_TYPE.get(milestone_id, "location")
+        _rag_override_allowed = _milestone_completion_type != "dialogue"
+
+        logger.debug(f"[NAV] Before RAG: milestone_target={final_target}, rag_override_allowed={_rag_override_allowed}")
         rag_result = self._query_rag_target(state_data)
         logger.debug(f"[NAV] RAG returned: {rag_result}")
         if rag_result and rag_result.get("target_location"):
             rag_loc = rag_result["target_location"]
             logger.debug(f"[NAV] RAG={rag_loc}, milestone={target_location}, match={rag_loc == target_location}")
-            # Only override if RAG target differs from milestone target
-            # (if they agree, milestone coords are usually more precise)
-            if rag_loc != target_location:
+            # Only override if RAG target differs from milestone target AND the
+            # milestone type permits RAG overrides.
+            if rag_loc != target_location and _rag_override_allowed:
                 logger.debug(f"[NAV] RAG OVERRIDE: {target_location} → {rag_loc}")
                 final_target = rag_loc
                 final_coords = rag_result.get("target_coords")
@@ -1658,6 +1564,17 @@ class ObjectiveManager:
                     f"🔮 [RAG PRIMARY] Using RAG target: {rag_loc} "
                     f"(milestone was {target_location})"
                 )
+            elif not _rag_override_allowed:
+                # RAG suggested a different target but this milestone locks navigation.
+                logger.info(
+                    f"🔒 [RAG LOCKED] Dialogue milestone '{milestone_id}' — "
+                    f"ignoring RAG suggestion '{rag_loc}', keeping milestone target '{target_location}'"
+                )
+                print(
+                    f"🔒 [RAG LOCKED] Milestone {milestone_id} requires {target_location} "
+                    f"(RAG suggested {rag_loc} — ignored)"
+                )
+                self._last_directive_source = "milestone"
             else:
                 self._last_directive_source = "rag"  # RAG agreed
                 self._rag_override_count += 1
@@ -2304,7 +2221,9 @@ class ObjectiveManager:
         location_mapping = {
             'PETALBURG CITY GYM': 'PETALBURG_CITY_GYM',  # Specific first
             'PETALBURG GYM': 'PETALBURG_CITY_GYM',
+            'PETALBURG CITY POKEMON CENTER': 'PETALBURG_CITY_POKEMON_CENTER_1F',  # Specific before PETALBURG CITY
             'RUSTBORO CITY POKEMON CENTER': 'RUSTBORO_CITY_POKEMON_CENTER_1F',  # Specific first
+            'OLDALE TOWN POKEMON CENTER': 'OLDALE_TOWN_POKEMON_CENTER_1F',
             'RUSTBORO CITY GYM': 'RUSTBORO_CITY_GYM',
             'RUSTBORO GYM': 'RUSTBORO_CITY_GYM',
             'BIRCHS LAB': 'PROFESSOR_BIRCHS_LAB',  # Note: BIRCHS with S to match location_graph
