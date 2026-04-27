@@ -1,0 +1,1568 @@
+# HTN Migration Plan — Executive Supervisor & Goal Stack Architecture
+
+**Document Status:** Implementation Blueprint  
+**Replaces:** `OBJECTIVE_TRACKING_SYSTEM.md` (legacy milestone FSM)  
+**Codebase snapshot:** April 26, 2026 (LangGraph graph stable, route102 corridor ✅)
+
+---
+
+## Executive Summary
+
+We are replacing the open-loop, hardcoded `MILESTONE_PROGRESSION` FSM with a
+**Hierarchical Task Network (HTN)** driven by an LLM Executive Supervisor. The
+new system treats the goal stack as the agent's "working plan" — a nested tree
+of goals that the Supervisor rewrites dynamically as game state evolves. The
+plant controllers (`nav_bot`, `battle_bot`, `coms_bot`) remain unchanged; they
+only need a valid `Directive` extracted from the top of the goal stack, not a
+hardcoded list index.
+
+The migration is designed to be **incremental and reversible**. At every phase,
+a `MILESTONE_PROGRESSION` fallback path is available if the HTN produces an
+empty or invalid stack.
+
+---
+
+## System Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         AgentState (LangGraph)                          │
+│   goal_stack: List[GoalNode]   ← new; Stack[0] = immediate tactical     │
+│   last_node_fired: str         ← new; tracks handoff detection          │
+│   supervisor_pending: bool     ← new; flag to trigger Supervisor        │
+│   milestone_index: int         ← retained for fallback + verification   │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+         dispatch node (unchanged)
+                │ routing_condition() — unchanged
+        ┌───────┼─────────┬──────────┐
+        ▼       ▼         ▼          ▼
+    nav_bot  battle_bot  coms_bot  map_stitcher_relay
+        │       │         │          │
+        └───────┴────┬────┘          │
+                     ▼               │
+             handoff_detector_node ◄─┘
+                     │
+           supervisor_pending?
+                YES  │  NO
+                 ▼   │
+    executive_supervisor_node
+                 │
+                 ▼
+         verification_node (unchanged)
+                 │
+                END
+```
+
+The key insight: the Supervisor is **not on the hot path**. It only fires on
+state handoffs (node transitions), keeping per-frame latency near zero for the
+common case.
+
+---
+
+## Phase 0: Goal Stack Data Structures
+
+### 0.1 `GoalNode` — The Unit of the HTN
+
+**File to create:** `agent/graph/goal_stack.py`
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional, Any
+import time
+
+
+@dataclass
+class GoalNode:
+    """A single node in the HTN goal stack.
+
+    Attributes:
+        goal_id:        Unique identifier (e.g. "get_badge_1", "traverse_route_102").
+        description:    Human-readable description of this goal.
+        goal_type:      "strategic" | "tactical" | "immediate"
+                        strategic  = high-level quest objective (e.g. "Defeat Roxanne")
+                        tactical   = mid-level plan step  (e.g. "Reach Rustboro Gym")
+                        immediate  = single nav/battle/coms directive
+        parent_id:      goal_id of the parent goal (None for root).
+        directive:      Optional pre-computed Directive for immediate goals.
+                        When set, the executor uses it directly without re-querying
+                        the Supervisor.
+        completion_condition: Natural-language string the Supervisor checks to
+                        decide whether to POP this goal. E.g.:
+                        "Player is in RUSTBORO_CITY_GYM and has interacted with Roxanne."
+        metadata:       Arbitrary dict for Supervisor context (e.g. badge count
+                        threshold, required items, HP constraint).
+        created_at:     Unix timestamp.
+        push_reason:    Why this goal was pushed (for logging / debugging).
+    """
+    goal_id: str
+    description: str
+    goal_type: str                          # "strategic" | "tactical" | "immediate"
+    parent_id: Optional[str] = None
+    directive: Optional[dict] = None        # serialisable Directive.to_dict()
+    completion_condition: str = ""
+    metadata: dict = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+    push_reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "goal_id": self.goal_id,
+            "description": self.description,
+            "goal_type": self.goal_type,
+            "parent_id": self.parent_id,
+            "directive": self.directive,
+            "completion_condition": self.completion_condition,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
+            "push_reason": self.push_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GoalNode":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+# ---------------------------------------------------------------------------
+# Stack operations (pure functions — no mutation of AgentState directly)
+# ---------------------------------------------------------------------------
+
+def stack_peek(stack: list[GoalNode]) -> Optional[GoalNode]:
+    """Return Stack[0] (immediate goal) without removing it."""
+    return stack[0] if stack else None
+
+def stack_pop(stack: list[GoalNode]) -> tuple[Optional[GoalNode], list[GoalNode]]:
+    """Remove and return Stack[0]."""
+    if not stack:
+        return None, []
+    return stack[0], stack[1:]
+
+def stack_push(stack: list[GoalNode], goal: GoalNode) -> list[GoalNode]:
+    """Prepend a new immediate goal to the front of the stack."""
+    return [goal] + stack
+
+def stack_replace(stack: list[GoalNode], goal: GoalNode) -> list[GoalNode]:
+    """Replace Stack[0] with a new goal."""
+    return [goal] + (stack[1:] if len(stack) > 1 else [])
+
+def stack_summary(stack: list[GoalNode]) -> str:
+    """Return a compact one-line summary for logging."""
+    if not stack:
+        return "(empty)"
+    return " → ".join(f"[{g.goal_type[0].upper()}]{g.description}" for g in reversed(stack))
+```
+
+### 0.2 `AgentState` Schema Changes
+
+**File:** `agent/graph/state.py`
+
+Add the following fields to `AgentState`. Existing fields are **unchanged**;
+`milestone_index` is retained as a fallback signal during the migration period.
+
+```python
+# ---- HTN Goal Stack ----
+goal_stack: list
+"""Ordered list of GoalNode dicts (serialised). Stack[0] = immediate goal.
+Stack[-1] = highest strategic goal. Empty list = stack exhausted."""
+
+last_node_fired: Optional[str]
+"""Name of the specialist node that just completed (set by handoff_detector_node).
+E.g. 'battle_bot'. Used to detect handoffs and gate the Supervisor."""
+
+supervisor_pending: bool
+"""When True, executive_supervisor_node fires after the current step's
+handoff_detector_node completes. Reset to False by the Supervisor."""
+
+supervisor_last_operation: Optional[str]
+"""The last stack operation issued: 'POP' | 'CONTINUE' | 'PUSH' | 'REPLACE'.
+Logged for observability."""
+
+supervisor_last_reasoning: Optional[str]
+"""The Supervisor's free-text chain-of-thought (truncated to ~500 chars).
+Stored for offline analysis in llm_logs/."""
+```
+
+**Important:** `goal_stack` stores `List[dict]` (serialised `GoalNode.to_dict()`)
+rather than `List[GoalNode]` objects, because LangGraph's state reducer requires
+JSON-serialisable values. Deserialise with `GoalNode.from_dict()` at node
+boundaries.
+
+### Phase 0 Tests
+
+**Automated — `tests/test_goal_stack.py`:**
+
+```python
+class TestGoalNodeSerialization:
+    # GoalNode(...).to_dict() produces a dict with all expected keys
+    # GoalNode.from_dict(d) reconstructs an identical GoalNode
+    # Round-trip preserves goal_id, description, goal_type, parent_id, directive, metadata
+
+class TestGoalNodeDefaults:
+    # GoalNode with only required fields has created_at > 0.0
+    # directive defaults to None
+    # metadata defaults to {}
+
+class TestStackPush:
+    # stack_push([], goal) returns [goal]
+    # stack_push([existing], new) returns [new, existing]  ← new is Stack[0]
+
+class TestStackPop:
+    # stack_pop([a, b]) returns (a, [b])
+    # stack_pop([]) returns (None, [])
+
+class TestStackReplace:
+    # stack_replace([old, parent], new) returns [new, parent]
+    # stack_replace([], new) returns [new]
+
+class TestStackPeek:
+    # stack_peek([a, b]) returns a without mutating the list
+    # stack_peek([]) returns None
+
+class TestStackSummary:
+    # Three-level stack → summary shows immediate → tactical → strategic order
+    # Empty stack → returns "(empty)"
+```
+
+**Automated — `tests/test_agent_state_htn.py`:**
+
+```python
+class TestNewFieldsPresent:
+    # AgentState constructed with goal_stack=[], supervisor_pending=False — no TypeError
+    # All five new HTN fields accept correct types
+
+class TestGoalStackDefaultsEmpty:
+    # AgentState with no goal_stack key → state.get("goal_stack", []) == []
+
+class TestSupervisorPendingDefault:
+    # supervisor_pending not set → state.get("supervisor_pending", False) == False
+```
+
+**Manual — Phase 0 Schema Smoke Test:**
+
+*Purpose:* Confirm `GoalNode` serialisation and the new `AgentState` fields do not crash on import.
+
+*Command:*
+```bash
+PYTHONPATH=$PWD .venv/bin/python -c "
+from agent.graph.goal_stack import GoalNode, stack_push, stack_summary
+g = GoalNode('test', 'Walk into Petalburg City', 'immediate',
+             directive={'action': 'NAVIGATE', 'goal_location': 'PETALBURG_CITY'})
+stack = stack_push([], g)
+print('Stack:', stack_summary(stack))
+print('Roundtrip:', GoalNode.from_dict(g.to_dict()).goal_id)
+"
+```
+
+*Pass criteria:*
+- [ ] No `ImportError` or `AttributeError`
+- [ ] `stack_summary` prints the goal description
+- [ ] `Roundtrip` prints `test`
+
+*Fail indicators:*
+- `ImportError: cannot import name 'GoalNode'` — `agent/graph/goal_stack.py` not yet created
+- `KeyError` in `from_dict` — field name mismatch between `to_dict` and `__dataclass_fields__`
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 1: Handoff Detector Node
+
+The `handoff_detector_node` is a **lightweight, zero-LLM** node inserted
+between every specialist node and `verification_node`. It sets
+`supervisor_pending = True` when a transition between node types occurs.
+
+**File to create:** `agent/graph/nodes/handoff_detector.py`
+
+```python
+from __future__ import annotations
+from agent.graph.state import AgentState
+
+# Transitions that require Supervisor review.
+# A transition is "significant" when the node type changes.
+# Same-node re-entries (e.g. nav_bot → nav_bot) do NOT trigger the Supervisor
+# because no meaningful state change has occurred.
+_SIGNIFICANT_TRANSITIONS = {
+    ("battle_bot",        "nav_bot"),       # battle ended → resume navigation
+    ("battle_bot",        "coms_bot"),      # mid-battle dialogue
+    ("coms_bot",          "nav_bot"),       # dialogue finished → resume navigation
+    ("nav_bot",           "coms_bot"),      # NPC triggered mid-navigation
+    ("nav_bot",           "battle_bot"),    # wild encounter / trainer spotted
+    ("map_stitcher_relay","nav_bot"),       # healing path resolved → navigate
+}
+
+# Also trigger on the very first step (no previous node) or when the
+# goal stack becomes empty.
+def handoff_detector_node(state: AgentState) -> AgentState:
+    current_node  = state.get("last_action", "")   # e.g. "NAVIGATE", "BATTLE", "DIALOGUE"
+    previous_node = state.get("last_node_fired", "")
+    goal_stack    = state.get("goal_stack", [])
+
+    # Map last_action labels back to node names
+    _ACTION_TO_NODE = {
+        "NAVIGATE": "nav_bot",
+        "BATTLE":   "battle_bot",
+        "DIALOGUE": "coms_bot",
+    }
+    current_node_name  = _ACTION_TO_NODE.get(current_node, current_node)
+    previous_node_name = _ACTION_TO_NODE.get(previous_node, previous_node)
+
+    transition = (previous_node_name, current_node_name)
+    is_significant = (
+        transition in _SIGNIFICANT_TRANSITIONS
+        or not previous_node_name          # first step
+        or not goal_stack                  # stack exhausted
+    )
+
+    return {
+        **state,
+        "last_node_fired": current_node_name,
+        "supervisor_pending": is_significant,
+    }
+```
+
+### Graph Wiring Change
+
+**File:** `agent/graph/graph.py`
+
+```python
+from agent.graph.nodes.handoff_detector import handoff_detector_node
+from agent.graph.nodes.executive_supervisor import make_executive_supervisor_node
+
+# Add nodes
+builder.add_node("handoff_detector", handoff_detector_node)
+builder.add_node("executive_supervisor", make_executive_supervisor_node(
+    vlm=vlm,
+    episodic_memory=episodic_memory,
+    walkthrough_db=walkthrough_db,
+))
+
+# Rewire edges: specialist → handoff_detector → (conditional) → verification
+for specialist in ["nav_bot", "battle_bot", "coms_bot", "map_stitcher_relay"]:
+    builder.add_edge(specialist, "handoff_detector")
+
+builder.add_conditional_edges(
+    "handoff_detector",
+    lambda s: "executive_supervisor" if s.get("supervisor_pending") else "verification",
+    {"executive_supervisor": "executive_supervisor", "verification": "verification"},
+)
+builder.add_edge("executive_supervisor", "verification")
+```
+
+### Phase 1 Tests
+
+**Automated — `tests/test_handoff_detector.py`:**
+
+```python
+class TestSignificantTransition:
+    # previous_node="battle_bot", current_node="nav_bot"   → supervisor_pending=True
+    # previous_node="coms_bot",   current_node="nav_bot"   → supervisor_pending=True
+    # previous_node="nav_bot",    current_node="coms_bot"  → supervisor_pending=True
+    # previous_node="nav_bot",    current_node="battle_bot" → supervisor_pending=True
+
+class TestInsignificantTransition:
+    # previous_node="nav_bot",    current_node="nav_bot"    → supervisor_pending=False
+    # previous_node="battle_bot", current_node="battle_bot" → supervisor_pending=False
+
+class TestFirstStep:
+    # last_node_fired not set (empty string) → supervisor_pending=True regardless of current_node
+
+class TestEmptyStack:
+    # goal_stack=[], any transition → supervisor_pending=True
+
+class TestLastNodeFiredUpdated:
+    # handoff_detector_node returns state with last_node_fired = current_node_name
+    # last_action="NAVIGATE" → last_node_fired="nav_bot"
+    # last_action="BATTLE"   → last_node_fired="battle_bot"
+    # last_action="DIALOGUE" → last_node_fired="coms_bot"
+```
+
+**Manual — Handoff Detector Smoke Test (`boundary_test.state`):**
+
+*Purpose:* Confirm `handoff_detector_node` fires `supervisor_pending=True` on the
+first step (empty stack) and again on the nav_bot → coms_bot handoff when the
+agent enters Petalburg City and encounters an NPC. The save state has the player
+at the eastern entrance of Petalburg City; the next actions are to walk west
+into the city, navigate to the gym, and trigger the Norman cutscene.
+
+*Setup:* Add a temporary `[HANDOFF]` print inside `handoff_detector_node`:
+```python
+print(f"[HANDOFF] step={state.get('step_count')}  "
+      f"{previous_node_name} → {current_node_name}  pending={is_significant}")
+```
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 80
+```
+
+*Observe in console:*
+- `[HANDOFF]` line on step 1 with `pending=True` (first step, empty stack)
+- Subsequent `[HANDOFF]` lines with `pending=False` while nav_bot repeats
+- When routing changes to coms_bot (NPC dialogue in Petalburg City): `nav_bot → coms_bot  pending=True`
+
+*Pass criteria:*
+- [ ] `pending=True` on step 1
+- [ ] `pending=False` on all consecutive nav_bot → nav_bot steps
+- [ ] `pending=True` fires when routing first changes to coms_bot
+- [ ] `last_node_fired` value in state matches the previous step's active node
+
+*Fail indicators:*
+- `pending=True` every single step: `last_node_fired` is not persisting between steps — check that `handoff_detector_node` writes it to the returned state dict
+- `pending=False` on step 1: `goal_stack` is pre-populated somewhere before `handoff_detector_node` runs
+- No `[HANDOFF]` lines at all: node not yet wired into `graph.py`
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 2: Executive Supervisor Node
+
+**File to create:** `agent/graph/nodes/executive_supervisor.py`
+
+### 2.1 Trigger Conditions (when it fires)
+
+The Supervisor fires when `supervisor_pending == True`, which is set by
+`handoff_detector_node` on:
+1. Any **state handoff** (node type transition) listed in `_SIGNIFICANT_TRANSITIONS`
+2. **First step** of any run (bootstraps the goal stack from `milestones.json`)
+3. **Empty stack** (all goals complete; need new HTN branch)
+
+### 2.2 Core Logic
+
+```python
+from __future__ import annotations
+import json, logging, time
+from typing import Callable, Optional
+
+from agent.graph.state import AgentState
+from agent.graph.goal_stack import (
+    GoalNode, stack_peek, stack_pop, stack_push,
+    stack_replace, stack_summary,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def make_executive_supervisor_node(
+    vlm,
+    episodic_memory,
+    walkthrough_db,
+) -> Callable[[AgentState], AgentState]:
+    """Factory binding shared resources into the supervisor node."""
+
+    def executive_supervisor_node(state: AgentState) -> AgentState:
+        step      = state.get("step_count", 0)
+        stack_raw = state.get("goal_stack", [])
+        stack     = [GoalNode.from_dict(g) for g in stack_raw]
+        state_data = state.get("state_data") or {}
+
+        # ── 1. Bootstrap empty stack from milestones.json ──────────────────
+        if not stack:
+            stack = _bootstrap_stack(state_data, walkthrough_db, vlm)
+            logger.info("[SUPERVISOR] step=%s  Bootstrapped stack: %s",
+                        step, stack_summary(stack))
+            return {
+                **state,
+                "goal_stack": [g.to_dict() for g in stack],
+                "supervisor_pending": False,
+                "supervisor_last_operation": "BOOTSTRAP",
+            }
+
+        # ── 2. Gather context for LLM reasoning ────────────────────────────
+        current_goal = stack_peek(stack)
+        episodic_ctx = _query_episodic_memory(
+            episodic_memory, current_goal, state_data
+        )
+        game_summary  = _build_game_summary(state_data, state)
+        stack_repr    = stack_summary(stack)
+
+        # ── 3. Call LLM → get stack operation ──────────────────────────────
+        operation_payload = _call_supervisor_llm(
+            vlm, current_goal, episodic_ctx, game_summary, stack_repr
+        )
+
+        # ── 4. Apply stack operation ────────────────────────────────────────
+        op      = operation_payload.get("operation", "CONTINUE")
+        reason  = operation_payload.get("reasoning", "")
+        new_goals = operation_payload.get("new_goals", [])
+
+        if op == "POP":
+            popped, stack = stack_pop(stack)
+            logger.info("[SUPERVISOR] POP '%s' — %s", popped.goal_id if popped else "?", reason)
+            # If popped a tactical goal and parent is now strategic, trigger
+            # walkthrough RAG to repopulate sub-goals
+            parent = stack_peek(stack)
+            if parent and parent.goal_type == "strategic" and not _has_children(stack, parent):
+                new_sub_goals = _expand_strategic_goal(parent, state_data, walkthrough_db, vlm)
+                for g in reversed(new_sub_goals):
+                    stack = stack_push(stack, g)
+
+        elif op == "PUSH":
+            for g_dict in new_goals:
+                node = GoalNode.from_dict({**g_dict, "push_reason": reason})
+                stack = stack_push(stack, node)
+            logger.info("[SUPERVISOR] PUSH %d goal(s) — %s", len(new_goals), reason)
+
+        elif op == "REPLACE":
+            if new_goals:
+                node = GoalNode.from_dict({**new_goals[0], "push_reason": reason})
+                stack = stack_replace(stack, node)
+            logger.info("[SUPERVISOR] REPLACE Stack[0] — %s", reason)
+
+        else:  # CONTINUE
+            logger.debug("[SUPERVISOR] CONTINUE — %s", reason)
+
+        # ── 5. Translate Stack[0].directive → AgentState nav fields ────────
+        new_state = _apply_immediate_directive(state, stack)
+        new_state.update({
+            "goal_stack": [g.to_dict() for g in stack],
+            "supervisor_pending": False,
+            "supervisor_last_operation": op,
+            "supervisor_last_reasoning": reason[:500],
+        })
+        return new_state
+
+    return executive_supervisor_node
+```
+
+### 2.3 Directive Translation: `_apply_immediate_directive`
+
+The Supervisor outputs human-readable `GoalNode` objects. The `nav_bot` and
+other plant controllers need concrete `AgentState` fields (`goal_coords`,
+`goal_location`, `should_interact`, etc.). This translation lives in a single
+helper so the mapping is explicit and testable:
+
+```python
+def _apply_immediate_directive(state: AgentState, stack: list[GoalNode]) -> dict:
+    """Extract the immediate goal's directive and map it to AgentState fields."""
+    immediate = stack_peek(stack)
+    if not immediate or not immediate.directive:
+        # No directive yet — preserve existing nav fields, let nav_bot use fallback
+        return dict(state)
+
+    from agent.objective_manager import Directive
+    d = Directive.from_dict(immediate.directive)
+
+    patch = {}
+    if d.goal_coords:
+        patch["goal_coords"]    = d.goal_coords
+    if d.goal_location:
+        patch["goal_location"]  = d.goal_location
+    if d.npc_coords:
+        patch["npc_coords"]     = d.npc_coords
+    if d.should_interact is not None:
+        patch["should_interact"] = d.should_interact
+    if d.description:
+        patch["goal_description"] = d.description
+    if immediate.goal_id:
+        patch["active_milestone"] = immediate.goal_id
+
+    return {**state, **patch}
+```
+
+### Phase 2 Tests
+
+**Automated — `tests/test_executive_supervisor.py`:**
+
+```python
+class TestBootstrapEmpty:
+    # _bootstrap_stack() with mock walkthrough_db returning 3 chunks
+    # Returns non-empty list of GoalNode objects
+    # Stack[0].goal_type == "immediate"
+    # Stack[0].directive is not None
+    # Stack[-1].goal_type == "strategic"
+
+class TestBootstrapFallback:
+    # walkthrough_db=None → _milestone_fallback_stack() is called
+    # Returns non-empty stack derived from MILESTONE_PROGRESSION without raising
+
+class TestBootstrapLLMParseError:
+    # Mock VLM.generate() returns invalid JSON
+    # _bootstrap_stack falls through to milestone fallback (no crash)
+
+class TestStackOperationPop:
+    # Supervisor state has 3-item stack; mock LLM returns {"operation": "POP"}
+    # Returned goal_stack has 2 items
+    # supervisor_last_operation == "POP"
+
+class TestStackOperationPush:
+    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...valid GoalNode dict...}]}
+    # Returned goal_stack has 4 items
+    # New goal is at index 0 (Stack[0])
+
+class TestStackOperationReplace:
+    # Mock LLM returns {"operation": "REPLACE", "new_goals": [{...}]}
+    # Stack length unchanged
+    # Stack[0].goal_id equals the replacement goal's goal_id
+
+class TestStackOperationContinue:
+    # Mock LLM returns {"operation": "CONTINUE"}
+    # goal_stack identical before and after
+
+class TestMalformedLLMResponse:
+    # Mock VLM returns plain text (not JSON)
+    # Supervisor defaults to CONTINUE without raising
+    # goal_stack unchanged
+
+class TestDirectiveTranslation:
+    # Stack[0] has directive with goal_location="PETALBURG_CITY_GYM"
+    # _apply_immediate_directive sets state["goal_location"] == "PETALBURG_CITY_GYM"
+    # state["goal_description"] matches the GoalNode description
+    # state["active_milestone"] == GoalNode.goal_id
+
+class TestDirectiveTranslationNoop:
+    # Stack[0].directive is None
+    # _apply_immediate_directive returns state with goal_coords unchanged
+
+class TestBootTimestampFilter:
+    # EpisodicMemory has 2 records: one at boot_time - 1 (stale), one at boot_time + 1
+    # _query_episodic_memory returns only the post-boot document
+    # Stale record does not appear in returned context string
+```
+
+**Manual — Supervisor Bootstrap Smoke Test (`boundary_test.state`):**
+
+*Purpose:* Confirm the Supervisor builds a coherent 3-level HTN from `boundary_test.state`
+whose milestones reflect Route 102 complete → Petalburg City next. Run in shadow mode
+(`--use-htn` not yet enabling HTN-driven navigation) so the legacy system still drives
+movement while the HTN is logged.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 10
+```
+*(Add `[SUPERVISOR]` print statements inside `executive_supervisor_node` before enabling `--use-htn`.)*
+
+*Observe in console:*
+```
+[SUPERVISOR] step=1  BOOTSTRAP
+[SUPERVISOR] last_completed=ROUTE_102
+[SUPERVISOR] Stack: [I]Enter Petalburg City → [T]Navigate to Petalburg Gym → [S]Meet Norman (Dad)
+[SUPERVISOR] supervisor_last_operation=BOOTSTRAP
+```
+
+*Pass criteria:*
+- [ ] `[SUPERVISOR] BOOTSTRAP` fires on step 1
+- [ ] `last_completed=ROUTE_102` (correct read from `boundary_test_milestones.json`)
+- [ ] Bootstrapped stack has ≥ 1 `strategic` goal referencing the gym or Norman
+- [ ] Stack[0] (immediate) `goal_location` resolves to `PETALBURG_CITY` or `PETALBURG_CITY_GYM`
+- [ ] `supervisor_last_operation=BOOTSTRAP` in state after step 1
+- [ ] No `KeyError` or `AssertionError` in console
+
+*Fail indicators:*
+- `[SUPERVISOR] HTN generation failed` — LLM output is not valid JSON; verify the system prompt instructs the model to return only JSON with no preamble
+- Stack has no `immediate` goal — HTN prompt only produced strategic/tactical nodes; tighten `_bootstrap_stack` assertion to reject stacks without a directive-bearing immediate goal and retry or fall back
+- `goal_location=ROUTE_101` — `_get_last_completed_milestone` is not reading the companion milestones file correctly; confirm `state_data["milestones"]` is populated on step 1
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 3: LLM Prompt & JSON Schema
+
+### 3.1 System Prompt
+
+```python
+SUPERVISOR_SYSTEM_PROMPT = """\
+You are the Executive Supervisor for an autonomous Pokémon Emerald AI agent.
+You receive:
+  1. The current Goal Stack (a nested task hierarchy, Stack[0] is the most immediate goal).
+  2. A summary of recent game events from episodic memory.
+  3. The current in-game state (location, HP, badges, battle outcome).
+
+Your job is to decide ONE stack operation:
+  - POP       : The immediate goal (Stack[0]) was completed. Remove it.
+  - CONTINUE  : The immediate goal is NOT yet complete (e.g. an interruption just ended).
+  - PUSH      : A new urgent sub-goal has appeared that must be done first.
+                Provide the new goal(s) in "new_goals".
+  - REPLACE   : The immediate goal is impossible as stated; swap it for a new approach.
+                Provide the replacement in "new_goals[0]".
+
+OUTPUT FORMAT — respond with ONLY a JSON object matching this schema:
+{
+  "operation":  "POP" | "CONTINUE" | "PUSH" | "REPLACE",
+  "reasoning":  "<one sentence chain-of-thought>",
+  "new_goals":  [                              // required for PUSH or REPLACE
+    {
+      "goal_id":              "<snake_case_id>",
+      "description":          "<what to do>",
+      "goal_type":            "strategic" | "tactical" | "immediate",
+      "parent_id":            "<id of parent goal or null>",
+      "completion_condition": "<observable condition that means this goal is done>",
+      "directive": {                           // required for goal_type="immediate"
+        "action":       "NAVIGATE" | "INTERACT" | "DIALOGUE" | "CROSS_BOUNDARY",
+        "goal_coords":  [x, y, "LOCATION_KEY"] | null,
+        "goal_location": "LOCATION_KEY"        | null,
+        "should_interact": true | false,
+        "npc_coords":   [x, y]                 | null,
+        "description":  "<short nav label>"
+      },
+      "metadata": {}
+    }
+  ]
+}
+
+RULES:
+1. Only issue PUSH for goals that are URGENT and BLOCKING (e.g. HP critical, NPC
+   blocking path). Do not PUSH for routine sub-steps — the walkthrough RAG handles those.
+2. A "POP" is valid ONLY when the completion_condition of Stack[0] is observably met
+   in the current game state summary. When in doubt, use CONTINUE.
+3. goal_type="immediate" goals MUST include a "directive" block with enough fields
+   for the plant controller to act.
+4. Never output coordinates you are unsure of — use goal_location only and set
+   goal_coords to null. The nav_bot will resolve path automatically.
+5. Return ONLY the JSON. No prose before or after.
+"""
+```
+
+### 3.2 User Prompt Template
+
+```python
+SUPERVISOR_USER_TEMPLATE = """\
+=== CURRENT GOAL STACK ===
+{stack_repr}
+
+=== IMMEDIATE GOAL (Stack[0]) ===
+Goal ID   : {goal_id}
+Type      : {goal_type}
+Objective : {goal_description}
+Completion: {completion_condition}
+
+=== RECENT GAME EVENTS (from episodic memory) ===
+{episodic_context}
+
+=== CURRENT GAME STATE ===
+Location  : {current_location}
+Position  : ({pos_x}, {pos_y})
+Party HP  : {party_hp_summary}
+Badges    : {badge_count}
+In Battle : {in_battle}
+Last Node : {last_node_fired}
+Handoff   : {previous_node} → {current_node}
+Step      : {step_count}
+
+=== LAST BATTLE OUTCOME (if applicable) ===
+{battle_outcome}
+
+What stack operation should be performed?
+"""
+```
+
+### 3.3 LLM Call Helper
+
+```python
+def _call_supervisor_llm(vlm, current_goal, episodic_ctx, game_summary, stack_repr):
+    """Call the VLM with the supervisor prompt. Returns parsed operation dict."""
+    prompt = SUPERVISOR_USER_TEMPLATE.format(
+        stack_repr=stack_repr,
+        goal_id=current_goal.goal_id,
+        goal_type=current_goal.goal_type,
+        goal_description=current_goal.description,
+        completion_condition=current_goal.completion_condition,
+        episodic_context=episodic_ctx or "(none)",
+        **game_summary,
+    )
+    try:
+        raw = vlm.generate(SUPERVISOR_SYSTEM_PROMPT, prompt)
+        # Strip markdown fences if present
+        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+        payload = json.loads(raw)
+        assert payload.get("operation") in ("POP", "CONTINUE", "PUSH", "REPLACE")
+        return payload
+    except Exception as e:
+        logger.warning("[SUPERVISOR] LLM parse error: %s — defaulting to CONTINUE", e)
+        return {"operation": "CONTINUE", "reasoning": f"parse_error: {e}", "new_goals": []}
+```
+
+### Phase 3 Tests
+
+**Automated — `tests/test_supervisor_prompt.py`:**
+
+```python
+class TestUserPromptRendering:
+    # SUPERVISOR_USER_TEMPLATE.format(...) with all required keys → no KeyError
+    # Rendered prompt contains goal_id, goal_description, stack_repr, and location
+
+class TestSystemPromptContainsAllOps:
+    # SUPERVISOR_SYSTEM_PROMPT contains all four operation strings: POP, CONTINUE, PUSH, REPLACE
+    # SUPERVISOR_SYSTEM_PROMPT contains the word "directive"
+    # SUPERVISOR_SYSTEM_PROMPT contains the JSON schema keys: goal_id, goal_type, completion_condition
+
+class TestCallSupervisorLLMValidJson:
+    # Mock VLM returns '{"operation": "CONTINUE", "reasoning": "ok", "new_goals": []}'
+    # _call_supervisor_llm returns dict with operation == "CONTINUE"
+    # No exception raised
+
+class TestCallSupervisorLLMMarkdownFences:
+    # Mock VLM returns '```json\n{"operation": "POP", "reasoning": "done", "new_goals": []}\n```'
+    # _call_supervisor_llm correctly strips fences and returns op == "POP"
+
+class TestCallSupervisorLLMInvalidOperation:
+    # Mock VLM returns '{"operation": "DANCE", "reasoning": "..."}'
+    # _call_supervisor_llm returns {"operation": "CONTINUE", ...} (assertion failure → fallback)
+
+class TestCallSupervisorLLMNetworkError:
+    # Mock VLM.generate() raises Exception("network error")
+    # _call_supervisor_llm returns {"operation": "CONTINUE", "reasoning": "parse_error: ...", "new_goals": []}
+    # No exception propagates to the caller
+```
+
+---
+
+## Phase 4: RAG → HTN Generation
+
+### 4.1 Bootstrap Sequence (`_bootstrap_stack`)
+
+Called when the goal stack is empty (first step, or all goals complete).
+
+```python
+def _bootstrap_stack(
+    state_data: dict,
+    walkthrough_db,
+    vlm,
+) -> list[GoalNode]:
+    """Build the initial goal stack from milestones.json + walkthrough RAG.
+
+    Algorithm:
+    1. Read completed milestones from state_data["milestones"] (loaded from
+       the companion .json file — the "World State Snapshot").
+    2. Determine progress level: last completed milestone → narrative position.
+    3. Query strategy_guide RAG collection with progress summary.
+    4. Ask LLM to generate a 3-level HTN:
+       - 1 strategic goal  (e.g. "Earn the Stone Badge")
+       - 2-4 tactical goals (e.g. "Reach Rustboro City", "Enter Rustboro Gym",
+                              "Defeat Roxanne")
+       - 1 immediate goal  (e.g. "Navigate north on Route 104 South")
+    5. Return stack with strategic goal at Stack[-1], immediate at Stack[0].
+    """
+    milestones = state_data.get("milestones", {})
+    last_completed = _get_last_completed_milestone(milestones)
+    badge_count    = _count_badges(state_data)
+    location       = _get_current_location(state_data)
+
+    # Query walkthrough RAG
+    rag_query = (
+        f"Player is in {location} with {badge_count} badges. "
+        f"Last milestone: {last_completed}. What should they do next?"
+    )
+    chunks = walkthrough_db.query(rag_query, n=5) if walkthrough_db else []
+    context_text = "\n\n".join(c["document"] for c in chunks) if chunks else ""
+
+    if not context_text or not vlm:
+        # Hard fallback: convert MILESTONE_PROGRESSION into a shallow stack
+        return _milestone_fallback_stack(milestones, state_data)
+
+    htn_prompt = _build_htn_generation_prompt(
+        context_text, location, last_completed, badge_count
+    )
+    try:
+        raw = vlm.generate(_HTN_SYSTEM_PROMPT, htn_prompt)
+        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+        goals_data = json.loads(raw)   # expects {"goals": [...]}
+        stack = [GoalNode.from_dict(g) for g in goals_data["goals"]]
+        # Validate: must have at least one goal with a directive
+        assert any(g.goal_type == "immediate" and g.directive for g in stack)
+        return stack
+    except Exception as e:
+        logger.warning("[SUPERVISOR] HTN generation failed: %s — using milestone fallback", e)
+        return _milestone_fallback_stack(milestones, state_data)
+```
+
+### 4.2 HTN Generation System Prompt
+
+```python
+_HTN_SYSTEM_PROMPT = """\
+You are generating the initial goal hierarchy for a Pokémon Emerald AI agent.
+
+Given walkthrough context and current game state, generate a NESTED TASK NETWORK
+with exactly this structure:
+  - 1 strategic goal  (high-level quest objective, type="strategic")
+  - 2-4 tactical goals (mid-level steps to complete the strategic goal, type="tactical")
+  - 1 immediate goal  (first concrete action, type="immediate", MUST include directive)
+
+The goals must be ordered from most-immediate (first in array) to most-strategic (last).
+Stack[0] (first in array) is what the agent does RIGHT NOW.
+
+OUTPUT FORMAT:
+{
+  "goals": [
+    {
+      "goal_id": "traverse_route_104_south",
+      "description": "Walk north through Route 104 South",
+      "goal_type": "immediate",
+      "parent_id": "reach_rustboro_city",
+      "completion_condition": "Player location changes to PETALBURG_WOODS or ROUTE_104_NORTH",
+      "directive": {
+        "action": "NAVIGATE",
+        "goal_coords": null,
+        "goal_location": "PETALBURG_WOODS",
+        "should_interact": false,
+        "npc_coords": null,
+        "description": "Head north through Route 104 South toward Petalburg Woods"
+      },
+      "metadata": {}
+    },
+    ... (tactical goals) ...
+    {
+      "goal_id": "earn_stone_badge",
+      "description": "Defeat Gym Leader Roxanne to earn the Stone Badge",
+      "goal_type": "strategic",
+      "parent_id": null,
+      "completion_condition": "Player has 1 badge",
+      "directive": null,
+      "metadata": {"required_badge_count": 1}
+    }
+  ]
+}
+
+RULES:
+1. The immediate goal MUST have a directive block.
+2. Use only LOCATION_GRAPH keys for goal_location (e.g. ROUTE_104_SOUTH,
+   PETALBURG_WOODS, RUSTBORO_CITY, RUSTBORO_CITY_GYM). Not prose names.
+3. Set goal_coords to null if unsure — nav_bot resolves paths automatically.
+4. Completion conditions must be observable from game state fields.
+5. Return ONLY JSON.
+"""
+```
+
+### 4.3 Expanding a Strategic Goal into Sub-Goals
+
+When a tactical goal is `POP`ped and its parent is a strategic goal, the
+Supervisor calls `_expand_strategic_goal()` to regenerate the next batch of
+tactical steps from RAG + LLM:
+
+```python
+def _expand_strategic_goal(
+    parent: GoalNode,
+    state_data: dict,
+    walkthrough_db,
+    vlm,
+) -> list[GoalNode]:
+    """Query walkthrough RAG and LLM to generate the next tactical sub-goals
+    for a strategic goal that has had all its children popped."""
+    query = f"{parent.description}. What are the next concrete steps?"
+    chunks = walkthrough_db.query(query, n=4) if walkthrough_db else []
+    context = "\n\n".join(c["document"] for c in chunks) if chunks else ""
+
+    if not context or not vlm:
+        return []   # Fall through to milestone fallback
+
+    prompt = (
+        f"Strategic goal: {parent.description}\n"
+        f"Completion condition: {parent.completion_condition}\n\n"
+        f"Walkthrough context:\n{context}\n\n"
+        f"Generate 2-3 tactical sub-goals to make progress on this strategic goal. "
+        f"Each must have goal_type='tactical' and parent_id='{parent.goal_id}'. "
+        f"The first sub-goal in the array is the most immediate. "
+        f"Return JSON array of goal objects (same schema as HTN generation)."
+    )
+    try:
+        raw = vlm.generate(_HTN_SYSTEM_PROMPT, prompt)
+        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+        goals_data = json.loads(raw)
+        return [GoalNode.from_dict(g) for g in goals_data.get("goals", [])]
+    except Exception as e:
+        logger.warning("[SUPERVISOR] expand_strategic_goal failed: %s", e)
+        return []
+```
+
+### Phase 4 Tests
+
+**Automated — `tests/test_htn_bootstrap.py`:**
+
+```python
+class TestGetLastCompletedMilestone:
+    # milestones dict with ROUTE_102 completed → returns "ROUTE_102"
+    # milestones dict with nothing completed → returns "GAME_RUNNING"
+    # milestones dict with all entries True → returns last entry in MILESTONE_PROGRESSION
+
+class TestMilestoneFallbackStack:
+    # _milestone_fallback_stack() with ROUTE_102 complete returns stack where
+    # Stack[0].directive.goal_location == "PETALBURG_CITY" (next milestone target)
+    # Returns at least 1 GoalNode with goal_type="immediate"
+    # Does not raise when MILESTONE_PROGRESSION is fully exhausted
+
+class TestRAGBootstrapQuery:
+    # Mock walkthrough_db.query() returns 3 chunks
+    # _bootstrap_stack calls walkthrough_db.query with a string containing the last milestone name
+    # The RAG query string mentions the current player location
+
+class TestHTNGenerationPromptStructure:
+    # _build_htn_generation_prompt() output includes walkthrough context, location, badge count
+    # Prompt instructs generation of "immediate", "tactical", and "strategic" types
+    # Prompt requires "directive" block on immediate goals
+
+class TestExpandStrategicGoal:
+    # Mock walkthrough_db returns 2 relevant chunks
+    # _expand_strategic_goal() with a strategic GoalNode returns 2-3 GoalNode objects
+    # Each returned node has parent_id == parent.goal_id and goal_type=="tactical"
+    # Returns [] without raising when walkthrough_db is None
+```
+
+**Manual — HTN Bootstrap from Route 102 State (`boundary_test.state`):**
+
+*Purpose:* Confirm the bootstrap reads `ROUTE_102` as `last_completed` from
+`boundary_test_milestones.json`, queries the Bulbapedia `strategy_guide` RAG,
+and generates a coherent HTN tree targeting the Petalburg City → gym → Norman
+sequence.
+
+*Setup:* Verify `boundary_test_milestones.json` exists alongside
+`boundary_test.state` with `ROUTE_102` completed and `PETALBURG_CITY` not yet
+completed. Run `python scripts/build_walkthrough_db.py` if `strategy_guide`
+collection is empty.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 5
+```
+
+*Observe in console:*
+```
+[SUPERVISOR] step=1  BOOTSTRAP
+[SUPERVISOR] last_completed=ROUTE_102
+[SUPERVISOR] RAG query: "Player is in PETALBURG_CITY with 0 badges. Last milestone: ROUTE_102..."
+[SUPERVISOR] RAG returned 5 chunks
+[SUPERVISOR] Stack (3 levels):
+  [I] Walk into Petalburg City  goal_location=PETALBURG_CITY
+  [T] Find and enter Petalburg City Gym
+  [S] Meet Norman (Dad) to unlock the Wally tutorial
+```
+
+*Pass criteria:*
+- [ ] `last_completed=ROUTE_102` printed (correct read from milestones JSON)
+- [ ] RAG query string references `ROUTE_102` or `Petalburg City`
+- [ ] Stack depth ≥ 3 (at least one each: immediate, tactical, strategic)
+- [ ] Stack[0] directive `goal_location` is `PETALBURG_CITY` or `PETALBURG_CITY_GYM`
+- [ ] `llm_logs/htn_shadow.jsonl` has one entry after 5 steps
+
+*Fail indicators:*
+- `last_completed=GAME_RUNNING` with a boundary_test save state: companion milestones JSON not found — verify the emulator loads the correct `*_milestones.json` at startup and populates `state_data["milestones"]`
+- RAG returned 0 chunks: `strategy_guide` collection is empty — run `python scripts/build_walkthrough_db.py`
+- Stack depth = 1 (immediate only): HTN generation prompt only produced one level — verify the system prompt requires all three types and check the LLM's raw JSON output via the shadow log
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 5: Memory Integration ("Dual-Core" Architecture)
+
+### 5.1 `game_history` Collection (Episodic — Completion Evidence)
+
+The Supervisor queries `game_history` to determine whether `Stack[0]`'s
+`completion_condition` is met. This replaces the hardcoded
+`milestones[milestone_id]["completed"]` checks in `verification_node`.
+
+```python
+def _query_episodic_memory(
+    episodic_memory,
+    current_goal: GoalNode,
+    state_data: dict,
+) -> str:
+    """Retrieve recent events relevant to the current immediate goal.
+
+    Returns a concatenated string of the top-k relevant episodic logs,
+    suitable for injection into the Supervisor prompt.
+    """
+    if not episodic_memory or not current_goal:
+        return ""
+
+    # Build a targeted query from the completion condition
+    query = (
+        f"Did the agent complete: '{current_goal.description}'? "
+        f"Completion condition: {current_goal.completion_condition}"
+    )
+    try:
+        results = episodic_memory.collection.query(
+            query_texts=[query],
+            n_results=5,
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        return "\n".join(docs) if docs else ""
+    except Exception as e:
+        logger.warning("[SUPERVISOR] episodic query error: %s", e)
+        return ""
+```
+
+**Key contract:** `EpisodicMemory.log_event()` must be called by the specialist
+nodes on all significant events. The existing `coms_bot_node` already logs
+dialogue turns. Extend `battle_bot_node` to log battle outcomes:
+
+```python
+# In battle_bot_node, after battle ends:
+if episodic_memory and not state_data.get("game", {}).get("in_battle"):
+    party_summary = _format_party_hp(state_data)
+    episodic_memory.log_event(
+        f"Battle ended. Party HP: {party_summary}",
+        {"type": "battle_outcome", "location": location},
+        state_data=state_data,
+    )
+```
+
+### 5.2 `strategy_guide` Collection (Semantic — Goal Generation)
+
+The `WalkthroughDB` (already uses the `strategy_guide` ChromaDB collection) is
+queried only during:
+1. `_bootstrap_stack()` — building the initial HTN
+2. `_expand_strategic_goal()` — repopulating children after a tactical POP
+
+Both call `walkthrough_db.query(query, n=5)`, which returns ranked chunks from
+the 136-chunk Bulbapedia walkthrough. The LLM then transforms these narrative
+chunks into structured `GoalNode` objects.
+
+**No changes needed to `WalkthroughDB`** — the existing collection and
+embedding pipeline are sufficient.
+
+### Phase 5 Tests
+
+**Automated — `tests/test_supervisor_memory.py`:**
+
+```python
+class TestEpisodicQueryPostBootOnly:
+    # EpisodicMemory populated with 1 record at boot_time - 1 (stale)
+    # and 1 record at boot_time + 1 (fresh)
+    # _query_episodic_memory returns only the post-boot document
+
+class TestEpisodicQueryEmpty:
+    # Empty game_history collection → _query_episodic_memory returns ""
+    # No exception raised
+
+class TestEpisodicQueryCompletionCheck:
+    # game_history has "Entered Petalburg City Gym and met Norman" at post-boot time
+    # Query for "DAD_FIRST_MEETING completion condition" returns that document
+    # Returned context text contains "Norman"
+
+class TestBattleOutcomeLogged:
+    # battle_bot_node called when in_battle transitions True → False
+    # episodic_memory.log_event called with text containing "Battle ended"
+    # Logged metadata includes type="battle_outcome" and location
+
+class TestBattleOutcomeInSupervisorContext:
+    # game_history contains a "Battle ended" record at post-boot time
+    # _query_episodic_memory for a "defeat trainer" goal returns the battle record
+    # Returned context non-empty
+```
+
+**Manual — Memory Integration Smoke Test (`boundary_test.state`):**
+
+*Purpose:* Confirm that after the agent has a brief NPC encounter en route to
+Petalburg City (any NPC dialogue or battle), the event is written to
+`game_history` and the Supervisor retrieves it on the subsequent handoff to
+evaluate progress.
+
+*Command — Step 1, run until at least one NPC interaction:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 120
+```
+
+*Command — Step 2, inspect ChromaDB:*
+```bash
+PYTHONPATH=$PWD .venv/bin/python -m agent.brain.demos.inspect_brain
+```
+
+*Observe in `inspect_brain` output:*
+- At least one entry in `game_history` with `metadata.timestamp` > `_boot_timestamp`
+- Entry text contains a dialogue fragment or `"Battle ended"`
+
+*Observe in console during run:*
+- After first coms_bot → nav_bot handoff: `[SUPERVISOR] episodic_ctx: "..."` is non-empty
+- `supervisor_last_reasoning` references retrieved context
+
+*Pass criteria:*
+- [ ] `game_history` has ≥ 1 post-boot entry after the run
+- [ ] `_query_episodic_memory` returns non-empty string on the first coms_bot → nav_bot handoff
+- [ ] Supervisor reasoning text references the retrieved context (visible in `supervisor_last_reasoning`)
+- [ ] Stale pre-boot records are NOT returned (check `timestamp` field in returned docs)
+
+*Fail indicators:*
+- No entries in `game_history`: `coms_bot_node` is not calling `episodic_memory.log_event` — confirm `episodic_memory` is passed to `make_coms_bot_node` factory
+- All records returned regardless of timestamp: `_boot_timestamp` not set in `Agent.__init__()` or not forwarded into `state_data`
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 6: Save State Initialization — The Boot Sequence
+
+### 6.1 Problem Statement
+
+When the agent loads a save state (e.g. `route102_hackathon.state`), the
+`goal_stack` in `AgentState` is empty. The `game_history` ChromaDB collection
+may be out of sync or populated with data from a different run. We cannot trust
+episodic memory to tell us where we are in the game.
+
+**Solution:** Use the companion `*_milestones.json` file as the authoritative
+"World State Snapshot" to bootstrap the goal stack.
+
+### 6.2 Milestones JSON → Bootstrap Query
+
+The milestones file (e.g. `route102_hackathon_milestones.json`) contains a flat
+dict of `milestone_id → {completed: bool, timestamp: float}`. This is already
+loaded into `state_data["milestones"]` by the emulator on startup.
+
+The `_bootstrap_stack()` function (Phase 4.1) reads `state_data["milestones"]`
+to compute:
+
+```python
+def _get_last_completed_milestone(milestones: dict) -> str:
+    """Return the ID of the highest-index completed milestone."""
+    from agent.objective_manager import MILESTONE_PROGRESSION
+    for entry in reversed(MILESTONE_PROGRESSION):
+        mid = entry["milestone"]
+        if milestones.get(mid, {}).get("completed"):
+            return mid
+    return "GAME_RUNNING"
+```
+
+This gives the Supervisor a deterministic anchor:
+- `last_completed = "ROUTE_102"` → agent is partway through the Petalburg City sequence
+- The RAG query uses this anchor: `"Player just completed ROUTE_102 and is heading to PETALBURG_CITY"`
+
+### 6.3 Boot Sequence Diagram
+
+```
+Agent.__init__()
+    └─ build_graph(obj_manager, vlm, episodic_memory, walkthrough_db)
+
+Agent.step() — step 0
+    ├─ dispatch_node
+    ├─ nav_bot  (goal_stack is empty → last_buttons=[])
+    ├─ handoff_detector_node → supervisor_pending = True (stack empty)
+    └─ executive_supervisor_node
+           │
+           ├─ goal_stack is empty → _bootstrap_stack()
+           │       ├─ Read state_data["milestones"]  ← from milestones.json
+           │       ├─ Compute last_completed milestone
+           │       ├─ Query walkthrough_db.query(progress_summary, n=5)
+           │       └─ LLM generates 3-level HTN → stack populated
+           │
+           └─ Stack[0] directive → goal_coords / goal_location written to state
+                                    nav_bot acts correctly from step 1 onward
+```
+
+### 6.4 Handling Episodic Memory Out-of-Sync
+
+When the `game_history` collection has records from a previous run that
+contradict the save state, the Supervisor must not be misled. Two safeguards:
+
+1. **Milestone-anchored bootstrap:** `_bootstrap_stack()` reads from
+   `milestones.json` directly, ignoring `game_history`. The initial HTN is
+   therefore always in sync with the save state.
+
+2. **Temporal filtering in episodic queries:** When the Supervisor queries
+   `game_history` for completion evidence in subsequent steps, filter by
+   `timestamp > boot_time` (set at agent init). This excludes stale records:
+
+```python
+# In _query_episodic_memory:
+boot_time = state_data.get("_boot_timestamp", 0.0)
+results = episodic_memory.collection.query(
+    query_texts=[query],
+    n_results=5,
+    where={"timestamp": {"$gte": boot_time}},   # only post-boot events
+    include=["documents", "metadatas"],
+)
+```
+
+   Add `_boot_timestamp: float` to `AgentState` and set it in `Agent.__init__()`.
+
+### Phase 6 Tests
+
+**Automated — `tests/test_boot_sequence.py`:**
+
+```python
+class TestBootTimestampSet:
+    # Agent.__init__() stores _boot_timestamp > 0.0 in state at run time
+    # Value is close to time.time() at initialisation
+
+class TestBootTimestampInState:
+    # On step 1 graph invocation, state["_boot_timestamp"] > 0.0
+
+class TestStaleEpisodicFiltered:
+    # EpisodicMemory pre-populated with 3 records timestamped before boot_time
+    # _query_episodic_memory with boot_time filter returns 0 documents
+    # Agent does not receive stale context
+
+class TestMilestonesJsonMapping:
+    # route102_hackathon_milestones.json → state_data["milestones"]["ROUTE_102"]["completed"] == True
+    # boundary_test_milestones.json     → _get_last_completed_milestone returns "ROUTE_102"
+    # new_game_milestones.json          → _get_last_completed_milestone returns "GAME_RUNNING"
+```
+
+**Manual — Cold Boot Correctness Test (`boundary_test.state`):**
+
+*Purpose:* Simulate a fresh agent start with a potentially stale `memory_db/` from
+a previous run. Confirm the agent does not hallucinate progress from stale
+ChromaDB records, and that the goal stack is bootstrapped purely from
+`boundary_test_milestones.json` (Route 102 complete, Petalburg City next).
+
+*Setup:* Do NOT wipe `memory_db/` — the test specifically verifies that stale
+records are filtered out by the `_boot_timestamp` guard, not that they are absent.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 15
+```
+
+*Observe in console:*
+```
+[SUPERVISOR] step=1  BOOTSTRAP
+[SUPERVISOR] boot_timestamp=1745XXXXXX.XXX
+[SUPERVISOR] last_completed=ROUTE_102  (from boundary_test_milestones.json)
+[SUPERVISOR] episodic context (post-boot only): ""  ← empty on step 1, no stale records
+[SUPERVISOR] Stack: [I]Enter Petalburg City → [T]Navigate to gym → [S]Meet Norman
+```
+
+*Pass criteria:*
+- [ ] `boot_timestamp` logged on step 1 (set in `Agent.__init__()`)
+- [ ] Episodic context is empty on step 1 (no stale records retrieved)
+- [ ] `last_completed=ROUTE_102` sourced from the milestones JSON, not `game_history`
+- [ ] Goal stack targets the Petalburg City sequence, not any earlier route
+- [ ] Agent takes a visible forward-moving navigation step on step 2
+
+*Fail indicators:*
+- Episodic context is non-empty on step 1: `_boot_timestamp` filter not applied — check `_query_episodic_memory` for the `where={"timestamp": {"$gte": boot_time}}` clause
+- `last_completed=GAME_RUNNING` with a boundary_test save: milestones JSON not loaded — check that the emulator passes the correct `*_milestones.json` path to `state_data["milestones"]` at startup
+- Stack references `ROUTE_101` content: RAG query used wrong anchor — confirm `_get_last_completed_milestone` iterates `MILESTONE_PROGRESSION` in reverse order
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Phase 7: Migration Path — Phasing Out `MILESTONE_PROGRESSION`
+
+The migration is designed so the FSM and HTN run **in parallel** during
+transition, with the HTN taking increasing ownership.
+
+### 7.1 Stage 1 — Shadow Mode (No Breaking Changes)
+
+- HTN goal stack is built but **not used** for navigation.
+- `goal_stack` is populated and logged to `llm_logs/htn_shadow.jsonl` each step.
+- `AgentState` nav fields (`goal_coords`, `goal_location`) still come from the
+  existing `ObjectiveManager.get_next_action_directive()` path.
+- Supervisor LLM calls are made but their output is compared against
+  `MILESTONE_PROGRESSION` and discarded if they disagree.
+- **Metric to track:** `supervisor_operation` distribution, stack depth, divergence rate.
+
+### 7.2 Stage 2 — Immediate Layer Handoff
+
+- HTN `Stack[0]` (type=`"immediate"`) replaces the directive from `ObjectiveManager`
+  **only for navigation goals** (not for battle or dialogue).
+- `ObjectiveManager._get_navigation_planner_directive()` is called as a fallback
+  when `Stack[0].directive` is None.
+- `milestone_index` is still updated by `verification_node` (unchanged).
+- **Kill switch:** `--use-htn` CLI flag; defaults off.
+
+### 7.3 Stage 3 — Full HTN Ownership
+
+- Supervisor fully drives `goal_coords`, `goal_location`, `should_interact`.
+- `verification_node` checks `Stack[0].completion_condition` against game state
+  instead of `milestones[milestone_id]["completed"]`.
+- `MILESTONE_PROGRESSION` is retained only as:
+  - A fallback for `_milestone_fallback_stack()` when LLM fails
+  - A bootstrap anchor for `_get_last_completed_milestone()`
+  - A ground-truth reference for offline evaluation
+
+### 7.4 Stage 4 — `MILESTONE_PROGRESSION` Retirement
+
+- `MILESTONE_PROGRESSION` is moved to `agent/data/milestone_reference.py` and
+  marked `# DEPRECATED — reference only`.
+- `ObjectiveManager` is renamed `MilestoneArchive` and stripped of all directive
+  generation logic; retains only `mark_goal_complete()` for backup writing.
+- `_initialize_storyline_objectives()` and the parallel `Objective` list are deleted
+  (resolves Known Problem C from `OBJECTIVE_TRACKING_SYSTEM.md`).
+
+### Phase 7 Tests
+
+**Automated — `tests/test_shadow_mode.py`** (Stage 7.1):
+
+```python
+class TestShadowLogWritten:
+    # After 3 graph.invoke() calls in shadow mode, llm_logs/htn_shadow.jsonl exists
+    # Each line is valid JSON with keys: step, milestone_index, supervisor_op, stack_depth, diverged
+    # Line count matches number of Supervisor activations
+
+class TestShadowDivergenceDetected:
+    # Milestone system targets PETALBURG_CITY_GYM
+    # Mock HTN supervisor targets ROUTE_104_SOUTH (simulating the known RAG override bug)
+    # Shadow log entry has diverged=True
+    # AgentState goal_coords unchanged (milestone target still used — HTN not active yet)
+
+class TestShadowNoDivergence:
+    # Both systems agree on PETALBURG_CITY as next target
+    # Shadow log entry has diverged=False
+```
+
+**Automated — `tests/test_htn_full_cycle.py`** (Stages 7.2–7.3):
+
+```python
+class TestFullCycleNavHandoff:
+    # Build graph with --use-htn (Stage 2: immediate layer only)
+    # goal_coords on the AgentState comes from HTN Stack[0].directive, not ObjectiveManager
+    # milestone_index still incremented by verification_node (unchanged)
+
+class TestFullCycleBattleHandoff:
+    # State transitions: nav_bot → battle_bot → nav_bot
+    # Supervisor fires on battle_bot → nav_bot handoff
+    # Mock episodic context contains "Battle ended" — Supervisor issues CONTINUE (goal still nav)
+    # goal_coords re-resolved from Stack[0] directive after handoff
+
+class TestFullCycleDialogueHandoff:
+    # State transitions: nav_bot → coms_bot → nav_bot
+    # Supervisor fires on coms_bot → nav_bot handoff
+    # Mock episodic context contains Norman dialogue keywords
+    # Supervisor issues POP; stack advances to next tactical goal
+    # New Stack[0] directive targets ROUTE_104_SOUTH
+```
+
+**Manual — Shadow Mode Divergence Analysis (`boundary_test.state`):**
+
+*Purpose:* Run the full Petalburg City sequence in shadow mode (Stage 7.1) to
+measure how often the HTN Supervisor and `MILESTONE_PROGRESSION` disagree, and
+to verify the HTN does NOT reproduce the known RAG override bug where the legacy
+system skips `DAD_FIRST_MEETING` and navigates to `ROUTE_104_SOUTH` instead.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 200
+```
+*(Shadow logging is always active once Phase 7.1 is implemented; `--use-htn` not needed.)*
+
+*Inspect shadow log after run:*
+```bash
+cat llm_logs/htn_shadow.jsonl | python -c "
+import sys, json
+rows = [json.loads(l) for l in sys.stdin]
+diverged = [r for r in rows if r.get('diverged')]
+print(f'Total Supervisor activations: {len(rows)}, Diverged: {len(diverged)}')
+for r in diverged[:5]:
+    print(f'  step={r[\"step\"]} milestone={r[\"milestone_target\"]} htn={r[\"htn_target\"]}')
+"
+```
+
+*Pass criteria:*
+- [ ] Shadow log file created at `llm_logs/htn_shadow.jsonl`
+- [ ] Agent navigates from boundary (Petalburg City entrance) into gym within 200 steps (driven by `MILESTONE_PROGRESSION`, HTN in shadow only)
+- [ ] For the `DAD_FIRST_MEETING` step: HTN target is `PETALBURG_CITY_GYM` (no divergence)
+- [ ] For the `GYM_EXPLANATION` step: HTN does NOT target `ROUTE_104_SOUTH` (this was the legacy bug — verify it is fixed in the HTN)
+- [ ] Supervisor activations ≤ 6 across 200 steps (handoff-gated correctly)
+
+*Fail indicators:*
+- Shadow log is empty: `htn_shadow.jsonl` write not wired in Stage 7.1 implementation
+- HTN still targets `ROUTE_104_SOUTH` for `DAD_FIRST_MEETING`: Supervisor `completion_condition` check is not receiving the correct game state — check `_apply_immediate_directive` is writing `active_milestone` to state so the Supervisor knows which goal is active
+- Supervisor activates every step: handoff detector `_SIGNIFICANT_TRANSITIONS` is not filtering same-node repeats
+
+*Status:* 🔲 NOT YET RUN
+
+**Manual — Full Petalburg Corridor Run with HTN Active (`boundary_test.state`):**
+
+*Purpose:* End-to-end validation (Stage 7.2 — immediate layer handoff) that the
+HTN system drives the agent from the Petalburg City entrance → gym → Norman
+dialogue → Route 104 South, with the Supervisor correctly issuing `CONTINUE`
+during dialogue and `POP` after Norman has spoken.
+
+*Command:*
+```bash
+python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 300 --use-htn
+```
+
+*Observe in console per step:*
+```
+[STEP 001] dispatch → nav_bot    | [I]Enter Petalburg City  goal=PETALBURG_CITY
+[STEP 008] dispatch → nav_bot    | [I]Navigate to Petalburg Gym  goal=PETALBURG_CITY_GYM
+[STEP 015] dispatch → coms_bot   | NPC dialogue triggered
+[HANDOFF]  nav_bot → coms_bot    pending=True
+[SUPERVISOR] step=15  CONTINUE  "Norman dialogue not yet complete"
+[STEP 025] dispatch → nav_bot    | exiting dialogue
+[HANDOFF]  coms_bot → nav_bot    pending=True
+[SUPERVISOR] step=25  POP  "Norman dialogue complete — transcript confirmed"
+[STEP 026] dispatch → nav_bot    | [T]Head to Route 104 South  goal=ROUTE_104_SOUTH
+```
+
+*Pass criteria:*
+- [ ] Agent enters Petalburg City within 10 steps (nav_bot driving HTN immediate goal)
+- [ ] Agent enters Petalburg Gym within 30 steps of starting
+- [ ] Supervisor issues `CONTINUE` while Norman dialogue is in progress (not a premature POP)
+- [ ] Supervisor issues `POP` after the coms_bot → nav_bot handoff when Norman has spoken
+- [ ] After POP, Stack[0] advances to the next tactical goal (toward Route 104 South or Rustboro)
+- [ ] Agent begins navigating toward Route 104 South within 10 steps of the POP
+- [ ] `DAD_FIRST_MEETING` milestone logs as complete in the run console
+
+*Subjective evaluation (rate 1–5, note in `run_logs/eval_notes.txt`):*
+- **Goal coherence** — Does the Supervisor's reasoning text accurately describe the situation?
+- **Stack discipline** — Does the stack depth stay ≤ 4 throughout? (deep stacks indicate PUSH loops)
+- **Handoff responsiveness** — Is there noticeable hesitation (>3 PASS steps) after a handoff?
+
+*Fail indicators:*
+- Agent enters gym and immediately exits (premature POP before Norman speaks): `completion_condition` check is triggering on map entry, not on dialogue completion — tighten the condition string to require episodic evidence of Norman's dialogue keywords
+- Supervisor POP never fires after Norman dialogue: `coms_bot_node` is not writing dialogue turns to `game_history`, so the Supervisor always sees empty context and defaults to `CONTINUE` — confirm `episodic_memory.log_event` is called inside `coms_bot_node`
+- Stack grows unbounded: a PUSH loop where each coms_bot trigger pushes a new "talk to NPC" goal — add a guard in `executive_supervisor_node` that rejects PUSH when `goal_stack` depth > 6
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+## Implementation Checklist
+
+| Phase | File | Change Type | Status |
+|-------|------|------------|--------|
+| 0 | `agent/graph/goal_stack.py` | **CREATE** | ☐ |
+| 0 | `agent/graph/state.py` | MODIFY (add 5 HTN fields) | ☐ |
+| 0 | `tests/test_goal_stack.py` | **CREATE** | ☐ |
+| 0 | `tests/test_agent_state_htn.py` | **CREATE** | ☐ |
+| 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** | ☐ |
+| 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ☐ |
+| 1 | `tests/test_handoff_detector.py` | **CREATE** | ☐ |
+| 2 | `agent/graph/nodes/executive_supervisor.py` | **CREATE** | ☐ |
+| 2 | `tests/test_executive_supervisor.py` | **CREATE** | ☐ |
+| 3 | (prompts embedded in `executive_supervisor.py`) | n/a | ☐ |
+| 3 | `tests/test_supervisor_prompt.py` | **CREATE** | ☐ |
+| 4 | `executive_supervisor.py` (`_bootstrap_stack`, `_expand_strategic_goal`) | part of Phase 2 file | ☐ |
+| 4 | `tests/test_htn_bootstrap.py` | **CREATE** | ☐ |
+| 5 | `agent/graph/nodes/battle_bot.py` | MODIFY (log battle outcome) | ☐ |
+| 5 | `tests/test_supervisor_memory.py` | **CREATE** | ☐ |
+| 6 | `agent/graph/state.py` | MODIFY (add `_boot_timestamp`) | ☐ |
+| 6 | `agent/__init__.py` | MODIFY (set `_boot_timestamp`) | ☐ |
+| 6 | `tests/test_boot_sequence.py` | **CREATE** | ☐ |
+| 7.1 | `agent/graph/nodes/executive_supervisor.py` | MODIFY (shadow log) | ☐ |
+| 7.2 | `run.py` / `agent/__init__.py` | MODIFY (add `--use-htn` flag) | ☐ |
+| 7 | `tests/test_shadow_mode.py` | **CREATE** | ☐ |
+| 7 | `tests/test_htn_full_cycle.py` | **CREATE** | ☐ |
+
+---
+
+## Known Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| LLM outputs unparseable JSON on first boot | `_bootstrap_stack` falls back to `_milestone_fallback_stack()` — no crash, no agent stall |
+| Supervisor fires too frequently (high token cost) | Handoff detector strictly gates on `_SIGNIFICANT_TRANSITIONS`; same-node loops never trigger |
+| Goal stack diverges from actual game state | `_boot_timestamp` filtering + milestone.json bootstrap ensures re-sync on every load |
+| LLM generates invalid `LOCATION_GRAPH` keys | `LocationResolver.resolve_location_key()` (existing) maps prose → graph keys; returns `None` on failure → nav_bot uses directional fallback |
+| RAG returns irrelevant chunks | Existing `WalkthroughDB` distance threshold already filters low-confidence results; `_bootstrap_stack` uses `milestone_fallback_stack` when `context_text` is empty |
+| Parallel `Objective` list in `ObjectiveManager` drifts | Fixed in Stage 4 migration; `_initialize_storyline_objectives()` is deleted. Until then, `milestone_index` drives `verification_node` as before |
+
+---
+
+## Appendix A: Glossary
+
+| Term | Definition |
+|------|-----------|
+| **HTN** | Hierarchical Task Network — a plan representation where goals nest recursively |
+| **Goal Stack** | The live HTN; `Stack[0]` is the current immediate action |
+| **Executive Supervisor** | LLM node that reads stack + game state and issues stack operations |
+| **Plant Controller** | Deterministic specialist node: `nav_bot`, `battle_bot`, `coms_bot` |
+| **Handoff** | The moment control transitions from one plant controller to another |
+| **Bootstrap** | Building the initial goal stack from `milestones.json` + walkthrough RAG |
+| **World State Snapshot** | The `*_milestones.json` companion file for a save state |
+
+## Appendix B: How This Fixes the Known Problems from `OBJECTIVE_TRACKING_SYSTEM.md`
+
+| Known Problem | HTN Solution |
+|---|---|
+| **A. RAG overrides gym milestone** | The Supervisor decides overrides via LLM reasoning, not a brittle `completion_type != "dialogue"` flag. Gym dialogue is locked by the `completion_condition` string, not by a data field. |
+| **B. Gym interior A\* impossible** | The Supervisor issues `goal_type="immediate"` goals like "Enter Gym" (warp handled automatically by game engine). The HTN never needs to plan past the warp boundary. |
+| **C. Duplicate Objective list** | `_initialize_storyline_objectives()` is deleted in Stage 4. The `GoalNode` list *is* the objective list. |
+| **D. Cannot distinguish "entered gym" from "completed scene"** | Supervisor's `completion_condition` is checked against `game_history` episodic logs, which capture the actual dialogue transcript from `coms_bot_node`. "Norman cutscene ran" is verifiable from transcript content. |
