@@ -241,3 +241,32 @@ class AgentState(TypedDict, total=False):
     active_milestone: Optional[str]
     """ID of the milestone the agent is currently working toward
     (e.g. 'DAD_FIRST_MEETING').  Printed by nav_bot_node for observability."""
+
+    # ---- HTN Goal Stack (Phase 0+) ----
+    goal_stack: list
+    """Ordered list of GoalNode dicts (serialised via GoalNode.to_dict()).
+    Stack[0] = the most-immediate goal; Stack[-1] = the highest strategic goal.
+    An empty list means the stack is exhausted and the Supervisor must bootstrap
+    a new plan.  Stored as List[dict] rather than List[GoalNode] because
+    LangGraph requires JSON-serialisable state values; deserialise at node
+    boundaries with GoalNode.from_dict()."""
+
+    last_node_fired: Optional[str]
+    """Name of the specialist node that most recently completed execution
+    (e.g. 'nav_bot', 'battle_bot', 'coms_bot').  Written by
+    handoff_detector_node and used to detect meaningful state transitions."""
+
+    supervisor_pending: bool
+    """When True, executive_supervisor_node fires after the current step's
+    handoff_detector_node completes.  Reset to False by the Supervisor itself
+    at the end of each invocation."""
+
+    supervisor_last_operation: Optional[str]
+    """The stack operation issued on the most recent Supervisor invocation:
+    'POP' | 'CONTINUE' | 'PUSH' | 'REPLACE'.  Stored for observability and
+    shadow-mode logging."""
+
+    supervisor_last_reasoning: Optional[str]
+    """The Supervisor's free-text chain-of-thought from the most recent LLM
+    call, truncated to ~500 chars.  Written to llm_logs/ for offline
+    analysis."""

@@ -292,15 +292,19 @@ print('Roundtrip:', GoalNode.from_dict(g.to_dict()).goal_id)
 ```
 
 *Pass criteria:*
-- [ ] No `ImportError` or `AttributeError`
-- [ ] `stack_summary` prints the goal description
-- [ ] `Roundtrip` prints `test`
+- [x] No `ImportError` or `AttributeError`
+- [x] `stack_summary` prints the goal description
+- [x] `Roundtrip` prints `test`
 
 *Fail indicators:*
 - `ImportError: cannot import name 'GoalNode'` — `agent/graph/goal_stack.py` not yet created
 - `KeyError` in `from_dict` — field name mismatch between `to_dict` and `__dataclass_fields__`
 
-*Status:* 🔲 NOT YET RUN
+*Status:* ✅ PASSED — 58/58 automated tests green; smoke test output:
+```
+Stack: [I]Walk into Petalburg City
+Roundtrip: test
+```
 
 ---
 
@@ -2045,10 +2049,10 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 
 | Phase | File | Change Type | Status |
 |-------|------|------------|--------|
-| 0 | `agent/graph/goal_stack.py` | **CREATE** | ☐ |
-| 0 | `agent/graph/state.py` | MODIFY (add 5 HTN fields) | ☐ |
-| 0 | `tests/test_goal_stack.py` | **CREATE** | ☐ |
-| 0 | `tests/test_agent_state_htn.py` | **CREATE** | ☐ |
+| 0 | `agent/graph/goal_stack.py` | **CREATE** | ✅ |
+| 0 | `agent/graph/state.py` | MODIFY (add 5 HTN fields) | ✅ |
+| 0 | `tests/test_goal_stack.py` | **CREATE** | ✅ |
+| 0 | `tests/test_agent_state_htn.py` | **CREATE** | ✅ |
 | 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** (includes nav-stall detection) | ☐ |
 | 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ☐ |
 | 1 | `tests/test_handoff_detector.py` | **CREATE** | ☐ |
