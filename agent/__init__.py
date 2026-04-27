@@ -152,7 +152,7 @@ class Agent:
             self._get_session_transcript = get_session_transcript
             self._clear_session_transcript = clear_session_transcript
             self._transition_evaluator = TransitionEvaluator(vlm=self.vlm)
-            self._graph = build_graph(self.objective_manager, self.vlm, self.episodic_memory)
+            self._graph = build_graph(self.objective_manager, self.vlm, self.episodic_memory, walkthrough_db=self.walkthrough_db)
             self._step_count: int = 0
             self._prev_state_snapshot: dict | None = None
             self._graph_milestone_index: int = 0

@@ -157,7 +157,106 @@ def chunk_wikitext(raw: str, part_number: int) -> List[Dict[str, Any]]:
 # cover the critical Route 101 → Oldale → Route 103 → rival battle →
 # Route 102 → Petalburg progression so the RAG retriever returns relevant
 # context even at the start of the game.
+#
+# IMPORTANT: Each chunk is written as a forward-looking guide for a player
+# already AT that location.  Do NOT describe steps the player needs to do
+# before reaching the location — only what to do from that point forward.
 # ============================================================================
+
+SUPPLEMENTAL_CHUNKS: list[dict] = [
+    {
+        "text": (
+            "Oldale Town (navigation)\n\n"
+            "Oldale Town is the first town you reach after Route 101. "
+            "Head north from Oldale Town to Route 103 to find and battle your rival. "
+            "After the rival battle, return south through Oldale Town and go to "
+            "Professor Birch's Lab in Littleroot Town to receive the Pokedex. "
+            "Then head west from Oldale Town through Route 102 toward Petalburg City "
+            "to continue the storyline."
+        ),
+        "metadata": {
+            "part": 1,
+            "section_order": 51,
+            "location": "Oldale Town (navigation)",
+            "has_battle": False,
+            "supplemental": True,
+        },
+    },
+    {
+        "text": (
+            "Route 103 (rival battle)\n\n"
+            "Route 103 is north of Oldale Town. Travel here after receiving your "
+            "starter Pokemon and arriving in Oldale Town. Your rival is waiting at "
+            "the northern end of the route. Walk up to them to trigger the first "
+            "rival battle. After winning, your rival will suggest returning to "
+            "Professor Birch's Lab. Head south through Oldale Town and Route 101 "
+            "to Littleroot Town to receive the Pokedex."
+        ),
+        "metadata": {
+            "part": 1,
+            "section_order": 52,
+            "location": "Route 103 (rival battle)",
+            "has_battle": True,
+            "supplemental": True,
+        },
+    },
+    {
+        "text": (
+            "Route 102 (navigation)\n\n"
+            "Route 102 connects Oldale Town to the east and Petalburg City to the "
+            "west. When on Route 102, travel west through the tall grass and past "
+            "the trainers to reach Petalburg City. Trainers here include Youngster "
+            "Calvin (Poochyena), Bug Catcher Rick (Wurmple), and Youngster Allen "
+            "(Zigzagoon). After arriving at Petalburg City, head to the Petalburg "
+            "Gym to meet your father Norman and witness the Wally event. Norman will "
+            "advise you to challenge Gym Leader Roxanne in Rustboro City before "
+            "attempting the other gyms."
+        ),
+        "metadata": {
+            "part": 1,
+            "section_order": 50,
+            "location": "Route 102 (navigation)",
+            "has_battle": False,
+            "supplemental": True,
+        },
+    },
+    {
+        "text": (
+            "Littleroot Town to Petalburg City\n\n"
+            "After receiving the Pokedex from Professor Birch in Littleroot Town, "
+            "head north through Route 101 to Oldale Town, then west through Route "
+            "102 to reach Petalburg City. In Petalburg City, visit the gym to meet "
+            "your father Norman. You will witness Wally catch a Pokemon. After the "
+            "gym visit, continue west through Route 104 toward Petalburg Woods and "
+            "eventually Rustboro City."
+        ),
+        "metadata": {
+            "part": 1,
+            "section_order": 53,
+            "location": "Littleroot to Petalburg",
+            "has_battle": False,
+            "supplemental": True,
+        },
+    },
+    {
+        "text": (
+            "Route 104 and Petalburg Woods\n\n"
+            "After leaving Petalburg City, travel west to Route 104 South. Head "
+            "north through Route 104 South into Petalburg Woods. Navigate through "
+            "Petalburg Woods heading north — you will encounter a Team Aqua Grunt "
+            "who you must defeat. After exiting Petalburg Woods, you arrive at "
+            "Route 104 North. Continue north to reach Rustboro City where the "
+            "first gym awaits."
+        ),
+        "metadata": {
+            "part": 2,
+            "section_order": 54,
+            "location": "Route 104 to Rustboro",
+            "has_battle": True,
+            "supplemental": True,
+        },
+    },
+]
 
 # ============================================================================
 # WalkthroughDB class

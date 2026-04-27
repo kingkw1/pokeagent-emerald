@@ -86,23 +86,28 @@ def _llm_response(operation: str, reasoning: str = "test", new_goals: list | Non
 # ---------------------------------------------------------------------------
 
 class TestBootstrapStub:
-    """Phase-2: _bootstrap_stack is a stub returning [] → node is a no-op."""
+    """Phase 2→4: _bootstrap_stack now populates the stack from milestone fallback.
+
+    Previously the stub returned [] (no-op).  In Phase 4 it returns a real
+    milestone-fallback stack when the walkthrough DB is None.
+    """
 
     def test_empty_stack_returns_supervisor_pending_false(self):
         node = _make_node()
         result = node(_base_state(goal_stack=[]))
         assert result["supervisor_pending"] is False
 
-    def test_empty_stack_goal_stack_remains_empty(self):
+    def test_empty_stack_goal_stack_non_empty(self):
+        """After Phase 4, bootstrap populates at least one goal via milestone fallback."""
         node = _make_node()
         result = node(_base_state(goal_stack=[]))
-        assert result["goal_stack"] == []
+        assert len(result["goal_stack"]) >= 1
 
-    def test_empty_stack_no_operation_set(self):
+    def test_empty_stack_operation_is_bootstrap(self):
+        """After Phase 4, bootstrap sets supervisor_last_operation to BOOTSTRAP."""
         node = _make_node()
         result = node(_base_state(goal_stack=[]))
-        # supervisor_last_operation is not touched by the no-op branch
-        assert result.get("supervisor_last_operation") is None
+        assert result.get("supervisor_last_operation") == "BOOTSTRAP"
 
 
 # ---------------------------------------------------------------------------
@@ -571,8 +576,8 @@ class TestBuildGameSummary:
             "party": [{"name": "Treecko", "current_hp": 20, "max_hp": 25}],
         }
         summary = _build_game_summary(state_data, {})
-        assert "OLDALE_TOWN" in summary
-        assert "Treecko" in summary
+        assert summary["current_location"] == "OLDALE_TOWN"
+        assert "Treecko" in summary["party_hp_summary"]
 
     def test_dict_badges_counted(self):
         state_data = {
@@ -580,8 +585,8 @@ class TestBuildGameSummary:
             "game": {"badges": {"stone": True, "knuckle": False}, "in_battle": False},
         }
         summary = _build_game_summary(state_data, {})
-        assert "Badges: 1" in summary
+        assert summary["badge_count"] == 1
 
     def test_missing_state_data_does_not_crash(self):
         summary = _build_game_summary({}, {})
-        assert "Unknown" in summary
+        assert summary["current_location"] == "Unknown"

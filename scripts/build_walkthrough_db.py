@@ -53,7 +53,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.brain.walkthrough_db import WalkthroughDB, chunk_wikitext
+from agent.brain.walkthrough_db import WalkthroughDB, chunk_wikitext, SUPPLEMENTAL_CHUNKS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -280,6 +280,11 @@ def build_database(
 
         # Polite delay between fetches
         time.sleep(1)
+
+    if not dry_run:
+        added = db.add_chunks(SUPPLEMENTAL_CHUNKS)
+        total_chunks += added
+        logger.info(f"Supplemental chunks: {added} embedded.")
 
     action = "previewed" if dry_run else "embedded"
     logger.info(

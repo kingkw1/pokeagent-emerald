@@ -69,6 +69,21 @@ class VLMBackend(ABC):
         """Process a text-only prompt"""
         pass
 
+    def get_json_query(self, system_prompt: str, user_prompt: str, module_name: str = "Unknown", timeout: int = 30) -> str:
+        """Request a JSON response given separate system and user prompts.
+
+        Default implementation concatenates the prompts and delegates to
+        ``get_text_query``.  Backends that support native JSON mode
+        (``response_mime_type="application/json"``) should override this
+        to guarantee well-formed JSON output without markdown fences.
+
+        Args:
+            timeout: SDK-level request timeout in seconds.  Increase for
+                     complex prompts (e.g. HTN generation) that may trigger
+                     extended model thinking.  Default 30 s.
+        """
+        return self.get_text_query(f"{system_prompt}\n\n{user_prompt}", module_name)
+
 class OpenAIBackend(VLMBackend):
     """OpenAI API backend"""
     
@@ -729,6 +744,40 @@ class VertexBackend(VLMBackend):
             logger.warning(f"[{module_name}] Returning default response due to error: {e}")
             return "I encountered an error processing the request. I'll proceed with a basic action: press 'A' to continue."
 
+    def get_json_query(self, system_prompt: str, user_prompt: str, module_name: str = "Unknown", timeout: int = 30) -> str:
+        """Request a JSON response using Vertex AI's native JSON mode.
+
+        Passes ``response_mime_type="application/json"`` so the model returns
+        raw JSON without markdown fences.  Falls back to the plain-text path
+        on any API error.
+
+        Args:
+            timeout: SDK-level request timeout in seconds.  Increase for
+                     complex prompts that may trigger extended thinking.
+        """
+        from google.genai import types
+        combined = f"{system_prompt}\n\n{user_prompt}"
+        try:
+            prompt_preview = combined[:2000] + "..." if len(combined) > 2000 else combined
+            logger.info(f"[{module_name}] VERTEX JSON QUERY:")
+            logger.info(f"[{module_name}] PROMPT: {prompt_preview}")
+
+            config = types.GenerateContentConfig(response_mime_type="application/json")
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=combined,
+                config=config,
+                request_options={"timeout": timeout},
+            )
+            result = response.text
+            result_preview = result[:1000] + "..." if len(result) > 1000 else result
+            logger.info(f"[{module_name}] RESPONSE: {result_preview}")
+            logger.info(f"[{module_name}] ---")
+            return result
+        except Exception as e:
+            logger.warning(f"[{module_name}] Vertex JSON mode failed: {e} — falling back to text query")
+            return self.get_text_query(combined, module_name)
+
 
 class GeminiBackend(VLMBackend):
     """Google Gemini API backend"""
@@ -902,6 +951,62 @@ class GeminiBackend(VLMBackend):
             logger.warning(f"[{module_name}] Returning default response due to error: {e}")
             return "I encountered an error processing the request. I'll proceed with a basic action: press 'A' to continue."
 
+    def get_json_query(self, system_prompt: str, user_prompt: str, module_name: str = "Unknown", timeout: int = 30) -> str:
+        """Request a JSON response using Gemini's native JSON mode.
+
+        Passes ``response_mime_type="application/json"`` so the model returns
+        raw JSON without markdown fences.  Falls back to the plain-text path
+        on any API error.
+
+        Args:
+            timeout: SDK-level request timeout in seconds.  Increase for
+                     complex prompts (e.g. HTN generation) that may trigger
+                     extended model thinking.  Default 30 s.
+        """
+        import google.generativeai as genai
+        start_time = time.time()
+        combined = f"{system_prompt}\n\n{user_prompt}"
+        try:
+            prompt_preview = combined[:2000] + "..." if len(combined) > 2000 else combined
+            logger.info(f"[{module_name}] GEMINI JSON QUERY:")
+            logger.info(f"[{module_name}] PROMPT: {prompt_preview}")
+
+            config = genai.GenerationConfig(response_mime_type="application/json")
+            response = self.model.generate_content(
+                combined,
+                generation_config=config,
+                request_options={"timeout": timeout},
+            )
+            response.resolve()
+            result = response.text
+            duration = time.time() - start_time
+
+            token_usage = {}
+            if hasattr(response, "usage_metadata"):
+                usage = response.usage_metadata
+                token_usage = {
+                    "prompt_tokens": getattr(usage, "prompt_token_count", 0),
+                    "completion_tokens": getattr(usage, "candidates_token_count", 0),
+                    "total_tokens": getattr(usage, "total_token_count", 0),
+                }
+
+            log_llm_interaction(
+                interaction_type=f"gemini_{module_name}",
+                prompt=combined,
+                response=result,
+                duration=duration,
+                metadata={"model": self.model_name, "backend": "gemini", "has_image": False,
+                          "json_mode": True, "token_usage": token_usage},
+                model_info={"model": self.model_name, "backend": "gemini"},
+            )
+            result_preview = result[:1000] + "..." if len(result) > 1000 else result
+            logger.info(f"[{module_name}] RESPONSE: {result_preview}")
+            logger.info(f"[{module_name}] ---")
+            return result
+        except Exception as e:
+            logger.warning(f"[{module_name}] Gemini JSON mode failed: {e} — falling back to text query")
+            return self.get_text_query(combined, module_name)
+
 class VLM:
     """Main VLM class that supports multiple backends"""
     
@@ -992,3 +1097,18 @@ class VLM:
                 metadata={"model": self.model_name, "backend": self.backend.__class__.__name__, "duration": duration, "has_image": False}
             )
             raise
+
+    def get_json_query(self, system_prompt: str, user_prompt: str, module_name: str = "Unknown", timeout: int = 30) -> str:
+        """Request a JSON-mode response from the active backend.
+
+        Delegates to the backend's ``get_json_query`` implementation.  Backends
+        that support native JSON mode (Gemini, Vertex) will use
+        ``response_mime_type="application/json"``; all others fall back to a
+        concatenated ``get_text_query`` call.
+
+        Args:
+            timeout: SDK-level request timeout in seconds passed to the backend.
+                     Increase for complex prompts that may trigger extended
+                     model thinking.  Default 30 s.
+        """
+        return self.backend.get_json_query(system_prompt, user_prompt, module_name, timeout)
