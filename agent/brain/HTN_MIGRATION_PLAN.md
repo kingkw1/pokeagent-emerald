@@ -60,7 +60,44 @@ common case.
 
 ---
 
+## Testing Eras — What Save-State Tests Look Like Per Phase
+
+Before diving into individual phases, this section maps what the running agent
+actually does at each implementation stage. This answers the question: *"Can I
+use `boundary_test.state` to test at every phase, or do I have to wait until
+Phase 6?"*
+
+**Short answer: save states work from Phase 0.** The emulator populates
+`state_data["milestones"]` from the companion `*_milestones.json` file at
+startup. This is emulator infrastructure, not HTN code. Phase 6's
+`_boot_timestamp` is purely a ChromaDB staleness guard (preventing stale
+pre-run records from misleading the Supervisor) — it has no effect on save-state
+loading correctness.
+
+| Phase range | Who drives navigation? | What fires on a handoff? | Save-state usable? |
+|---|---|---|---|
+| **0–1** | Legacy FSM (`ObjectiveManager` + `MILESTONE_PROGRESSION`) | `handoff_detector` logs the transition but `supervisor_pending` has nowhere to go (no supervisor node) | ✅ Yes — same as today |
+| **2–3** | Legacy FSM | Supervisor fires, but `_bootstrap_stack` is a stub returning `[]`; `_apply_immediate_directive` is a no-op for empty stack; `--use-htn` is **OFF** by default | ✅ Yes — agent navigates identically to Phase 0–1 |
+| **4–5** | Legacy FSM (default) OR HTN (with `--use-htn`) | Supervisor fires; `_bootstrap_stack` builds a real stack from milestones JSON + RAG; directive applied only when `--use-htn` is set | ✅ Yes — `boundary_test.state` milestones JSON anchors the bootstrap; run without `--use-htn` to keep FSM as the authority |
+| **6** | Same as Phase 4–5 | `_boot_timestamp` now filters stale ChromaDB records from episodic context | ✅ Yes — adds ChromaDB isolation, doesn't change navigation |
+| **7.1** | Legacy FSM (shadow mode — `--use-htn` still off) | Supervisor output logged to `htn_shadow.jsonl` for comparison; no nav field changes | ✅ Yes |
+| **7.2+** | HTN (with `--use-htn`) | Stack[0] directive replaces ObjectiveManager directive | ✅ Yes — this is the first step where HTN actually steers the agent |
+
+**The critical design constraint this implies:**
+
+> `_apply_immediate_directive` MUST be gated by a `use_htn` flag from Phase 2
+> onward. If it isn't, Phases 4–5 inadvertently become live HTN navigation
+> before you've decided to flip that switch. The `--use-htn` flag is NOT a
+> Phase 7 concern — it belongs in the factory signature of
+> `make_executive_supervisor_node()` at Phase 2.
+
+This is corrected in the Phase 2 implementation below.
+
+---
+
 ## Phase 0: Goal Stack Data Structures
+
+**Purpose:** Create the data types that every other phase depends on. `GoalNode` is the unit of the HTN; the stack primitives (`push`, `pop`, `peek`, `replace`) are the only mutations allowed. Nothing in Phases 1–7 can be built until these exist and are tested.
 
 ### 0.1 `GoalNode` — The Unit of the HTN
 
@@ -269,6 +306,8 @@ print('Roundtrip:', GoalNode.from_dict(g.to_dict()).goal_id)
 
 ## Phase 1: Handoff Detector Node
 
+**Purpose:** Insert a cheap gatekeeper node into the graph that watches for meaningful state transitions and sets `supervisor_pending = True` when something worth re-planning has happened. Without this, the Supervisor would either fire every step (too expensive) or never fire at all. This phase adds the wiring to the graph without any LLM calls.
+
 The `handoff_detector_node` is a **lightweight, zero-LLM** node inserted
 between every specialist node and `verification_node`. It sets
 `supervisor_pending = True` when a transition between node types occurs.
@@ -292,9 +331,28 @@ _SIGNIFICANT_TRANSITIONS = {
     ("map_stitcher_relay","nav_bot"),       # healing path resolved → navigate
 }
 
+# --- Nav-stall detection -------------------------------------------------------
+# nav_bot → nav_bot re-entries are ignored by _SIGNIFICANT_TRANSITIONS, creating
+# a blind spot: if the agent is stuck in a nav loop the Supervisor never wakes.
+# The stuck_handler fixes tile-level oscillation automatically (dynamic tile
+# blocking, TTL=200), but cannot detect *goal-level* stalls where the current
+# goal is simply unreachable. We detect these here using module-level position
+# tracking — same pattern as stuck_handler.py — without coupling to that module.
+#
+# Threshold rationale:
+#   _stuck_counter resets to 0 after each tile-block attempt (stuck_handler line
+#   199-211), so it never accumulates above 3. Reading it from here would always
+#   show a low value. Instead we track position epochs in the detector itself.
+#   15 consecutive steps at the same (x, y, location) means tile-level recovery
+#   has not cleared the stall — escalate to the Supervisor (goal-level replanning).
+_NAV_STALL_THRESHOLD = 15
+_consecutive_nav_stall_steps: int = 0
+_last_nav_position: tuple | None = None
 # Also trigger on the very first step (no previous node) or when the
 # goal stack becomes empty.
 def handoff_detector_node(state: AgentState) -> AgentState:
+    global _consecutive_nav_stall_steps, _last_nav_position
+
     current_node  = state.get("last_action", "")   # e.g. "NAVIGATE", "BATTLE", "DIALOGUE"
     previous_node = state.get("last_node_fired", "")
     goal_stack    = state.get("goal_stack", [])
@@ -314,6 +372,30 @@ def handoff_detector_node(state: AgentState) -> AgentState:
         or not previous_node_name          # first step
         or not goal_stack                  # stack exhausted
     )
+
+    # Nav-stall check: fire Supervisor when position hasn't changed for
+    # _NAV_STALL_THRESHOLD consecutive nav_bot steps.
+    if current_node_name == "nav_bot":
+        player = (state.get("state_data") or {}).get("player", {})
+        pos    = player.get("position", {})
+        nav_pos = (pos.get("x"), pos.get("y"), player.get("location"))
+        if nav_pos == _last_nav_position:
+            _consecutive_nav_stall_steps += 1
+        else:
+            _consecutive_nav_stall_steps = 0
+        _last_nav_position = nav_pos
+        if _consecutive_nav_stall_steps >= _NAV_STALL_THRESHOLD:
+            logger.warning(
+                "[HANDOFF] Nav stall detected: %d consecutive steps at %s "
+                "— waking Supervisor for goal-level replanning",
+                _consecutive_nav_stall_steps, nav_pos,
+            )
+            is_significant = True
+            _consecutive_nav_stall_steps = 0  # reset; don't fire every step
+    else:
+        # Reset stall counter whenever we leave nav_bot
+        _consecutive_nav_stall_steps = 0
+        _last_nav_position = None
 
     return {
         **state,
@@ -376,6 +458,24 @@ class TestLastNodeFiredUpdated:
     # last_action="NAVIGATE" → last_node_fired="nav_bot"
     # last_action="BATTLE"   → last_node_fired="battle_bot"
     # last_action="DIALOGUE" → last_node_fired="coms_bot"
+
+class TestNavStallDetection:
+    # Call handoff_detector_node 14 times with nav_bot + same (x, y, location)
+    # → supervisor_pending=False on all 14 calls (below threshold)
+    # Call a 15th time with same position
+    # → supervisor_pending=True (threshold crossed)
+    # Call a 16th time with same position
+    # → supervisor_pending=False (counter was reset on the 15th call)
+    # Call with changing position throughout (x changes each step)
+    # → supervisor_pending=False on all calls (stall counter never accumulates)
+    # After 15 stall steps, switch to battle_bot (different node)
+    # → _consecutive_nav_stall_steps resets; no spurious supervisor_pending on return to nav_bot
+
+    # NOTE: these tests must call the node through a function that resets the
+    # module-level globals first, to avoid inter-test contamination:
+    # import agent.graph.nodes.handoff_detector as hd
+    # hd._consecutive_nav_stall_steps = 0
+    # hd._last_nav_position = None
 ```
 
 **Manual — Handoff Detector Smoke Test (`boundary_test.state`):**
@@ -389,7 +489,8 @@ into the city, navigate to the gym, and trigger the Norman cutscene.
 *Setup:* Add a temporary `[HANDOFF]` print inside `handoff_detector_node`:
 ```python
 print(f"[HANDOFF] step={state.get('step_count')}  "
-      f"{previous_node_name} → {current_node_name}  pending={is_significant}")
+      f"{previous_node_name} → {current_node_name}  pending={is_significant}  "
+      f"stall={_consecutive_nav_stall_steps}")
 ```
 
 *Command:*
@@ -404,7 +505,7 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 
 *Pass criteria:*
 - [ ] `pending=True` on step 1
-- [ ] `pending=False` on all consecutive nav_bot → nav_bot steps
+- [ ] `pending=False` on all consecutive nav_bot → nav_bot steps (moving)
 - [ ] `pending=True` fires when routing first changes to coms_bot
 - [ ] `last_node_fired` value in state matches the previous step's active node
 
@@ -412,12 +513,16 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 - `pending=True` every single step: `last_node_fired` is not persisting between steps — check that `handoff_detector_node` writes it to the returned state dict
 - `pending=False` on step 1: `goal_stack` is pre-populated somewhere before `handoff_detector_node` runs
 - No `[HANDOFF]` lines at all: node not yet wired into `graph.py`
+- `stall=` counter never increments even when nav is stuck: `state_data["player"]["position"]` path is wrong — print `state.get("state_data", {})` to verify the key structure
+- Supervisor fires every step after a stall: `_consecutive_nav_stall_steps` is not being reset to 0 after the threshold fires
 
 *Status:* 🔲 NOT YET RUN
 
 ---
 
 ## Phase 2: Executive Supervisor Node
+
+**Purpose:** Build the LLM decision node that reads the goal stack, game state, and episodic context to issue exactly one stack operation (POP / CONTINUE / PUSH / REPLACE). After this phase the Supervisor exists in the graph and runs on every handoff, but `use_htn=False` by default so the legacy FSM still drives navigation. This is the largest single phase.
 
 **File to create:** `agent/graph/nodes/executive_supervisor.py`
 
@@ -449,8 +554,20 @@ def make_executive_supervisor_node(
     vlm,
     episodic_memory,
     walkthrough_db,
+    use_htn: bool = False,          # Phase 7.2: set True to let HTN drive nav fields
 ) -> Callable[[AgentState], AgentState]:
-    """Factory binding shared resources into the supervisor node."""
+    """Factory binding shared resources into the supervisor node.
+
+    Args:
+        vlm:           VLM instance.
+        episodic_memory: EpisodicMemory instance.
+        walkthrough_db:  WalkthroughDB instance (or None — triggers fallback).
+        use_htn:       When False (default), the supervisor builds and maintains
+                       the goal stack but does NOT overwrite AgentState nav fields
+                       (``goal_coords``, ``goal_location``, etc.). The legacy FSM
+                       continues to drive navigation. Set True (Phase 7.2+) to
+                       hand navigation over to the HTN.
+    """
 
     def executive_supervisor_node(state: AgentState) -> AgentState:
         step      = state.get("step_count", 0)
@@ -460,7 +577,14 @@ def make_executive_supervisor_node(
 
         # ── 1. Bootstrap empty stack from milestones.json ──────────────────
         if not stack:
+            # NOTE (Phase 2–3): _bootstrap_stack is a stub returning [] until
+            # Phase 4 adds the real RAG implementation.  When it returns [],
+            # the supervisor is a no-op for this step (stack remains empty,
+            # nav fields untouched, legacy FSM drives navigation as normal).
             stack = _bootstrap_stack(state_data, walkthrough_db, vlm)
+            if not stack:
+                # Stub returned empty — nothing to do yet
+                return {**state, "supervisor_pending": False}
             logger.info("[SUPERVISOR] step=%s  Bootstrapped stack: %s",
                         step, stack_summary(stack))
             return {
@@ -500,10 +624,26 @@ def make_executive_supervisor_node(
                     stack = stack_push(stack, g)
 
         elif op == "PUSH":
-            for g_dict in new_goals:
-                node = GoalNode.from_dict({**g_dict, "push_reason": reason})
-                stack = stack_push(stack, node)
-            logger.info("[SUPERVISOR] PUSH %d goal(s) — %s", len(new_goals), reason)
+            # Hard depth cap: an unbounded PUSH loop is an LLM failure mode.
+            # A healthy 3-level HTN (strategic → tactical → immediate) needs at
+            # most 3–4 entries; 8 is a generous upper bound that still prevents
+            # runaway growth.  When the cap is hit, demote to CONTINUE so the
+            # agent keeps moving while the plan is logged for diagnosis.
+            _STACK_DEPTH_CAP = 8
+            if len(stack) >= _STACK_DEPTH_CAP:
+                logger.warning(
+                    "[SUPERVISOR] PUSH rejected: stack depth %d >= cap %d "
+                    "(reasoning: %s) — demoting to CONTINUE to prevent runaway "
+                    "stack growth.  This indicates the LLM is looping; review "
+                    "llm_logs for repeated PUSH operations on the same goal.",
+                    len(stack), _STACK_DEPTH_CAP, reason,
+                )
+                op = "CONTINUE"
+            else:
+                for g_dict in new_goals:
+                    node = GoalNode.from_dict({**g_dict, "push_reason": reason})
+                    stack = stack_push(stack, node)
+                logger.info("[SUPERVISOR] PUSH %d goal(s) — %s", len(new_goals), reason)
 
         elif op == "REPLACE":
             if new_goals:
@@ -515,7 +655,13 @@ def make_executive_supervisor_node(
             logger.debug("[SUPERVISOR] CONTINUE — %s", reason)
 
         # ── 5. Translate Stack[0].directive → AgentState nav fields ────────
-        new_state = _apply_immediate_directive(state, stack)
+        # Gate on use_htn: when False (default through Phase 7.1), the stack is
+        # maintained and logged but nav fields are NOT overwritten.  The legacy
+        # FSM directive computed by nav_bot earlier in this graph step is preserved.
+        if use_htn:
+            new_state = _apply_immediate_directive(state, stack)
+        else:
+            new_state = dict(state)   # shadow mode: stack updated, nav untouched
         new_state.update({
             "goal_stack": [g.to_dict() for g in stack],
             "supervisor_pending": False,
@@ -562,6 +708,24 @@ def _apply_immediate_directive(state: AgentState, stack: list[GoalNode]) -> dict
     return {**state, **patch}
 ```
 
+### 2.4 `_bootstrap_stack` Stub (Phases 2–3 Placeholder)
+
+Until Phase 4 provides the real RAG-backed implementation, add this stub so
+the node doesn't raise a `NameError` and so the empty-stack guard in the node
+body returns cleanly:
+
+```python
+def _bootstrap_stack(state_data: dict, walkthrough_db, vlm) -> list:
+    """Phase 2–3 stub. Returns [] so the supervisor is a no-op.
+    Phase 4 replaces this with the full RAG + LLM implementation.
+    """
+    return []
+```
+
+The guard in the node (`if not stack: return {**state, "supervisor_pending": False}`)
+means the agent behaves identically to Phase 0–1 as long as this stub is in
+place: the legacy FSM drives navigation, the Supervisor is wired but silent.
+
 ### Phase 2 Tests
 
 **Automated — `tests/test_executive_supervisor.py`:**
@@ -579,7 +743,7 @@ class TestBootstrapFallback:
     # Returns non-empty stack derived from MILESTONE_PROGRESSION without raising
 
 class TestBootstrapLLMParseError:
-    # Mock VLM.generate() returns invalid JSON
+    # Mock vlm.get_json_query() returns invalid JSON
     # _bootstrap_stack falls through to milestone fallback (no crash)
 
 class TestStackOperationPop:
@@ -591,6 +755,18 @@ class TestStackOperationPush:
     # Mock LLM returns {"operation": "PUSH", "new_goals": [{...valid GoalNode dict...}]}
     # Returned goal_stack has 4 items
     # New goal is at index 0 (Stack[0])
+
+class TestPushDepthCap:
+    # Pre-populate stack with 8 GoalNode items
+    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...}]}
+    # PUSH is demoted to CONTINUE: returned goal_stack still has 8 items
+    # supervisor_last_operation == "CONTINUE"  (cap deflected PUSH)
+    # A WARNING log line is emitted containing "PUSH rejected"
+
+class TestPushDepthCapBoundary:
+    # Pre-populate stack with 7 items (one below cap)
+    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...}]}
+    # PUSH proceeds normally: returned goal_stack has 8 items
 
 class TestStackOperationReplace:
     # Mock LLM returns {"operation": "REPLACE", "new_goals": [{...}]}
@@ -661,6 +837,8 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 ---
 
 ## Phase 3: LLM Prompt & JSON Schema
+
+**Purpose:** Define the exact prompt templates and output schema the Supervisor sends to the LLM. Prompts are the Supervisor's only interface to Gemini — they must be precise, fully self-contained, and produce deterministic-enough output to parse reliably. Changes here directly affect agent intelligence; test them in isolation before wiring.
 
 ### 3.1 System Prompt
 
@@ -797,8 +975,11 @@ def _call_supervisor_llm(
         **game_summary,
     )
     try:
-        raw = vlm.generate(SUPERVISOR_SYSTEM_PROMPT, prompt)
-        # Strip markdown fences if present
+        raw = vlm.get_json_query(SUPERVISOR_SYSTEM_PROMPT, prompt, module_name="Supervisor")
+        # Structured output: response_mime_type="application/json" removes markdown fences.
+        # Schema validation still required — the model guarantees valid JSON but not
+        # a valid *operation*.  Keep the removeprefix strip as belt-and-suspenders
+        # for backends that don't yet support get_json_query.
         raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
         payload = json.loads(raw)
         assert payload.get("operation") in ("POP", "CONTINUE", "PUSH", "REPLACE")
@@ -807,6 +988,54 @@ def _call_supervisor_llm(
         logger.warning("[SUPERVISOR] LLM parse error: %s — defaulting to CONTINUE", e)
         return {"operation": "CONTINUE", "reasoning": f"parse_error: {e}", "new_goals": []}
 ```
+
+> **`vlm.get_json_query(system_prompt, user_prompt, module_name)` — new method required**
+>
+> `utils/vlm.py` currently exposes only `get_query(image, text)` and
+> `get_text_query(text)`.  Neither accepts a separate system prompt, and neither
+> passes `response_mime_type="application/json"` to the Gemini API.
+>
+> **Add `get_json_query` to `GeminiBackend`, `VertexBackend`, and the `VLM` facade:**
+>
+> ```python
+> # GeminiBackend — uses google.generativeai.GenerationConfig
+> def get_json_query(self, system_prompt: str, user_prompt: str,
+>                    module_name: str = "Unknown") -> str:
+>     import google.generativeai as genai
+>     combined = f"{system_prompt}\n\n{user_prompt}"
+>     config = genai.GenerationConfig(response_mime_type="application/json")
+>     response = self.model.generate_content(
+>         combined,
+>         generation_config=config,
+>         request_options={"timeout": 15},
+>     )
+>     response.resolve()
+>     return response.text
+>
+> # VertexBackend — uses genai.types.GenerateContentConfig
+> def get_json_query(self, system_prompt: str, user_prompt: str,
+>                    module_name: str = "Unknown") -> str:
+>     from google.genai import types
+>     combined = f"{system_prompt}\n\n{user_prompt}"
+>     config = types.GenerateContentConfig(
+>         response_mime_type="application/json"
+>     )
+>     response = self.client.models.generate_content(
+>         model=self.model_name,
+>         contents=combined,
+>         config=config,
+>     )
+>     return response.text
+>
+> # VLM facade — delegates to backend
+> def get_json_query(self, system_prompt: str, user_prompt: str,
+>                    module_name: str = "Unknown") -> str:
+>     return self.backend.get_json_query(system_prompt, user_prompt, module_name)
+> ```
+>
+> Backends that don't yet implement `get_json_query` (e.g., `OpenAIBackend`,
+> `OpenRouterBackend`) can fall back to `get_text_query(system_prompt + "\n\n" + user_prompt)`.
+> This ensures the Supervisor works regardless of backend.
 
 ### Phase 3 Tests
 
@@ -836,7 +1065,7 @@ class TestCallSupervisorLLMInvalidOperation:
     # _call_supervisor_llm returns {"operation": "CONTINUE", ...} (assertion failure → fallback)
 
 class TestCallSupervisorLLMNetworkError:
-    # Mock VLM.generate() raises Exception("network error")
+    # Mock vlm.get_json_query() raises Exception("network error")
     # _call_supervisor_llm returns {"operation": "CONTINUE", "reasoning": "parse_error: ...", "new_goals": []}
     # No exception propagates to the caller
 ```
@@ -844,6 +1073,8 @@ class TestCallSupervisorLLMNetworkError:
 ---
 
 ## Phase 4: RAG → HTN Generation
+
+**Purpose:** Replace the `_bootstrap_stack` stub (Phase 2.4) with the real implementation: query the Bulbapedia walkthrough ChromaDB, run an LLM call, and produce a valid 3-level HTN (strategic → tactical → immediate). Also add `_expand_strategic_goal()` so the Supervisor can refill the stack when a tactical layer drains. After this phase, the Supervisor has a real working plan to maintain.
 
 ### 4.1 Bootstrap Sequence (`_bootstrap_stack`)
 
@@ -890,7 +1121,7 @@ def _bootstrap_stack(
         context_text, location, last_completed, badge_count
     )
     try:
-        raw = vlm.generate(_HTN_SYSTEM_PROMPT, htn_prompt)
+        raw = vlm.get_json_query(_HTN_SYSTEM_PROMPT, htn_prompt, module_name="HTNBootstrap")
         raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
         goals_data = json.loads(raw)   # expects {"goals": [...]}
         stack = [GoalNode.from_dict(g) for g in goals_data["goals"]]
@@ -991,7 +1222,7 @@ def _expand_strategic_goal(
         f"Return JSON array of goal objects (same schema as HTN generation)."
     )
     try:
-        raw = vlm.generate(_HTN_SYSTEM_PROMPT, prompt)
+        raw = vlm.get_json_query(_HTN_SYSTEM_PROMPT, prompt, module_name="HTNExpand")
         raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
         goals_data = json.loads(raw)
         return [GoalNode.from_dict(g) for g in goals_data.get("goals", [])]
@@ -1079,6 +1310,8 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 ---
 
 ## Phase 5: Memory Integration ("Dual-Core" Architecture)
+
+**Purpose:** Give the Supervisor reliable completion evidence. Two changes: (1) `battle_bot_node` must start writing battle outcomes to ChromaDB — currently it logs nothing, making the Supervisor blind to whether fights are being won or lost. (2) Replace the single `_query_episodic_memory()` call with two focused queries so dialogue transcripts and battle outcomes are never conflated in the Supervisor's context.
 
 ### 5.1 `game_history` Collection (Episodic — Completion Evidence)
 
@@ -1444,17 +1677,29 @@ PYTHONPATH=$PWD .venv/bin/python -m agent.brain.demos.inspect_brain
 
 ---
 
-## Phase 6: Save State Initialization — The Boot Sequence
+## Phase 6: ChromaDB Staleness Guard — The Boot Timestamp
+
+**Purpose:** Prevent stale ChromaDB records from a *previous run* from contaminating the Supervisor's completion evidence in the *current run*. Record a `_boot_timestamp` at agent startup and filter all episodic queries to `timestamp >= _boot_timestamp`. Without this, the Supervisor might see an old "Norman talked to player" record from yesterday and incorrectly POP a goal on the very first step.
+
+> **Clarification:** Phase 6 is NOT about making save states work. Save states
+> load correctly from Phase 0 onward — the emulator already populates
+> `state_data["milestones"]` from the companion `*_milestones.json` file at
+> startup (this is emulator infrastructure, not HTN code). Phase 6 solves a
+> separate, narrower problem: **stale ChromaDB records from a previous run
+> misleading the Supervisor's episodic context in the current run.**
 
 ### 6.1 Problem Statement
 
 When the agent loads a save state (e.g. `route102_hackathon.state`), the
-`goal_stack` in `AgentState` is empty. The `game_history` ChromaDB collection
-may be out of sync or populated with data from a different run. We cannot trust
-episodic memory to tell us where we are in the game.
+`goal_stack` in `AgentState` is empty (handled at Phase 4). However the
+`game_history` ChromaDB collection may contain records from a *previous* run
+(different location, different dialogue, different battle outcomes). The
+Supervisor's `_query_dialogue_context()` and `_query_battle_outcomes()` could
+return those stale records and cause incorrect POP decisions.
 
-**Solution:** Use the companion `*_milestones.json` file as the authoritative
-"World State Snapshot" to bootstrap the goal stack.
+**Solution:** Record a `_boot_timestamp` at agent startup and filter all
+ChromaDB queries to `timestamp >= _boot_timestamp`. Records written before
+this run are invisible to the Supervisor.
 
 ### 6.2 Milestones JSON → Bootstrap Query
 
@@ -1619,27 +1864,33 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 
 ## Phase 7: Migration Path — Phasing Out `MILESTONE_PROGRESSION`
 
+**Purpose:** Hand navigation control from the legacy FSM to the HTN incrementally, in four stages: shadow logging → flip `use_htn=True` → retire `verification_node` → delete `MILESTONE_PROGRESSION`. At each stage the previous approach remains runnable as a fallback. Stages 1–2 are the main milestones for this project; Stages 3–4 are clean-up once stability is confirmed.
+
 The migration is designed so the FSM and HTN run **in parallel** during
 transition, with the HTN taking increasing ownership.
 
 ### 7.1 Stage 1 — Shadow Mode (No Breaking Changes)
 
-- HTN goal stack is built but **not used** for navigation.
-- `goal_stack` is populated and logged to `llm_logs/htn_shadow.jsonl` each step.
+- Shadow mode is **already the default** from Phase 2 onward: `use_htn=False`
+  means the supervisor builds the stack and logs it, but never overwrites nav fields.
+- **Action for Stage 7.1:** Add shadow logging — write the full goal stack and
+  the Supervisor's chosen operation to `llm_logs/htn_shadow.jsonl` each step.
 - `AgentState` nav fields (`goal_coords`, `goal_location`) still come from the
   existing `ObjectiveManager.get_next_action_directive()` path.
-- Supervisor LLM calls are made but their output is compared against
-  `MILESTONE_PROGRESSION` and discarded if they disagree.
-- **Metric to track:** `supervisor_operation` distribution, stack depth, divergence rate.
+- **Metric to track:** `supervisor_operation` distribution, stack depth, divergence
+  rate vs. `MILESTONE_PROGRESSION`-driven nav.
 
 ### 7.2 Stage 2 — Immediate Layer Handoff
 
-- HTN `Stack[0]` (type=`"immediate"`) replaces the directive from `ObjectiveManager`
-  **only for navigation goals** (not for battle or dialogue).
+- `use_htn=True` is passed to `make_executive_supervisor_node()` in `build_graph()`.
+  This is the **only code change** for this stage — the flag was already wired
+  at Phase 2; Stage 2 just flips it on.
+- `_apply_immediate_directive` now overwrites `goal_coords`/`goal_location` from
+  `Stack[0].directive`. The legacy FSM directive computed by `nav_bot` is discarded.
 - `ObjectiveManager._get_navigation_planner_directive()` is called as a fallback
-  when `Stack[0].directive` is None.
+  when `Stack[0].directive` is None (no immediate goal with a directive).
 - `milestone_index` is still updated by `verification_node` (unchanged).
-- **Kill switch:** `--use-htn` CLI flag; defaults off.
+- **Expose via CLI:** `--use-htn` flag on `run.py`; defaults off.
 
 ### 7.3 Stage 3 — Full HTN Ownership
 
@@ -1798,12 +2049,13 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 | 0 | `agent/graph/state.py` | MODIFY (add 5 HTN fields) | ☐ |
 | 0 | `tests/test_goal_stack.py` | **CREATE** | ☐ |
 | 0 | `tests/test_agent_state_htn.py` | **CREATE** | ☐ |
-| 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** | ☐ |
+| 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** (includes nav-stall detection) | ☐ |
 | 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ☐ |
 | 1 | `tests/test_handoff_detector.py` | **CREATE** | ☐ |
 | 2 | `agent/graph/nodes/executive_supervisor.py` | **CREATE** | ☐ |
 | 2 | `tests/test_executive_supervisor.py` | **CREATE** | ☐ |
 | 3 | (prompts embedded in `executive_supervisor.py`) | n/a | ☐ |
+| 3 | `utils/vlm.py` | MODIFY — add `get_json_query(system_prompt, user_prompt, module_name)` to `GeminiBackend`, `VertexBackend`, and `VLM` facade; replaces non-existent `vlm.generate()` throughout this plan | ☐ |
 | 3 | `tests/test_supervisor_prompt.py` | **CREATE** | ☐ |
 | 4 | `executive_supervisor.py` (`_bootstrap_stack`, `_expand_strategic_goal`) | part of Phase 2 file | ☐ |
 | 4 | `tests/test_htn_bootstrap.py` | **CREATE** | ☐ |
@@ -1813,10 +2065,14 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 | 6 | `agent/graph/state.py` | MODIFY (add `_boot_timestamp`) | ☐ |
 | 6 | `agent/__init__.py` | MODIFY (set `_boot_timestamp`) | ☐ |
 | 6 | `tests/test_boot_sequence.py` | **CREATE** | ☐ |
-| 7.1 | `agent/graph/nodes/executive_supervisor.py` | MODIFY (shadow log) | ☐ |
-| 7.2 | `run.py` / `agent/__init__.py` | MODIFY (add `--use-htn` flag) | ☐ |
+| 7.1 | `agent/graph/nodes/executive_supervisor.py` | MODIFY (add shadow jsonl logging) | ☐ |
+| 7.2 | `run.py` / `agent/__init__.py` | MODIFY (add `--use-htn` flag; pass to `build_graph` → `make_executive_supervisor_node`) | ☐ |
 | 7 | `tests/test_shadow_mode.py` | **CREATE** | ☐ |
 | 7 | `tests/test_htn_full_cycle.py` | **CREATE** | ☐ |
+
+---
+
+## Known Risks & Mitigations
 
 ---
 
