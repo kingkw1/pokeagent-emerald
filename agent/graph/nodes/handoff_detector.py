@@ -162,10 +162,6 @@ def handoff_detector_node(state: AgentState) -> AgentState:
             current_node_name  or "(none)",
             _consecutive_nav_stall_steps,
         )
-
-    print(f"[HANDOFF] step={state.get('step_count')}  "
-        f"{previous_node_name} → {current_node_name}  pending={is_significant}  "
-        f"stall={_consecutive_nav_stall_steps}")
     
     return {
         **state,

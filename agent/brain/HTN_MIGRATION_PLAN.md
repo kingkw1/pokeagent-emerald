@@ -732,111 +732,71 @@ place: the legacy FSM drives navigation, the Supervisor is wired but silent.
 
 ### Phase 2 Tests
 
-**Automated — `tests/test_executive_supervisor.py`:**
+**Automated — `tests/test_executive_supervisor.py`:** ✅ 110/110 tests green
 
+*Implemented (all passing):*
 ```python
-class TestBootstrapEmpty:
-    # _bootstrap_stack() with mock walkthrough_db returning 3 chunks
-    # Returns non-empty list of GoalNode objects
-    # Stack[0].goal_type == "immediate"
-    # Stack[0].directive is not None
-    # Stack[-1].goal_type == "strategic"
-
-class TestBootstrapFallback:
-    # walkthrough_db=None → _milestone_fallback_stack() is called
-    # Returns non-empty stack derived from MILESTONE_PROGRESSION without raising
-
-class TestBootstrapLLMParseError:
-    # Mock vlm.get_json_query() returns invalid JSON
-    # _bootstrap_stack falls through to milestone fallback (no crash)
-
-class TestStackOperationPop:
-    # Supervisor state has 3-item stack; mock LLM returns {"operation": "POP"}
-    # Returned goal_stack has 2 items
-    # supervisor_last_operation == "POP"
-
-class TestStackOperationPush:
-    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...valid GoalNode dict...}]}
-    # Returned goal_stack has 4 items
-    # New goal is at index 0 (Stack[0])
-
-class TestPushDepthCap:
-    # Pre-populate stack with 8 GoalNode items
-    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...}]}
-    # PUSH is demoted to CONTINUE: returned goal_stack still has 8 items
-    # supervisor_last_operation == "CONTINUE"  (cap deflected PUSH)
-    # A WARNING log line is emitted containing "PUSH rejected"
-
-class TestPushDepthCapBoundary:
-    # Pre-populate stack with 7 items (one below cap)
-    # Mock LLM returns {"operation": "PUSH", "new_goals": [{...}]}
-    # PUSH proceeds normally: returned goal_stack has 8 items
-
-class TestStackOperationReplace:
-    # Mock LLM returns {"operation": "REPLACE", "new_goals": [{...}]}
-    # Stack length unchanged
-    # Stack[0].goal_id equals the replacement goal's goal_id
-
-class TestStackOperationContinue:
-    # Mock LLM returns {"operation": "CONTINUE"}
-    # goal_stack identical before and after
-
-class TestMalformedLLMResponse:
-    # Mock VLM returns plain text (not JSON)
-    # Supervisor defaults to CONTINUE without raising
-    # goal_stack unchanged
-
-class TestDirectiveTranslation:
-    # Stack[0] has directive with goal_location="PETALBURG_CITY_GYM"
-    # _apply_immediate_directive sets state["goal_location"] == "PETALBURG_CITY_GYM"
-    # state["goal_description"] matches the GoalNode description
-    # state["active_milestone"] == GoalNode.goal_id
-
-class TestDirectiveTranslationNoop:
-    # Stack[0].directive is None
-    # _apply_immediate_directive returns state with goal_coords unchanged
-
-class TestBootTimestampFilter:
-    # EpisodicMemory has 2 records: one at boot_time - 1 (stale), one at boot_time + 1
-    # _query_episodic_memory returns only the post-boot document
-    # Stale record does not appear in returned context string
+class TestBootstrapStub          # stub returns [] → supervisor_pending=False, stack stays empty
+class TestNonEmptyStackContinue  # Phase-2 CONTINUE stub leaves stack and operation correct
+class TestStackOperationPop      # 3-item stack → 2 items; supervisor_last_operation=="POP"
+class TestStackOperationPush     # PUSH grows stack; new goal at Stack[0]
+class TestPushDepthCap           # PUSH demoted to CONTINUE at depth cap (8); WARNING logged
+class TestPushDepthCapBoundary   # PUSH allowed at depth 7 → 8
+class TestStackOperationReplace  # REPLACE swaps Stack[0]; length unchanged
+class TestStackOperationContinue # CONTINUE leaves stack identical
+class TestMalformedLLMResponse   # empty/unknown/None op → CONTINUE; no crash
+class TestDirectiveTranslation   # use_htn=True copies directive fields to AgentState
+class TestDirectiveTranslationNoop  # directive=None → state unchanged
+class TestSupervisorPendingCleared  # supervisor_pending=False after every code path
+class TestReasoningTruncation    # supervisor_last_reasoning capped at 500 chars
+class TestHasChildren            # helper correctly detects parent_id matches
+class TestBuildGameSummary       # game summary string includes location and party HP
 ```
 
-**Manual — Supervisor Bootstrap Smoke Test (`boundary_test.state`):**
+*Moved to Phase 4 (`tests/test_htn_bootstrap.py`) — require real `_bootstrap_stack`:*
+- `TestBootstrapEmpty` — real bootstrap returns ≥1 `GoalNode` with a directive
+- `TestBootstrapFallback` — `walkthrough_db=None` falls back to `_milestone_fallback_stack()`
+- `TestBootstrapLLMParseError` — invalid JSON from `vlm.get_json_query()` → milestone fallback
 
-*Purpose:* Confirm the Supervisor builds a coherent 3-level HTN from `boundary_test.state`
-whose milestones reflect Route 102 complete → Petalburg City next. Run in shadow mode
-(`--use-htn` not yet enabling HTN-driven navigation) so the legacy system still drives
-movement while the HTN is logged.
+*Moved to Phase 6 (`tests/test_boot_sequence.py`) — require `_boot_timestamp` guard:*
+- `TestBootTimestampFilter` — mixed stale/fresh EpisodicMemory records; only post-boot returned
 
-*Command:*
+**Manual — Supervisor Node Wiring Smoke Test (`boundary_test.state`):**
+
+*Purpose:* Confirm the Supervisor node is wired correctly into the LangGraph graph and fires
+on the correct transitions (first step, node-type handoffs) without crashing. The bootstrap
+stub returns `[]` so the legacy FSM drives navigation unchanged. Bootstrap correctness is
+tested in Phase 4.
+
+*Command (run_20260427_151741.log):*
 ```bash
-python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 10
-```
-*(Add `[SUPERVISOR]` print statements inside `executive_supervisor_node` before enabling `--use-htn`.)*
-
-*Observe in console:*
-```
-[SUPERVISOR] step=1  BOOTSTRAP
-[SUPERVISOR] last_completed=ROUTE_102
-[SUPERVISOR] Stack: [I]Enter Petalburg City → [T]Navigate to Petalburg Gym → [S]Meet Norman (Dad)
-[SUPERVISOR] supervisor_last_operation=BOOTSTRAP
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto
 ```
 
-*Pass criteria:*
-- [ ] `[SUPERVISOR] BOOTSTRAP` fires on step 1
+*Observed in console:*
+```
+[SUPERVISOR] step=0  Bootstrap stub — stack empty, no-op (Phase 4 needed for real HTN).
+[SUPERVISOR] step=11  Bootstrap stub — stack empty, no-op (Phase 4 needed for real HTN).
+[SUPERVISOR] step=16  Bootstrap stub — stack empty, no-op (Phase 4 needed for real HTN).
+```
+
+*Pass criteria — wiring verification (run_20260427_151741.log):*
+- [x] Supervisor fires on step 0 (first step / empty stack)
+- [x] Supervisor silent on all consecutive nav_bot → nav_bot steps (steps 1–10)
+- [x] Supervisor fires on nav_bot → coms_bot transition (step 11 — entering PC dialogue)
+- [x] Supervisor fires on coms_bot → nav_bot transition (step 16 — resuming navigation after heal)
+- [x] Legacy FSM navigation unchanged — agent traversed Route 102 → Petalburg City → healed at PC correctly
+- [x] No `KeyError`, `AssertionError`, or crash
+
+*Bootstrap pass criteria — moved to Phase 4 smoke test (require real `_bootstrap_stack`):*
+- [ ] `[SUPERVISOR] BOOTSTRAP` fires on step 1 with real stack output
 - [ ] `last_completed=ROUTE_102` (correct read from `boundary_test_milestones.json`)
 - [ ] Bootstrapped stack has ≥ 1 `strategic` goal referencing the gym or Norman
-- [ ] Stack[0] (immediate) `goal_location` resolves to `PETALBURG_CITY` or `PETALBURG_CITY_GYM`
+- [ ] Stack[0] `goal_location` resolves to `PETALBURG_CITY` or `PETALBURG_CITY_GYM`
 - [ ] `supervisor_last_operation=BOOTSTRAP` in state after step 1
-- [ ] No `KeyError` or `AssertionError` in console
+- [ ] No `KeyError` or `AssertionError` in console (bootstrap code path)
 
-*Fail indicators:*
-- `[SUPERVISOR] HTN generation failed` — LLM output is not valid JSON; verify the system prompt instructs the model to return only JSON with no preamble
-- Stack has no `immediate` goal — HTN prompt only produced strategic/tactical nodes; tighten `_bootstrap_stack` assertion to reject stacks without a directive-bearing immediate goal and retry or fall back
-- `goal_location=ROUTE_101` — `_get_last_completed_milestone` is not reading the companion milestones file correctly; confirm `state_data["milestones"]` is populated on step 1
-
-*Status:* 🔲 NOT YET RUN
+*Status:* ✅ PASSED — wiring verification complete (run_20260427_151741.log). 110/110 automated tests green. Bootstrap smoke test deferred to Phase 4.
 
 ---
 
@@ -1240,6 +1200,23 @@ def _expand_strategic_goal(
 **Automated — `tests/test_htn_bootstrap.py`:**
 
 ```python
+class TestBootstrapEmpty:
+    # _bootstrap_stack() with mock walkthrough_db returning 3 chunks and mock vlm
+    # Returns non-empty list of GoalNode objects
+    # Stack[0].goal_type == "immediate"
+    # Stack[0].directive is not None
+    # Stack[-1].goal_type == "strategic"
+
+class TestBootstrapFallback:
+    # walkthrough_db=None → _milestone_fallback_stack() is called instead
+    # Returns non-empty stack derived from MILESTONE_PROGRESSION without raising
+    # Stack[0].goal_type == "immediate"
+
+class TestBootstrapLLMParseError:
+    # Mock vlm.get_json_query() returns invalid JSON
+    # _bootstrap_stack falls through to _milestone_fallback_stack() (no crash)
+    # Returns non-empty stack
+
 class TestGetLastCompletedMilestone:
     # milestones dict with ROUTE_102 completed → returns "ROUTE_102"
     # milestones dict with nothing completed → returns "GAME_RUNNING"
@@ -1298,11 +1275,14 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 ```
 
 *Pass criteria:*
+- [ ] `[SUPERVISOR] BOOTSTRAP` fires on step 1 with real stack output
 - [ ] `last_completed=ROUTE_102` printed (correct read from milestones JSON)
 - [ ] RAG query string references `ROUTE_102` or `Petalburg City`
 - [ ] Stack depth ≥ 3 (at least one each: immediate, tactical, strategic)
 - [ ] Stack[0] directive `goal_location` is `PETALBURG_CITY` or `PETALBURG_CITY_GYM`
+- [ ] `supervisor_last_operation=BOOTSTRAP` in state after step 1
 - [ ] `llm_logs/htn_shadow.jsonl` has one entry after 5 steps
+- [ ] No `KeyError` or `AssertionError` in console
 
 *Fail indicators:*
 - `last_completed=GAME_RUNNING` with a boundary_test save state: companion milestones JSON not found — verify the emulator loads the correct `*_milestones.json` at startup and populates `state_data["milestones"]`
@@ -1819,6 +1799,12 @@ class TestStaleEpisodicFiltered:
     # EpisodicMemory pre-populated with 3 records timestamped before boot_time
     # _query_episodic_memory with boot_time filter returns 0 documents
     # Agent does not receive stale context
+
+class TestBootTimestampFilter:
+    # EpisodicMemory has 2 records: one at boot_time - 1 (stale), one at boot_time + 1 (fresh)
+    # _query_episodic_memory returns only the post-boot document
+    # Stale record does not appear in the returned context string
+    # Confirms mixed-record filtering (both stale and fresh records present simultaneously)
 
 class TestMilestonesJsonMapping:
     # route102_hackathon_milestones.json → state_data["milestones"]["ROUTE_102"]["completed"] == True
