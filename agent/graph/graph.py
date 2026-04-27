@@ -16,6 +16,7 @@ from agent.graph.nodes.battle_bot import battle_bot_node
 from agent.graph.nodes.coms_bot import make_coms_bot_node
 from agent.graph.nodes.verification import make_verification_node
 from agent.graph.nodes.map_stitcher_relay import make_map_stitcher_relay_node
+from agent.graph.nodes.handoff_detector import handoff_detector_node
 
 
 def build_graph(obj_manager, vlm, episodic_memory=None) -> "langgraph.graph.graph.CompiledGraph":  # type: ignore[name-defined]
@@ -39,6 +40,7 @@ def build_graph(obj_manager, vlm, episodic_memory=None) -> "langgraph.graph.grap
     builder.add_node("coms_bot", make_coms_bot_node(vlm, episodic_memory))
     builder.add_node("verification", make_verification_node(obj_manager))
     builder.add_node("map_stitcher_relay", make_map_stitcher_relay_node(vlm))
+    builder.add_node("handoff_detector", handoff_detector_node)
 
     # ---- Entry point ----
     builder.set_entry_point("dispatch")
@@ -55,11 +57,19 @@ def build_graph(obj_manager, vlm, episodic_memory=None) -> "langgraph.graph.grap
         },
     )
 
-    # ---- All specialist nodes flow through verification then END ----
-    builder.add_edge("nav_bot", "verification")
-    builder.add_edge("battle_bot", "verification")
-    builder.add_edge("coms_bot", "verification")
+    # ---- Specialist nodes → handoff_detector → verification ----
+    # map_stitcher_relay keeps its relay to nav_bot; nav_bot then flows into
+    # handoff_detector so the relay chain is: relay → nav_bot → handoff_detector.
+    builder.add_edge("nav_bot", "handoff_detector")
+    builder.add_edge("battle_bot", "handoff_detector")
+    builder.add_edge("coms_bot", "handoff_detector")
     builder.add_edge("map_stitcher_relay", "nav_bot")
+
+    # Phase 1: handoff_detector always passes through to verification.
+    # Phase 2 will replace this with a conditional edge that routes to
+    # executive_supervisor when supervisor_pending=True.
+    builder.add_edge("handoff_detector", "verification")
+
     builder.add_edge("verification", END)
 
     return builder.compile()

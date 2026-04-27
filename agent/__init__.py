@@ -156,6 +156,12 @@ class Agent:
             self._step_count: int = 0
             self._prev_state_snapshot: dict | None = None
             self._graph_milestone_index: int = 0
+            # HTN fields — persisted across graph.invoke() calls
+            self._htn_goal_stack: list = []
+            self._htn_last_node_fired: str | None = None
+            self._htn_supervisor_pending: bool = False
+            self._htn_supervisor_last_operation: str | None = None
+            self._htn_supervisor_last_reasoning: str | None = None
             print("   🕸️  LangGraph dispatch graph: READY")
     
     def step(self, game_state):
@@ -583,12 +589,24 @@ class Agent:
                     dialogue_transcript=[],
                     goal_description=goal_description,
                     active_milestone=active_milestone,
+                    # HTN fields — carried over from previous step
+                    goal_stack=self._htn_goal_stack,
+                    last_node_fired=self._htn_last_node_fired,
+                    supervisor_pending=self._htn_supervisor_pending,
+                    supervisor_last_operation=self._htn_supervisor_last_operation,
+                    supervisor_last_reasoning=self._htn_supervisor_last_reasoning,
                 )
 
                 result = self._graph.invoke(agent_state)
                 self._prev_state_snapshot = state_data
                 self._graph_milestone_index = result.get("milestone_index", self._graph_milestone_index)
                 self._step_count += 1
+                # Persist HTN fields for next step
+                self._htn_goal_stack = result.get("goal_stack", self._htn_goal_stack)
+                self._htn_last_node_fired = result.get("last_node_fired", self._htn_last_node_fired)
+                self._htn_supervisor_pending = result.get("supervisor_pending", False)
+                self._htn_supervisor_last_operation = result.get("supervisor_last_operation", self._htn_supervisor_last_operation)
+                self._htn_supervisor_last_reasoning = result.get("supervisor_last_reasoning", self._htn_supervisor_last_reasoning)
 
                 action_output = result.get("last_buttons") or []
                 node_name = result.get("last_action") or "?"

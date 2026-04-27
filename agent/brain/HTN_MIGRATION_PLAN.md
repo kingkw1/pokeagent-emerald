@@ -499,7 +499,7 @@ print(f"[HANDOFF] step={state.get('step_count')}  "
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 80
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 80
 ```
 
 *Observe in console:*
@@ -508,10 +508,10 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 - When routing changes to coms_bot (NPC dialogue in Petalburg City): `nav_bot → coms_bot  pending=True`
 
 *Pass criteria:*
-- [ ] `pending=True` on step 1
-- [ ] `pending=False` on all consecutive nav_bot → nav_bot steps (moving)
-- [ ] `pending=True` fires when routing first changes to coms_bot
-- [ ] `last_node_fired` value in state matches the previous step's active node
+- [x] `pending=True` on step 1
+- [x] `pending=False` on all consecutive nav_bot → nav_bot steps (moving)
+- [x] `pending=True` fires when routing first changes to coms_bot
+- [x] `last_node_fired` value in state matches the previous step's active node
 
 *Fail indicators:*
 - `pending=True` every single step: `last_node_fired` is not persisting between steps — check that `handoff_detector_node` writes it to the returned state dict
@@ -520,7 +520,7 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 - `stall=` counter never increments even when nav is stuck: `state_data["player"]["position"]` path is wrong — print `state.get("state_data", {})` to verify the key structure
 - Supervisor fires every step after a stall: `_consecutive_nav_stall_steps` is not being reset to 0 after the threshold fires
 
-*Status:* 🔲 NOT YET RUN
+*Status:* ✅ PASSED — 28/28 automated tests green; manual smoke test passed (run_20260427_142343.log)
 
 ---
 
@@ -811,7 +811,7 @@ movement while the HTN is logged.
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 10
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 10
 ```
 *(Add `[SUPERVISOR]` print statements inside `executive_supervisor_node` before enabling `--use-htn`.)*
 
@@ -1282,7 +1282,7 @@ collection is empty.
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 5
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 5
 ```
 
 *Observe in console:*
@@ -1643,7 +1643,7 @@ Supervisor prompt are populated from the correct event types.
 
 *Command — Step 1, run until at least one NPC interaction:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 120
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 120
 ```
 
 *Command — Step 2, inspect ChromaDB:*
@@ -1838,7 +1838,7 @@ records are filtered out by the `_boot_timestamp` guard, not that they are absen
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 15
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 15
 ```
 
 *Observe in console:*
@@ -1967,7 +1967,7 @@ system skips `DAD_FIRST_MEETING` and navigates to `ROUTE_104_SOUTH` instead.
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 200
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 200
 ```
 *(Shadow logging is always active once Phase 7.1 is implemented; `--use-htn` not needed.)*
 
@@ -2006,7 +2006,7 @@ during dialogue and `POP` after Norman has spoken.
 
 *Command:*
 ```bash
-python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --max-steps 300 --use-htn
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --max-steps 300 --use-htn
 ```
 
 *Observe in console per step:*
@@ -2053,9 +2053,9 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 | 0 | `agent/graph/state.py` | MODIFY (add 5 HTN fields) | ✅ |
 | 0 | `tests/test_goal_stack.py` | **CREATE** | ✅ |
 | 0 | `tests/test_agent_state_htn.py` | **CREATE** | ✅ |
-| 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** (includes nav-stall detection) | ☐ |
-| 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ☐ |
-| 1 | `tests/test_handoff_detector.py` | **CREATE** | ☐ |
+| 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** (includes nav-stall detection) | ✅ |
+| 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ✅ |
+| 1 | `tests/test_handoff_detector.py` | **CREATE** | ✅ |
 | 2 | `agent/graph/nodes/executive_supervisor.py` | **CREATE** | ☐ |
 | 2 | `tests/test_executive_supervisor.py` | **CREATE** | ☐ |
 | 3 | (prompts embedded in `executive_supervisor.py`) | n/a | ☐ |
