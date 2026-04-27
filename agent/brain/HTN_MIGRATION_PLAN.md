@@ -719,6 +719,11 @@ RULES:
 
 ### 3.2 User Prompt Template
 
+The Supervisor receives **two separate ChromaDB context sections** — one for
+dialogue transcript evidence and one for battle outcome evidence. This split
+ensures the LLM can reason independently about "did the scene play out?" and
+"did the battle resolve?", rather than conflating them in a single blob.
+
 ```python
 SUPERVISOR_USER_TEMPLATE = """\
 === CURRENT GOAL STACK ===
@@ -730,8 +735,11 @@ Type      : {goal_type}
 Objective : {goal_description}
 Completion: {completion_condition}
 
-=== RECENT GAME EVENTS (from episodic memory) ===
-{episodic_context}
+=== RECENT DIALOGUE TRANSCRIPT (from episodic memory) ===
+{dialogue_context}
+
+=== RECENT BATTLE OUTCOMES (from episodic memory) ===
+{battle_context}
 
 === CURRENT GAME STATE ===
 Location  : {current_location}
@@ -743,25 +751,49 @@ Last Node : {last_node_fired}
 Handoff   : {previous_node} → {current_node}
 Step      : {step_count}
 
-=== LAST BATTLE OUTCOME (if applicable) ===
-{battle_outcome}
-
 What stack operation should be performed?
 """
 ```
 
+> **Why remove the single `{episodic_context}` field?**
+> A merged query over all event types is unfocused. The Supervisor needs to
+> know specifically (a) what was *said* in recent dialogue (to verify a
+> `completion_condition` like "Norman explained the gym challenge") and (b)
+> what the *battle result* was (to verify "defeated Roxanne's gym trainers").
+> Two targeted queries — `_query_dialogue_context()` and
+> `_query_battle_outcomes()` — replace the single `_query_episodic_memory()`.
+
 ### 3.3 LLM Call Helper
 
 ```python
-def _call_supervisor_llm(vlm, current_goal, episodic_ctx, game_summary, stack_repr):
-    """Call the VLM with the supervisor prompt. Returns parsed operation dict."""
+def _call_supervisor_llm(
+    vlm,
+    current_goal,
+    dialogue_ctx: str,
+    battle_ctx: str,
+    game_summary: dict,
+    stack_repr: str,
+):
+    """Call the VLM with the supervisor prompt. Returns parsed operation dict.
+
+    Args:
+        vlm:          VLM instance (Gemini Flash).
+        current_goal: GoalNode at top of stack.
+        dialogue_ctx: Recent dialogue transcript from ``_query_dialogue_context()``.
+        battle_ctx:   Recent battle outcomes from ``_query_battle_outcomes()``.
+        game_summary: Dict with keys: current_location, pos_x, pos_y,
+                      party_hp_summary, badge_count, in_battle,
+                      last_node_fired, previous_node, current_node, step_count.
+        stack_repr:   String representation of the full goal stack.
+    """
     prompt = SUPERVISOR_USER_TEMPLATE.format(
         stack_repr=stack_repr,
         goal_id=current_goal.goal_id,
         goal_type=current_goal.goal_type,
         goal_description=current_goal.description,
         completion_condition=current_goal.completion_condition,
-        episodic_context=episodic_ctx or "(none)",
+        dialogue_context=dialogue_ctx or "(none)",
+        battle_context=battle_ctx or "(none)",
         **game_summary,
     )
     try:
@@ -1115,34 +1147,253 @@ chunks into structured `GoalNode` objects.
 **No changes needed to `WalkthroughDB`** — the existing collection and
 embedding pipeline are sufficient.
 
-### Phase 5 Tests
+---
+
+### Phase 5.3 — Battle Outcome Logging (Required)
+
+**This is a required change, not an optional enhancement.** The Supervisor
+cannot reason about battle results without this data. The `battle_bot_node`
+currently produces no ChromaDB records.
+
+**File to modify:** `agent/graph/nodes/battle_bot.py`
+
+The `make_battle_bot_node` factory (or `battle_bot_node` if not yet factored)
+must accept an `episodic_memory` parameter and log:
+
+1. **Battle start** — when `in_battle` transitions `False → True`.
+2. **Battle end** — when `in_battle` transitions `True → False`.
+
+Only the **end** event carries the outcome summary. The start event provides
+temporal bracketing so the Supervisor can identify which dialogue preceded the
+fight.
+
+```python
+# battle_bot.py — add to the factory:
+
+def make_battle_bot_node(
+    episodic_memory: Optional[Any] = None,
+) -> Callable[[AgentState], AgentState]:
+
+    _prev_in_battle: bool = False   # module-level or closure state
+
+    def battle_bot_node(state: AgentState) -> AgentState:
+        nonlocal _prev_in_battle
+        state_data = state.get("state_data") or {}
+        game = state_data.get("game", {})
+        in_battle: bool = bool(game.get("in_battle", False))
+        location: str = state_data.get("player", {}).get("location", "UNKNOWN")
+
+        # Transition detection
+        if not _prev_in_battle and in_battle:
+            # Battle just started
+            if episodic_memory:
+                episodic_memory.log_event(
+                    f"Battle started at {location}.",
+                    metadata={
+                        "type": "battle_start",
+                        "location": location,
+                        "map_id": game.get("map_id", 0),
+                    },
+                    state_data=state_data,
+                )
+        elif _prev_in_battle and not in_battle:
+            # Battle just ended — summarise party HP
+            party_summary = _format_party_hp(state_data)
+            if episodic_memory:
+                episodic_memory.log_event(
+                    f"Battle ended at {location}. Party HP: {party_summary}",
+                    metadata={
+                        "type": "battle_outcome",
+                        "location": location,
+                        "map_id": game.get("map_id", 0),
+                        "party_hp": party_summary,
+                    },
+                    state_data=state_data,
+                )
+
+        _prev_in_battle = in_battle
+        # … rest of existing battle_bot logic (choose move, press buttons) …
+
+    return battle_bot_node
+```
+
+**`_format_party_hp` helper** (add to `battle_bot.py` or a shared util):
+
+```python
+def _format_party_hp(state_data: dict) -> str:
+    """Return a compact party HP string like 'Treecko 45/50, Wingull 0/32'."""
+    party = state_data.get("party", [])
+    if not party:
+        return "(no party data)"
+    parts = []
+    for mon in party:
+        name = mon.get("name") or mon.get("species", "?")
+        hp = mon.get("hp", "?")
+        max_hp = mon.get("max_hp", "?")
+        parts.append(f"{name} {hp}/{max_hp}")
+    return ", ".join(parts)
+```
+
+**Wire it in `graph.py`:**
+```python
+# In build_graph():
+battle_bot = make_battle_bot_node(episodic_memory=episodic_memory)
+graph.add_node("battle_bot", battle_bot)
+```
+
+> **Note on `_prev_in_battle` state:** The closure variable persists for the
+> lifetime of the graph instance (between steps, not between runs). This is
+> correct behaviour: it tracks the per-session transition. If the agent is
+> loaded mid-battle from a save state, the first step will see
+> `_prev_in_battle=False` and `in_battle=True`, correctly logging a
+> battle_start event.
+
+---
+
+### Phase 5.4 — Episodic Query Split (Two Targeted Queries)
+
+Replace the single `_query_episodic_memory()` function with two focused
+helpers. Each filters by `metadata.type` so the Supervisor never conflates
+dialogue transcripts with battle results.
+
+```python
+def _query_dialogue_context(
+    episodic_memory,
+    current_goal: GoalNode,
+    boot_time: float,
+    n: int = 5,
+) -> str:
+    """Return recent dialogue transcript records relevant to the current goal.
+
+    Only returns records logged after ``boot_time`` and with
+    ``metadata.type == "dialogue_transcript"``.
+    """
+    if not episodic_memory or not current_goal:
+        return ""
+    query = (
+        f"NPC dialogue relevant to: '{current_goal.description}'. "
+        f"Looking for keywords in: {current_goal.completion_condition}"
+    )
+    try:
+        results = episodic_memory.collection.query(
+            query_texts=[query],
+            n_results=n,
+            where={
+                "$and": [
+                    {"type": {"$eq": "dialogue_transcript"}},
+                    {"timestamp": {"$gte": boot_time}},
+                ]
+            },
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        return "\n".join(docs) if docs else ""
+    except Exception as e:
+        logger.warning("[SUPERVISOR] dialogue query error: %s", e)
+        return ""
+
+
+def _query_battle_outcomes(
+    episodic_memory,
+    boot_time: float,
+    n: int = 3,
+) -> str:
+    """Return recent battle outcome records since boot.
+
+    Only returns records with ``metadata.type == "battle_outcome"``.
+    """
+    if not episodic_memory:
+        return ""
+    try:
+        results = episodic_memory.collection.query(
+            query_texts=["recent battle outcome party HP won lost"],
+            n_results=n,
+            where={
+                "$and": [
+                    {"type": {"$eq": "battle_outcome"}},
+                    {"timestamp": {"$gte": boot_time}},
+                ]
+            },
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        return "\n".join(docs) if docs else ""
+    except Exception as e:
+        logger.warning("[SUPERVISOR] battle query error: %s", e)
+        return ""
+```
+
+**Wire them in `executive_supervisor_node`:**
+
+```python
+boot_time: float = state.get("_boot_timestamp", 0.0)
+dialogue_ctx = _query_dialogue_context(episodic_memory, current_goal, boot_time)
+battle_ctx   = _query_battle_outcomes(episodic_memory, boot_time)
+
+result = _call_supervisor_llm(
+    vlm, current_goal, dialogue_ctx, battle_ctx, game_summary, stack_repr
+)
+```
+
+**Dialogue completeness guarantee:**
+
+> `coms_bot_node` calls `wait_for_script_idle()` (which polls
+> `sGlobalScriptContext.mode` until it returns 0) **before every A-press**.
+> The VLM capture then reads `script_mode` from `state_data` — if the mode is
+> 1 (bytecode executing) or 2 (native callback), capture is skipped for that
+> step. Capture only occurs when `script_mode == 0` (text animation fully
+> rendered). This means **only completed, fully-rendered dialogue boxes** are
+> ever logged to `game_history`. Partial / mid-animation frames cannot enter
+> the transcript.
+>
+> This guarantee is already implemented in `coms_bot.py` (the
+> `capture_ok = script_mode not in (1, 2)` guard). No changes are needed —
+> it is documented here to confirm it covers both VLM extraction AND the
+> ChromaDB write (the write is inside the `if capture_ok` block).
 
 **Automated — `tests/test_supervisor_memory.py`:**
 
 ```python
-class TestEpisodicQueryPostBootOnly:
-    # EpisodicMemory populated with 1 record at boot_time - 1 (stale)
-    # and 1 record at boot_time + 1 (fresh)
-    # _query_episodic_memory returns only the post-boot document
+class TestDialogueQueryPostBootOnly:
+    # game_history has 1 dialogue_transcript record at boot_time - 1 (stale)
+    # and 1 at boot_time + 1 (fresh)
+    # _query_dialogue_context returns only the post-boot document
 
-class TestEpisodicQueryEmpty:
-    # Empty game_history collection → _query_episodic_memory returns ""
+class TestDialogueQueryEmpty:
+    # Empty game_history collection → _query_dialogue_context returns ""
     # No exception raised
 
-class TestEpisodicQueryCompletionCheck:
-    # game_history has "Entered Petalburg City Gym and met Norman" at post-boot time
-    # Query for "DAD_FIRST_MEETING completion condition" returns that document
-    # Returned context text contains "Norman"
+class TestDialogueQueryNormanKeywords:
+    # game_history has "Norman: In Pokémon, there are good points and bad points"
+    # at post-boot time with type="dialogue_transcript"
+    # _query_dialogue_context for goal "Meet Norman and learn about gym" contains "Norman"
 
 class TestBattleOutcomeLogged:
-    # battle_bot_node called when in_battle transitions True → False
-    # episodic_memory.log_event called with text containing "Battle ended"
-    # Logged metadata includes type="battle_outcome" and location
+    # make_battle_bot_node(episodic_memory=mock_mem) creates a node
+    # State transitions: in_battle=False → in_battle=True (start) → in_battle=False (end)
+    # mock_mem.log_event called exactly twice (start + end)
+    # Second call text contains "Battle ended" and metadata["type"] == "battle_outcome"
+    # metadata["party_hp"] is non-empty string
 
-class TestBattleOutcomeInSupervisorContext:
-    # game_history contains a "Battle ended" record at post-boot time
-    # _query_episodic_memory for a "defeat trainer" goal returns the battle record
-    # Returned context non-empty
+class TestBattleQueryPostBootOnly:
+    # game_history has 1 battle_outcome record before boot_time (stale)
+    # and 1 battle_outcome record after boot_time (fresh)
+    # _query_battle_outcomes returns only the post-boot record
+
+class TestBattleQueryEmpty:
+    # Empty game_history collection → _query_battle_outcomes returns ""
+    # No exception raised
+
+class TestSupervisorPromptBothContexts:
+    # _call_supervisor_llm called with dialogue_ctx="Norman said X" and
+    # battle_ctx="Battle ended. Party HP: Treecko 45/50"
+    # The rendered prompt contains both strings verbatim
+    # Mock VLM receives prompt that includes both sections
+
+class TestSupervisorPromptMissingContextsFallback:
+    # _call_supervisor_llm called with dialogue_ctx="" and battle_ctx=""
+    # Rendered prompt contains "(none)" in both context sections
+    # No KeyError raised
 ```
 
 **Manual — Memory Integration Smoke Test (`boundary_test.state`):**
@@ -1150,7 +1401,8 @@ class TestBattleOutcomeInSupervisorContext:
 *Purpose:* Confirm that after the agent has a brief NPC encounter en route to
 Petalburg City (any NPC dialogue or battle), the event is written to
 `game_history` and the Supervisor retrieves it on the subsequent handoff to
-evaluate progress.
+evaluate progress. Separately confirm that the two context sections in the
+Supervisor prompt are populated from the correct event types.
 
 *Command — Step 1, run until at least one NPC interaction:*
 ```bash
@@ -1163,22 +1415,30 @@ PYTHONPATH=$PWD .venv/bin/python -m agent.brain.demos.inspect_brain
 ```
 
 *Observe in `inspect_brain` output:*
-- At least one entry in `game_history` with `metadata.timestamp` > `_boot_timestamp`
-- Entry text contains a dialogue fragment or `"Battle ended"`
+- At least one entry in `game_history` with `metadata.type == "dialogue_transcript"` and `timestamp > _boot_timestamp`
+- At least one entry with `metadata.type == "battle_outcome"` and `timestamp > _boot_timestamp` (if a wild battle occurred)
 
 *Observe in console during run:*
-- After first coms_bot → nav_bot handoff: `[SUPERVISOR] episodic_ctx: "..."` is non-empty
-- `supervisor_last_reasoning` references retrieved context
+- After first `coms_bot → nav_bot` handoff:
+  - `[SUPERVISOR] dialogue_ctx: "..."` is non-empty and contains an NPC speaker name
+  - `[SUPERVISOR] battle_ctx: "(none)"` on steps before any battle (confirms no cross-contamination)
+- After first battle (if one occurs):
+  - `[SUPERVISOR] battle_ctx: "Battle ended..."` is non-empty
+  - `[SUPERVISOR] dialogue_ctx:` still shows only dialogue records, not the battle entry
 
 *Pass criteria:*
-- [ ] `game_history` has ≥ 1 post-boot entry after the run
-- [ ] `_query_episodic_memory` returns non-empty string on the first coms_bot → nav_bot handoff
-- [ ] Supervisor reasoning text references the retrieved context (visible in `supervisor_last_reasoning`)
-- [ ] Stale pre-boot records are NOT returned (check `timestamp` field in returned docs)
+- [ ] `game_history` has ≥ 1 `dialogue_transcript` entry with `timestamp > boot_timestamp` after a coms_bot step
+- [ ] `game_history` has ≥ 1 `battle_outcome` entry with `timestamp > boot_timestamp` after a battle ends (if applicable)
+- [ ] `dialogue_ctx` section in Supervisor prompt contains speaker names, NOT "Battle ended" text
+- [ ] `battle_ctx` section in Supervisor prompt contains "Battle ended", NOT dialogue text
+- [ ] Stale pre-boot records in both types are excluded (check `timestamp` against `boot_timestamp`)
 
 *Fail indicators:*
-- No entries in `game_history`: `coms_bot_node` is not calling `episodic_memory.log_event` — confirm `episodic_memory` is passed to `make_coms_bot_node` factory
-- All records returned regardless of timestamp: `_boot_timestamp` not set in `Agent.__init__()` or not forwarded into `state_data`
+- No `dialogue_transcript` entries: `episodic_memory` not passed to `make_coms_bot_node` — check `build_graph()` call
+- No `battle_outcome` entries after a battle: `make_battle_bot_node` is missing the `episodic_memory` parameter wiring in `graph.py`
+- `dialogue_ctx` contains "Battle ended": `_query_dialogue_context` is missing the `type=$eq:dialogue_transcript` ChromaDB filter
+- `battle_ctx` contains NPC dialogue: `_query_battle_outcomes` is missing the `type=$eq:battle_outcome` filter
+- Both contexts always `(none)`: `_boot_timestamp` is 0.0 or not set — check `Agent.__init__()` sets it at runtime
 
 *Status:* 🔲 NOT YET RUN
 
@@ -1220,7 +1480,33 @@ This gives the Supervisor a deterministic anchor:
 - `last_completed = "ROUTE_102"` → agent is partway through the Petalburg City sequence
 - The RAG query uses this anchor: `"Player just completed ROUTE_102 and is heading to PETALBURG_CITY"`
 
-### 6.3 Boot Sequence Diagram
+#### 6.2.1 Post-Rustboro Behaviour (Beyond `MILESTONE_PROGRESSION` Index 26)
+
+`MILESTONE_PROGRESSION` ends at index 26 (`FIRST_GYM_COMPLETE`). The emulator
+ROM does not expose milestone flags for anything beyond the Stone Badge.
+
+**This is intentional and safe.** The HTN system handles post-Rustboro content
+differently from the opening sequence:
+
+| Game stage | Milestone source | Goal-generation source | Completion evidence |
+|---|---|---|---|
+| Indices 0–26 (new game → Stone Badge) | `state_data["milestones"]` ROM flags + milestones JSON | `MILESTONE_PROGRESSION` + walkthrough RAG | ROM flag OR `dialogue_completed` flag |
+| Index 26+ (Devon Corp → postgame) | milestones JSON only (no ROM flags) | **Walkthrough RAG exclusively** | **ChromaDB `game_history` exclusively** |
+
+When `_get_last_completed_milestone()` finds no completed milestones in
+`MILESTONE_PROGRESSION` (because all 27 are done), it returns `"FIRST_GYM_COMPLETE"`.
+The RAG query then produces a post-Stone-Badge HTN using walkthrough chunks.
+
+The `verification_node` no-ops safely when `milestone_index >= 27` (already
+implemented). From that point forward, all goal advancement is handled by the
+Supervisor's POP operation, driven by ChromaDB completion evidence.
+
+> **Action required:** When adding milestones beyond `FIRST_GYM_COMPLETE`
+> (e.g., Dewford Gym, Slateport City), add them to `MILESTONE_PROGRESSION` as
+> `completion_type="location"` or `completion_type="battle"`. Do NOT add
+> fake ROM flags — the verification node will simply never see them fire, and
+> the Supervisor will handle completion via ChromaDB instead. This is correct
+> behaviour.
 
 ```
 Agent.__init__()
@@ -1521,7 +1807,8 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 | 3 | `tests/test_supervisor_prompt.py` | **CREATE** | ☐ |
 | 4 | `executive_supervisor.py` (`_bootstrap_stack`, `_expand_strategic_goal`) | part of Phase 2 file | ☐ |
 | 4 | `tests/test_htn_bootstrap.py` | **CREATE** | ☐ |
-| 5 | `agent/graph/nodes/battle_bot.py` | MODIFY (log battle outcome) | ☐ |
+| 5 | `agent/graph/nodes/battle_bot.py` | MODIFY — refactor to `make_battle_bot_node(episodic_memory)` factory; log `battle_start` + `battle_outcome` events to ChromaDB **(required)** | ☐ |
+| 5 | `agent/graph/nodes/executive_supervisor.py` | MODIFY — replace `_query_episodic_memory()` with `_query_dialogue_context()` + `_query_battle_outcomes()`; update `_call_supervisor_llm` signature | ☐ |
 | 5 | `tests/test_supervisor_memory.py` | **CREATE** | ☐ |
 | 6 | `agent/graph/state.py` | MODIFY (add `_boot_timestamp`) | ☐ |
 | 6 | `agent/__init__.py` | MODIFY (set `_boot_timestamp`) | ☐ |
@@ -1566,3 +1853,74 @@ python run.py --load-state Emerald-GBAdvance/boundary_test.state --agent-auto --
 | **B. Gym interior A\* impossible** | The Supervisor issues `goal_type="immediate"` goals like "Enter Gym" (warp handled automatically by game engine). The HTN never needs to plan past the warp boundary. |
 | **C. Duplicate Objective list** | `_initialize_storyline_objectives()` is deleted in Stage 4. The `GoalNode` list *is* the objective list. |
 | **D. Cannot distinguish "entered gym" from "completed scene"** | Supervisor's `completion_condition` is checked against `game_history` episodic logs, which capture the actual dialogue transcript from `coms_bot_node`. "Norman cutscene ran" is verifiable from transcript content. |
+
+---
+
+## Appendix C: Milestone Source Architecture
+
+This appendix answers the question: **which source should the system trust for
+milestone completion, and when?**
+
+### Three Sources, Three Roles
+
+| Source | What it is | When it is authoritative |
+|---|---|---|
+| **ROM flags** (`state_data["milestones"]` from emulator RAM) | Hardware bits in the GBA ROM, flipped by in-game scripts | Location arrivals, battle starts/ends — coverage up to `FIRST_GYM_COMPLETE` only |
+| **Milestones JSON** (`*_milestones.json` companion file) | Persistent record of which ROM flags have ever fired in this session | **Bootstrap only** — anchors `_get_last_completed_milestone()` at agent startup |
+| **ChromaDB `game_history`** | Episodic event log written by `coms_bot_node` and `battle_bot_node` during runtime | **Primary completion evidence** for the Supervisor's POP decisions, at all game stages |
+
+### Decision Table
+
+| Scenario | Use this source |
+|---|---|
+| Agent starts up, goal stack is empty | Milestones JSON → `_get_last_completed_milestone()` → RAG anchor |
+| `verification_node` checking a `completion_type="location"` milestone (index 0–26) | ROM flags via `check_storyline_milestones()` |
+| `verification_node` checking a `completion_type="dialogue"` milestone | `dialogue_completed` flag (set by `TransitionEvaluator`) — **ROM flags explicitly ignored** for dialogue milestones because they fire on map entry, not after NPC speech |
+| `verification_node` when `milestone_index >= 27` (post-Rustboro) | No-op — Supervisor handles all advancement via ChromaDB |
+| Supervisor deciding whether to POP `Stack[0]` | ChromaDB `game_history` — `_query_dialogue_context()` + `_query_battle_outcomes()` |
+
+### Why ROM Flags Fire Early for Dialogue Milestones
+
+The GBA ROM sets `DAD_FIRST_MEETING` and `GYM_EXPLANATION` flags the moment
+the player's map tile is within the Petalburg Gym map boundary — i.e., on gym
+**entry**, not after Norman speaks. The ROM flag mechanism is not granular
+enough to distinguish "entered map" from "completed cutscene".
+
+**Current fix (already implemented):** `check_storyline_milestones()` skips
+auto-completion when `_MILESTONE_COMPLETION_TYPE[milestone_id] == "dialogue"`.
+The verification node then waits for `dialogue_completed == True`, which is
+set by `TransitionEvaluator` after it confirms the expected keywords appear in
+the `_SESSION_TRANSCRIPT`.
+
+**HTN fix (Phase 7+):** The Supervisor's `completion_condition` string for
+`DAD_FIRST_MEETING` will be something like:
+```
+"Norman has spoken to the player about gym challenges. Episodic memory
+contains dialogue from Norman explaining the gym or badges."
+```
+This is verified against `_query_dialogue_context()`, which only returns
+records with `type="dialogue_transcript"`. Map entry alone does not produce
+a `dialogue_transcript` record, so premature POP is impossible.
+
+### Why Not Use ROM Flags as the Primary Source?
+
+1. **Coverage ends at Rustboro.** `MILESTONE_PROGRESSION` has 27 entries.
+   The ROM exposes no flags for Dewford, Slateport, Mauville, or any later content.
+2. **Dialogue milestones fire too early** (see above).
+3. **ROM flags cannot capture battle nuance.** They record "battle started"
+   but not "battle won", "party HP after", or "which Pokémon was used". The
+   Supervisor needs outcome detail to reason about HP recovery needs.
+
+### Why Not Use Milestones JSON as the Runtime Source?
+
+The milestones JSON is a snapshot of which ROM flags have fired. It inherits
+all the limitations of ROM flags (coverage, early-fire for dialogue). It is
+useful at bootstrap because it gives a persistent cross-session anchor, but
+it lags behind the live game state by at least one step (it's updated
+asynchronously by the emulator).
+
+### Summary
+
+> Use ROM flags → verification node → indices 0–26, non-dialogue milestones  
+> Use milestones JSON → bootstrap anchor only  
+> Use ChromaDB → Supervisor POP decisions, all stages, all content
