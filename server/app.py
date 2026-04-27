@@ -972,11 +972,23 @@ async def get_comprehensive_state():
         if map_stitcher:
             # Get the location grid and connections
             if current_location and current_location != "Unknown":
-                location_grid = map_stitcher.get_location_grid(current_location, simplified=True)
+                # Indoor grid fix: resolve map_id FIRST so we use the canonical
+                # location name from the MapArea rather than the GBA-reported
+                # `current_location` string (which stays "Petalburg City" even
+                # inside a building, causing A* to plan with the city grid).
+                _map_bank = env.memory_reader._read_u8(env.memory_reader.addresses.MAP_BANK)
+                _map_number = env.memory_reader._read_u8(env.memory_reader.addresses.MAP_NUMBER)
+                _map_id = (_map_bank << 8) | _map_number
+                _grid_area = map_stitcher.map_areas.get(_map_id)
+                grid_location_name = _grid_area.location_name if _grid_area else current_location
+                if grid_location_name != current_location:
+                    print(f"🗺️ [SERVER A*] Indoor grid fix: using '{grid_location_name}' instead of '{current_location}'")
+
+                location_grid = map_stitcher.get_location_grid(grid_location_name, simplified=True)
                 connections = []
                 
                 # Get connections for this location
-                for other_loc, my_coords, their_coords in map_stitcher.get_location_connections(current_location):
+                for other_loc, my_coords, their_coords in map_stitcher.get_location_connections(grid_location_name):
                     connections.append({
                         "to": other_loc,
                         "from_pos": list(my_coords),

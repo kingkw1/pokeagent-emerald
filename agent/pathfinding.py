@@ -1728,5 +1728,30 @@ def pathfind_to_goal(state_data: Dict[str, Any], goal_x: int, goal_y: int,
                     print(f"✅ [PATHFIND] Global A* found path to ({goal_x}, {goal_y})")
                     return result if isinstance(result, list) else [result]
 
+                # Tier 2b: goal tile is '#' (e.g. gym door w/ collision=1 in stored grid,
+                # or west-edge boundary tile for Route 104 exit) but the tile is a real
+                # warp/boundary trigger — try all 4 adjacent approach tiles.
+                # Order: south (goal_y+1), east (goal_x+1), north (goal_y-1), west (goal_x-1)
+                goal_tile_symbol = location_grid.get((goal_x, goal_y))
+                if goal_tile_symbol and goal_tile_symbol not in ['.', '_', '~', 'D', '?', 'S']:
+                    for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                        approach = (goal_x + dx, goal_y + dy)
+                        approach_tile = location_grid.get(approach)
+                        if approach_tile in ['.', '_', '~']:
+                            print(f"🔑 [PATHFIND] Goal ({goal_x},{goal_y})='{goal_tile_symbol}', trying approach tile {approach}")
+                            result = _astar_pathfind_with_grid_data(
+                                location_grid=location_grid,
+                                bounds=bounds,
+                                current_pos=(current_x, current_y),
+                                location=location,
+                                goal_direction=goal_direction,
+                                recent_positions=_recent_positions,
+                                goal_coords=approach,
+                                avoid_grass=avoid_grass
+                            )
+                            if result:
+                                print(f"✅ [PATHFIND] Approach tile path found to {approach}")
+                                return result if isinstance(result, list) else [result]
+
     print(f"⚠️ [PATHFIND] All pathfinding tiers failed for ({goal_x}, {goal_y})")
     return None

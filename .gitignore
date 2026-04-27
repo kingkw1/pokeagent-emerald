@@ -212,9 +212,7 @@ memory_db/
 memory_db_demo/
 npc_registry.json
 
-# LLM logs
-llm_logs/shadow_comparison.jsonl
-
 # Run logs (stdout tee for debugging)
 run_logs/
 seth_reference/
+llm_logs/

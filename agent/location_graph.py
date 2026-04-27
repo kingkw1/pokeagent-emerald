@@ -376,7 +376,7 @@ LOCATION_GRAPH: Dict[str, Dict[str, Any]] = {
                 "type": "warp_tile",
                 "direction": "interact",
                 "entry_coords": (4, 111),  # Inside gym, door mat tile ('D')
-                "exit_coords": (15, 8),    # Gym door in Petalburg
+                "exit_coords": (15, 9),    # Gym doormat — player steps onto this to trigger warp (warp log: (15,9)->(15,9) maps 0->2049)
                 "description": "Enter Petalburg Gym (Norman's gym)",
                 "requirements": None,
             },
@@ -384,7 +384,7 @@ LOCATION_GRAPH: Dict[str, Dict[str, Any]] = {
                 "type": "warp_tile",
                 "direction": "interact",
                 "entry_coords": (7, 9),
-                "exit_coords": (20, 16),   # PC door tile — step UP onto this to trigger warp (confirmed from warp log)
+                "exit_coords": (20, 17),   # PC doormat — player steps onto this to trigger warp (warp log: (20,17)->(20,17) maps 0->2052)
                 "description": "Enter Pokemon Center",
                 "requirements": None,
             },
