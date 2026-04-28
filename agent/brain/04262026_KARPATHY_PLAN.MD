@@ -1,12 +1,82 @@
 # Karpathy Meta-Agent Plan
 
 **Status:** 🔲 Deferred — agent must reliably complete the main game before this
-layer is added. See [`PLAN.MD`](PLAN.MD) for the current active roadmap.
+layer is added. See [`HTN_MIGRATION_PLAN.md`](HTN_MIGRATION_PLAN.md) for the current active roadmap.
 
 **Objective:** Wrap the LangGraph dispatch loop with a reward-logging and
 meta-learning layer that quantifies the agent's per-step performance, enables
 offline policy improvement, and produces a VLM-savings metric suitable for
 portfolio / competition documentation.
+
+---
+
+## Evaluation Oracle (pokeemerald)
+
+Accurate progress evaluation requires ground-truth game state that the agent itself
+cannot see. We use [**pret/pokeemerald**](https://github.com/pret/pokeemerald) —
+the complete reverse-engineered decompilation of Pokémon Emerald — as a
+**passive oracle** for the Karpathy evaluator only.
+
+### Design Principle: Perfect Evaluator, Imperfect Agent
+
+The agent operates under **partial observability**: it sees only VLM frame analysis
+and the selective RAM reads it has always had (`gPlayerParty`, `gBattleMons`,
+`gObjectEvents`, etc.). It has no knowledge of event flags, warp tables, or script state.
+
+The Karpathy reward calculator has **full observability**: it reads the same GBA RAM
+but decodes it against pokeemerald's constants to produce a richly typed progress
+vector. This information is **never passed to any agent node** — it exists only in the
+reward log for offline analysis.
+
+```
+┌─────────────────────────────────────┐   ┌─────────────────────────────────────┐
+│         LangGraph Agent             │   │       Karpathy Evaluator            │
+│  (partial observability)            │   │  (full observability — oracle only) │
+│                                     │   │                                     │
+│  VLM frames (Gemini Flash)          │   │  SaveBlock1.flags[] bitfield        │
+│  + selective RAM reads:             │   │  decoded via pokeemerald:           │
+│    gPlayerParty                     │   │    include/constants/flags.h        │
+│    gBattleMons                      │   │    include/constants/map_groups.h   │
+│    gObjectEvents                    │   │    data/maps/*/map.json warp tables │
+│    player (x,y,map_bank,map_num)    │   │                                     │
+│                                     │   │  → story_flags_set (bitset diff)    │
+│  No event flags.                    │   │  → maps_visited (new map IDs)       │
+│  No warp tables.                    │   │  → items_obtained (PC items delta)  │
+│  No script state.                   │   │  → badges_earned (gym flags)        │
+└─────────────────────────────────────┘   └─────────────────────────────────────┘
+```
+
+### What pokeemerald Provides
+
+| pokeemerald artifact | Used for |
+|---|---|
+| `include/constants/flags.h` | Named constants for every story event flag (e.g., `FLAG_GOT_STARTER_FROM_PROFESSOR_BIRCH`, `FLAG_BADGE01_GET`) — maps RAM flag index → human-readable event |
+| `include/constants/map_groups.h` | Every map ID constant (e.g., `MAP_ROUTE101`, `MAP_PETALBURG_CITY`) — maps `(map_bank, map_num)` RAM pair → location name |
+| `data/maps/*/map.json` | Per-map warp tables, NPC event scripts, and object event coordinates — used to verify that the agent reached the right position within a map |
+| `src/data/object_events/object_event_graphics_info.h` | Graphics-ID-to-NPC-type mapping — ground truth for `NpcRegistry` validation |
+
+### RAM Access Pattern (Evaluator)
+
+```python
+# pokemon_env already exposes SaveBlock1 — the evaluator extends the existing
+# reader rather than opening a new RAM window
+
+SAVEBLOCK1_FLAGS_OFFSET = 0x00AC  # byte offset of flags[] within SaveBlock1
+FLAGS_ARRAY_SIZE = 0x12C           # 300 bytes = 2400 flag bits
+
+def read_story_flags(env) -> set[int]:
+    """Return the set of flag indices currently set in SaveBlock1.flags[].
+    Decode against pokeemerald flag constants for human-readable names.
+    Called only by the Karpathy evaluator — never passed to agent nodes.
+    """
+    flags_bytes = env.read_memory(SAVEBLOCK1_FLAGS_OFFSET, FLAGS_ARRAY_SIZE)
+    return {
+        byte_idx * 8 + bit_idx
+        for byte_idx, byte in enumerate(flags_bytes)
+        for bit_idx in range(8)
+        if byte & (1 << bit_idx)
+    }
+```
 
 ---
 
@@ -52,9 +122,14 @@ class KarpathyMetaAgent:
         with open(self._log_path, "a") as f:
             json.dump({
                 "step":                    curr_state["step_count"],
-                "milestone_index":         curr_state["milestone_index"],
-                # --- reward ---
-                "milestone_delta":         reward.milestone_delta,
+                # --- reward (oracle-derived, evaluator only) ---
+                # story_flags_delta: count of new pokeemerald event flags set
+                # since the previous step. Source: SaveBlock1.flags[] decoded
+                # against include/constants/flags.h. NOT passed to agent nodes.
+                "story_flags_delta":       reward.story_flags_delta,
+                "new_flags":               reward.new_flags,          # list[str] human names
+                "maps_visited_delta":      reward.maps_visited_delta,  # new map IDs entered
+                "badges_delta":            reward.badges_delta,        # gym flag count diff
                 "manhattan_delta":         reward.manhattan_delta,
                 "party_level_sum_delta":   reward.party_level_sum_delta,
                 "pokédollar_delta":        reward.pokédollar_delta,
@@ -65,6 +140,9 @@ class KarpathyMetaAgent:
                 "output_tokens":           tel.output_tokens,
                 "step_latency_ms":         tel.step_latency_ms,
                 "node_fired":              tel.node_fired or curr_state["last_action"],
+                # --- htn state snapshot (for correlation analysis) ---
+                "htn_stack_depth":         len(curr_state.get("goal_stack") or []),
+                "htn_top_goal":            (curr_state.get("goal_stack") or [{}])[0].get("task") if curr_state.get("goal_stack") else None,
             }, f)
             f.write("\n")
         return {**curr_state, "reward": reward}
@@ -263,10 +341,10 @@ allowlisted:
 | File | Reason It Can Be Simplified |
 |------|-----------------------------|
 | `agent/combat/heuristic_agent.py` | Deep nested type-effectiveness if-trees → table lookup |
-| `agent/objective_manager.py` | Hardcoded milestone FSM → data-driven from JSON |
-| `agent/navigation_planner.py` | Location-specific if-blocks → graph-derived coords |
-| `agent/brain/strategic_planner.py` | Inline fallback chains → clean strategy pattern |
+| `agent/graph/nodes/nav_bot.py` | Location-specific if-blocks → LOCATION_GRAPH portal metadata |
+| `agent/graph/nodes/battle_bot.py` | Rule-heavy battle heuristics → strategy object dispatch |
 | `agent/graph/routing_condition.py` | Multi-branch dispatch → table-driven routing |
+| `agent/pathfinding.py` | Nested fallback chains → clean graph search with single entry point |
 
 Files that are **never** editable by the meta-agent:
 - `pokemon_env/` (emulator bindings)
@@ -279,10 +357,10 @@ Files that are **never** editable by the meta-agent:
 # scripts/verify_patch.py
 ALLOWED_EDIT_TARGETS = {
     "agent/combat/heuristic_agent.py",
-    "agent/objective_manager.py",
-    "agent/navigation_planner.py",
-    "agent/brain/strategic_planner.py",
+    "agent/graph/nodes/nav_bot.py",
+    "agent/graph/nodes/battle_bot.py",
     "agent/graph/routing_condition.py",
+    "agent/pathfinding.py",
 }
 
 def verify_patch(changed_files: list[str]) -> tuple[bool, str]:
@@ -368,9 +446,9 @@ meta-agent edits. Record the results here once the first scan is run:
 | Module | Worst Function | Baseline CC | Target CC |
 |--------|---------------|-------------|-----------|
 | `agent/combat/heuristic_agent.py` | TBD | TBD | ≤ 10 |
-| `agent/objective_manager.py` | TBD | TBD | ≤ 10 |
-| `agent/navigation_planner.py` | TBD | TBD | ≤ 10 |
-| `agent/brain/strategic_planner.py` | TBD | TBD | ≤ 10 |
+| `agent/graph/nodes/nav_bot.py` | TBD | TBD | ≤ 10 |
+| `agent/graph/nodes/battle_bot.py` | TBD | TBD | ≤ 10 |
+| `agent/pathfinding.py` | TBD | TBD | ≤ 10 |
 | `agent/graph/routing_condition.py` | TBD | TBD | ≤ 10 |
 
 **Concrete simplification patterns** the meta-agent is instructed to prefer:

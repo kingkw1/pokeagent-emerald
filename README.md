@@ -8,51 +8,66 @@
 
 ## Overview
 
-PokéAgent is a **Hierarchical Neuro-Symbolic Agent** designed to solve complex, long-horizon RPG tasks in real-time. It tackles the challenge of autonomous gameplay by splitting cognition into two distinct systems: a **"Fast Brain"** (deterministic controllers for navigation, combat, menus) and a **"Slow Brain"** (an on-demand LLM/VLM reasoning layer powered by RAG that handles exceptions, blockers, and strategic pivots).
+PokéAgent is a **Hierarchical Neuro-Symbolic Agent** designed to solve complex, long-horizon RPG tasks in real-time. It operates entirely on **semantic memory and visual frames** — the runtime agent has no access to the game's source code, scripted triggers, or event flags.
+
+Cognition is split into two systems: a **"Fast Brain"** (deterministic controllers for navigation, combat, menus) and a **"Slow Brain"** (an HTN Executive Supervisor that reads unstructured Bulbapedia walkthrough text via RAG to dynamically generate hierarchical goals, then verifies completion against live RAM state). A multimodal LangGraph router evaluates each game frame with zero-shot visual perception (Gemini Flash) and delegates execution to the appropriate deterministic node.
 
 ### Design Principles
 
 | Principle | Implementation |
 |-----------|---------------|
-| **Fast by default** | Programmatic controllers handle navigation, combat, and menus deterministically |
-| **Smart when needed** | VLM reasoning activates only on blockers or uncertain states — keeping cost and latency low |
-| **Memory-augmented** | ChromaDB-backed episodic memory enables RAG-powered recovery planning |
-| **Agentic Routing** | A central Executive FSM parses VLM data to issue strict directives, turning "God Class" monoliths into a clean routing switchboard |
+| **Fast by default** | Programmatic executor nodes (`nav_bot`, `battle_bot`, `coms_bot`) handle navigation, combat, and menus deterministically with zero LLM calls |
+| **Smart when needed** | VLM/LLM reasoning fires only on state handoffs (node transitions) — keeping per-frame latency near zero for the common case |
+| **Memory-augmented** | Two ChromaDB collections: `strategy_guide` (Bulbapedia walkthrough RAG for goal generation) and `game_history` (episodic memory for completion evidence) |
+| **HTN-driven planning** | An LLM Executive Supervisor maintains a dynamic Hierarchical Task Network (HTN) goal stack, replacing the hardcoded `MILESTONE_PROGRESSION` FSM |
 
 ## Architecture
 
-PokéAgent uses a **Router-Executor** pattern where a central `ObjectiveManager` acts as the executive brain, issuing structured `Directive` objects that are executed by specialized deterministic controllers.
+PokéAgent runs as a **LangGraph `StateGraph`**. A central `dispatch` node routes to specialized executor nodes; a lightweight `handoff_detector` gates an `executive_supervisor` that maintains a **Hierarchical Task Network (HTN)** goal stack — the replacement for the legacy hardcoded milestone FSM.
 
-### System 1 / System 2 Design
+> **Current state (HTN Phases 0–4 complete, Phases 5–7 in progress):** The graph and the HTN Supervisor are fully wired. The Supervisor builds a real goal stack from RAG + game state on every handoff, but does not yet overwrite navigation fields (`--use-htn` is off by default). Navigation is still driven by the `ObjectiveManager` + `MILESTONE_PROGRESSION` fallback path. HTN Phases 5–7 complete the cutover.
 
-1. **ObjectiveManager (Executive Router):** Reads milestone progression, generates a `Directive` (e.g., `goal_coords=(0, 8, 'ROUTE_102')`), and dispatches it to the appropriate controller.
-2. **System 1 — Fast Brain (Execution):** `NavigationPlanner` (A\* pathfinding), `Battle Engine` (dual-mode: Heuristic / RL architecture), and `OpenerBot` (intro FSM) execute directives at high frequency with zero LLM calls.
-3. **System 2 — Slow Brain (Recovery):** When the agent gets stuck (oscillation detection) or hits a dialogue blocker, the `RecoveryPlanner` queries `EpisodicMemory` (ChromaDB) via RAG and asks the LLM for a recovery plan. The resulting task is pushed onto a recovery stack that **pre-empts** normal milestone navigation — the agent executes the brain's plan before resuming the main quest.
+### Graph Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   ObjectiveManager                          │
-│                  (Executive Router)                         │
-│   Milestones → Directive → Dispatch (+ Recovery Priority)   │
-├─────────────────────────────┬───────────────────────────────┤
-│     System 1 (Fast Brain)   │    System 2 (Slow Brain)      │
-│  ┌─────────┬──────────────┐ │  ┌───────────┬──────────────┐ │
-│  │ Nav     │ Battle Engine│ │  │ Episodic  │ Recovery     │ │
-│  │ Planner │ (Heuristic + │ │  │ Memory    │ Planner      │ │
-│  │ (A*/BFS)│  RL arch.)   │ │  │ (ChromaDB)│ (RAG+Gemini) │ │
-│  └─────────┴──────────────┘ │  └───────────┴──────────────┘ │
-└─────────────────────────────┴───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                        LangGraph StateGraph                          │
+│                                                                      │
+│   dispatch_node  (routing_condition)                                 │
+│        │                                                             │
+│        ├──────────────┬──────────────┬────────────────────┐         │
+│        ▼              ▼              ▼                    ▼         │
+│     nav_bot      battle_bot      coms_bot    map_stitcher_relay      │
+│     (A* nav)     (heuristic)    (dialogue)   (healing path)         │
+│        │              │              │                    │         │
+│        └──────────────┴──────────────┴────────────────────┘         │
+│                                   │                                 │
+│                        handoff_detector_node                        │
+│                        (zero LLM — gate only)                       │
+│                                   │                                 │
+│                      supervisor_pending?                            │
+│                      YES ▼         NO ──────────────────────►       │
+│            executive_supervisor_node                  verification  │
+│            (HTN: POP / CONTINUE / PUSH / REPLACE)          node     │
+│                          │                                  ▲       │
+│                          └──────────────────────────────────┘       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Slow Brain Trigger Flow
+The Supervisor is **not on the hot path** — it fires only on node-type transitions (e.g. `battle_bot → nav_bot`) and on the first step of each run, keeping per-frame cost near zero.
 
-The Slow Brain activates on three trigger types:
+### System 1 / System 2
 
-1. **Battle transitions** — When `in_battle` flips `True`, the `RecoveryPlanner` fires (RAG query → LLM). The recovery task (e.g., "Win the battle") is auto-completed when the battle ends.
-2. **Dialogue blockers** — If NPC dialogue contains blocking keywords ("wait", "stop", "dangerous"), the `RecoveryPlanner` generates a recovery task.
-3. **Navigation stuck** — If position oscillation is detected (≤2 unique positions over 6 steps while not in battle), `signal_blocker("Navigation Stuck")` fires, triggering RAG + LLM recovery on the next step.
+**System 1 — Fast Brain (Execution):** The executor nodes run at high frequency with zero LLM calls. They consume `AgentState` directive fields (`goal_coords`, `goal_location`, `should_interact`) and write observations back to state. The `handoff_detector` observes when node type changes and sets `supervisor_pending = True`.
 
-Recovery tasks are consumed at the **top** of `get_next_action_directive()`, pre-empting milestone navigation. Once the recovery task completes, normal progression resumes.
+**System 2 — Slow Brain (Reasoning):** The `executive_supervisor_node` fires on handoffs. It reads the HTN goal stack, queries two ChromaDB collections (`strategy_guide` for walkthrough RAG, `game_history` for episodic completion evidence), and issues exactly one stack operation. On the first step of a run, it calls `_bootstrap_stack()` to generate the initial 3-level HTN (strategic → tactical → immediate) from a RAG query anchored to the last completed milestone.
+
+**Navigation authority (transitional):**
+
+| When | Navigation driver |
+|---|---|
+| *Now (Phases 0–4)* | `ObjectiveManager` + `MILESTONE_PROGRESSION` FSM — `goal_coords`/`goal_location` written by the legacy path |
+| *After Phase 7.2* | `Stack[0].directive` from the HTN goal stack overwrites nav fields directly; `ObjectiveManager` retained as last-resort fallback |
 
 ### Specialized Controllers
 
@@ -69,14 +84,14 @@ Recovery tasks are consumed at the **top** of `get_next_action_directive()`, pre
    - **Graph-Derived Coordinates:** Building entrances, interior exits, and POI positions are resolved at runtime from `LOCATION_GRAPH` portal/warp metadata via `get_entrance_coords()`, `get_interior_exit_coords()`, and `get_poi_coords()` — eliminating hardcoded coordinate constants.
    - See [docs/PATHFINDING_SUMMARY.md](docs/PATHFINDING_SUMMARY.md).
 
-4. **Objective Manager** — Milestone-driven progression through 40+ predefined milestones derived from official speedrun splits. Milestone `target_coords` are resolved dynamically from `LOCATION_GRAPH` via `target_coords_fn` lambdas. Provides goal coordinates and interaction flags via a tactical directive system. RAG-primary mode (Phase 4.3b) allows the walkthrough planner to override milestone targets. See [docs/DIRECTIVE_SYSTEM.md](docs/DIRECTIVE_SYSTEM.md).
+4. **Objective Manager** *(legacy — being replaced)* — Milestone-driven progression through 40+ predefined milestones from official speedrun splits. Currently the active navigation driver: resolves `goal_coords`/`goal_location` from `LOCATION_GRAPH` lambdas and provides directive fallback for the HTN Supervisor. Will be retired after HTN Phase 7 and retained as a reference archive. See [docs/DIRECTIVE_SYSTEM.md](docs/DIRECTIVE_SYSTEM.md).
 
 5. **Perception Module** — Layered extraction pipeline:
    - **Primary:** VLM structured JSON extraction (Qwen2-VL-2B-Instruct, ~2.3 s local inference)
    - **Secondary:** OCR with Pokémon-specific colour matching (pytesseract)
    - **Tertiary:** Programmatic heuristics (red triangle detection, dialogue border matching)
 
-6. **Brain (Memory & Recovery Planning)** — Episodic memory backed by **ChromaDB** with `all-MiniLM-L6-v2` embeddings. On every step the brain logs dialogue, detects blockers (keyword matching + position oscillation), and — when triggered — runs a RAG query → LLM recovery-planning pipeline. Recovery tasks are pushed onto a priority stack inside `ObjectiveManager` and executed before milestone navigation resumes. See [agent/brain/README.md](agent/brain/README.md).
+6. **Brain (Memory & RAG)** — Two ChromaDB collections (`strategy_guide` and `game_history`) backed by `all-MiniLM-L6-v2` embeddings. The `strategy_guide` collection (136 Bulbapedia walkthrough chunks + supplemental navigation chunks) is queried by the HTN Supervisor at bootstrap and goal-expansion time to generate structured `GoalNode` objects. The `game_history` collection stores per-step episodic events (dialogue turns, battle outcomes) queried as completion evidence for stack operations. See [agent/brain/README.md](agent/brain/README.md).
 
 ### VLM Integration
 
