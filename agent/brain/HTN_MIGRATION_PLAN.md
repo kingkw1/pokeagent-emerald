@@ -1599,7 +1599,7 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 
 *Command — Step 2, inspect ChromaDB:*
 ```bash
-PYTHONPATH=$PWD .venv/bin/python -m agent.brain.demos.inspect_brain
+python scripts/dump_walkthrough_db.py --stats
 ```
 
 *Observe in `inspect_brain` output:*
@@ -1627,6 +1627,94 @@ PYTHONPATH=$PWD .venv/bin/python -m agent.brain.demos.inspect_brain
 - `dialogue_ctx` contains "Battle ended": `_query_dialogue_context` is missing the `type=$eq:dialogue_transcript` ChromaDB filter
 - `battle_ctx` contains NPC dialogue: `_query_battle_outcomes` is missing the `type=$eq:battle_outcome` filter
 - Both contexts always `(none)`: `_boot_timestamp` is 0.0 or not set — check `Agent.__init__()` sets it at runtime
+
+*Status:* 🔲 NOT YET RUN
+
+---
+
+### Phase 5.5 — LOCATION_GRAPH Topology Chunks (Option A)
+
+**Purpose:** Auto-generate RAG chunks from the 21-node `LOCATION_GRAPH` so the
+Supervisor can query precise portal coordinates, entry/exit tiles, and
+connectivity without relying on the 5 hand-written `SUPPLEMENTAL_CHUNKS`. Once
+these topology chunks are in the `strategy_guide` collection, all 5
+supplemental chunks become redundant.
+
+**Why this belongs in Phase 5:** The topology chunks improve the *quality* of
+the Supervisor's bootstrap RAG context — the same walkthrough query that drives
+`_bootstrap_stack()` will now also return structured topology data (e.g.
+"Route 102 connects to Petalburg City (north, entry_coords=(10,28))") rather
+than vague prose.
+
+**Scope of `LOCATION_GRAPH` coverage:** 21 locations from Littleroot Town to
+Rustboro Gym. Topology chunks cover early-game only; Bulbapedia chunks cover
+the full game. The supplemental chunks were always just a stopgap for the
+same gap topology chunks now fill properly.
+
+**`generate_location_graph_chunks()` in `scripts/build_walkthrough_db.py`:**
+
+```python
+from agent.location_graph import LOCATION_GRAPH
+
+def generate_location_graph_chunks() -> list[dict]:
+    """Convert LOCATION_GRAPH portal data into RAG-ready text chunks.
+
+    One chunk per location. Format:
+        "<display_name> (<key>): <description>
+         Portals: <direction> → <neighbor_key> (entry=<coords>, exit=<coords>) [<requirements>]
+         ..."
+    """
+    chunks = []
+    for key, node in LOCATION_GRAPH.items():
+        lines = [
+            f"{node['display_name']} ({key}): {node.get('description', '')}",
+        ]
+        portals = node.get("portals", {})
+        if portals:
+            lines.append("Portals:")
+            for neighbor_key, portal in portals.items():
+                req = portal.get("requirements")
+                req_str = f" [requires: {req}]" if req else ""
+                lines.append(
+                    f"  {portal.get('direction', '?')} → {neighbor_key}"
+                    f" (entry={portal.get('entry_coords')}, "
+                    f"exit={portal.get('exit_coords')}, "
+                    f"type={portal.get('type', '?')}){req_str}"
+                )
+        chunks.append({
+            "text": "\n".join(lines),
+            "metadata": {
+                "location_key": key,
+                "display_name": node["display_name"],
+                "map_id": node.get("map_id"),
+                "source": "LOCATION_GRAPH",
+                "supplemental": True,
+                "is_topology": True,
+            },
+        })
+    return chunks
+```
+
+**Wire into `build_walkthrough_db.py` rebuild:**
+
+```python
+# After seeding Bulbapedia parts and before SUPPLEMENTAL_CHUNKS:
+topology_chunks = generate_location_graph_chunks()
+db.add_chunks([c["text"] for c in topology_chunks],
+              [c["metadata"] for c in topology_chunks])
+# Remove or comment out the old SUPPLEMENTAL_CHUNKS seeding once topology
+# chunks are validated — all 5 supplemental chunks are made redundant.
+```
+
+**Pass criteria:**
+- [ ] `python scripts/dump_walkthrough_db.py --stats` shows 21 topology chunks
+      (one per `LOCATION_GRAPH` key) in addition to the 136 Bulbapedia chunks
+- [ ] `python scripts/dump_walkthrough_db.py --query "Route 102 portal Petalburg"` returns
+      a topology chunk with correct `entry_coords` and `exit_coords`
+- [ ] A re-run of the Phase 4 manual test (`run_20260427_190954.log` baseline)
+      shows the Supervisor bootstrap using topology context (topology chunk in
+      `[SUPERVISOR] strategy_ctx:` log line)
+- [ ] Phase 0–4 automated tests still green (200/200) after DB rebuild
 
 *Status:* 🔲 NOT YET RUN
 
@@ -2013,13 +2101,14 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 | 1 | `agent/graph/nodes/handoff_detector.py` | **CREATE** (includes nav-stall detection) | ✅ |
 | 1 | `agent/graph/graph.py` | MODIFY (rewire edges) | ✅ |
 | 1 | `tests/test_handoff_detector.py` | **CREATE** | ✅ |
-| 2 | `agent/graph/nodes/executive_supervisor.py` | **CREATE** | ☐ |
-| 2 | `tests/test_executive_supervisor.py` | **CREATE** | ☐ |
-| 3 | (prompts embedded in `executive_supervisor.py`) | n/a | ☐ |
-| 3 | `utils/vlm.py` | MODIFY — add `get_json_query(system_prompt, user_prompt, module_name)` to `GeminiBackend`, `VertexBackend`, and `VLM` facade; replaces non-existent `vlm.generate()` throughout this plan | ☐ |
-| 3 | `tests/test_supervisor_prompt.py` | **CREATE** | ☐ |
-| 4 | `executive_supervisor.py` (`_bootstrap_stack`, `_expand_strategic_goal`) | part of Phase 2 file | ☐ |
-| 4 | `tests/test_htn_bootstrap.py` | **CREATE** | ☐ |
+| 2 | `agent/graph/nodes/executive_supervisor.py` | **CREATE** | ✅ |
+| 2 | `tests/test_executive_supervisor.py` | **CREATE** | ✅ |
+| 3 | (prompts embedded in `executive_supervisor.py`) | n/a | ✅ |
+| 3 | `utils/vlm.py` | MODIFY — add `get_json_query(system_prompt, user_prompt, module_name, timeout=30)` to `GeminiBackend`, `VertexBackend`, and `VLM` facade; HTN calls use `timeout=60` | ✅ |
+| 3 | `tests/test_supervisor_prompt.py` | **CREATE** | ✅ |
+| 4 | `executive_supervisor.py` (`_bootstrap_stack`, `_expand_strategic_goal`) | part of Phase 2 file | ✅ |
+| 4 | `tests/test_htn_bootstrap.py` | **CREATE** | ✅ |
+| 5.5 | `scripts/build_walkthrough_db.py` | MODIFY — add `generate_location_graph_chunks()` to auto-generate topology RAG chunks from `LOCATION_GRAPH`; supersedes all 5 `SUPPLEMENTAL_CHUNKS` | ☐ |
 | 5 | `agent/graph/nodes/battle_bot.py` | MODIFY — refactor to `make_battle_bot_node(episodic_memory)` factory; log `battle_start` + `battle_outcome` events to ChromaDB **(required)** | ☐ |
 | 5 | `agent/graph/nodes/executive_supervisor.py` | MODIFY — replace `_query_episodic_memory()` with `_query_dialogue_context()` + `_query_battle_outcomes()`; update `_call_supervisor_llm` signature | ☐ |
 | 5 | `tests/test_supervisor_memory.py` | **CREATE** | ☐ |
@@ -2030,10 +2119,6 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 | 7.2 | `run.py` / `agent/__init__.py` | MODIFY (add `--use-htn` flag; pass to `build_graph` → `make_executive_supervisor_node`) | ☐ |
 | 7 | `tests/test_shadow_mode.py` | **CREATE** | ☐ |
 | 7 | `tests/test_htn_full_cycle.py` | **CREATE** | ☐ |
-
----
-
-## Known Risks & Mitigations
 
 ---
 
