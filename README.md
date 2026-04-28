@@ -311,36 +311,51 @@ pokeagent-emerald/
 
 ## Roadmap
 
+### Completed Foundation
+
 - [x] Opener Bot (title → starter selection)
 - [x] Rule-based Battle Bot with type effectiveness
 - [x] Global A\* + local BFS navigation
 - [x] Milestone-driven Objective Manager (40+ milestones)
 - [x] VLM perception pipeline (Qwen2-VL + OCR + heuristics)
 - [x] Episodic memory with ChromaDB RAG
-- [x] **Phase 1: Brain Consolidation:** Merge the legacy `ObjectiveManager` (milestones) and `GoalManager` (RAG) into a single Executive Router.
-- [x] **Phase 2: Controller Hollowing:** Refactor the 5,000-line `action.py` into a clean switchboard that delegates to specialized handlers. *(Complete — 4,972→584 lines, −88%. Extracted 6 modules: `pathfinding.py`, `stuck_handler.py`, `vlm_action.py`, `directive_nav.py`, `intro_handler.py`, `vlm_prompt.py`)*
-- [x] **Phase 2.5: Slow Brain Wiring:** Connected `RecoveryPlanner` output to execution. Recovery tasks now pre-empt milestone navigation in `get_next_action_directive()`. Wired oscillation detector → `signal_blocker()` for navigation failures. Stripped wasteful VLM call from `planning.py` (now fully programmatic). Passed `ObjectiveManager` directly to `action_step()` instead of via function attribute.
-- [ ] **Phase 3: The "Strangler Fig" Deprecation:** Phase out the hardcoded `OpenerBot` by transitioning its movement and battle logic to the dynamic A\* and RL systems.
-- [ ] **Phase 3.5: RL Combat Integration:** Complete observation alignment, bridge the live-agent RAM data to the training observation format, and transition the default combat backend from the Heuristic Agent to the trained RL neural network. Includes an automated **data-collection pipeline** using the Pygame client to harvest diverse battle states from manual human play, feeding them into the `stable-retro` PPO training curriculum. See [agent/combat/RL_BATTLE_BOT_PLAN.md](agent/combat/RL_BATTLE_BOT_PLAN.md).
-- [ ] **Phase 4: Proactive Strategic Planning (Walkthrough RAG):**
-  - [x] **4.1:** Knowledge base preparation — Bulbapedia walkthrough chunked & embedded into ChromaDB (`strategy_guide` collection).
-  - [x] **4.2:** Strategic planner — RAG-driven `get_next_directive()` queries walkthrough text & resolves location names to `LOCATION_GRAPH` keys.
-  - [x] **4.3a:** Shadow mode — RAG planner runs alongside milestones, logging comparison to `shadow_comparison.jsonl`.
-  - [x] **4.3b:** RAG-primary with milestone fallback — RAG drives navigation, milestones catch failures.
-  - [ ] **4.3c:** RAG-only — Remove milestone list once behavioural evaluation confirms end-to-end corridor completion. Milestones retained as silent last-resort fallback.
-  - [x] **4.4a:** Fix `gObjectEvents` struct parsing — reliable NPC position reading from emulator memory.
-  - [x] **4.4b:** Dynamic NPC targeting — `_resolve_npc_coords()` pipeline replaces hardcoded NPC coordinates in milestones.
-  - [ ] **4.4c:** VLM bounding-box fallback for script-spawned NPCs not in `gObjectEvents`.
-  - [x] **4.4d:** NPC Identity Registry — adaptive discovery replaces hardcoded `graphics_id` constants.
-  - [x] **4.4e:** NPC obstacle injection — A\* pathfinding treats detected NPCs as impassable tiles.
-  - [x] **4.4f:** Graph-derived coordinates — building entrances, interior exits, milestone `target_coords`, and NPC fallback positions resolved from `LOCATION_GRAPH` portal/POI metadata.
-- [ ] **Phase 5: Post-Opening Strangler Fig** — Remove location-specific hardcoded blocks so RAG + generic systems drive all post-opening navigation:
-  - [x] **5.1:** Milestone-index gate — opener-only special cases (Birch Lab, Petalburg City/Gym, Rival Battle) skipped when past opening sequence.
-  - [x] **5.2:** Remove location-specific waypoint hacks — Route 104 South NPC avoidance and Petalburg Woods obstacle zone waypoints deleted; agent navigates via A\* + RAG.
-  - [x] **5.3:** Generic Pokemon Center healing — `_check_healing_needed()` + `find_nearest_pokemon_center()` work in any city, replacing the Rustboro-specific healing block.
-  - [ ] **5.4:** Gym navigation via RAG + A\* — replace Roxanne waypoint sequence with generic gym pathfinding.
-  - [ ] **5.5:** End-to-end validation from `06_road` split to Roxanne completion with zero location-specific special cases.
-- [ ] **Phase X: Semantic Twitch Plays Pokémon:** Implement a task queue API to allow stream viewers to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the Goal Manager.
+- [x] Controller Hollowing — `action.py` refactored 4,972→584 lines into 6 specialized modules
+- [x] Slow Brain Wiring — `RecoveryPlanner` connected to execution; oscillation detector → `signal_blocker()`
+- [x] Walkthrough RAG — Bulbapedia walkthrough chunked and embedded into `strategy_guide` ChromaDB collection (136 chunks)
+- [x] Dynamic NPC targeting — `gObjectEvents` memory parsing replaces hardcoded NPC coordinates
+- [x] NPC obstacle injection — A\* pathfinding treats detected NPCs as impassable tiles
+- [x] Graph-derived coordinates — building entrances and POI positions resolved from `LOCATION_GRAPH` at runtime
+- [x] Generic PokeCenter healing — `find_nearest_pokemon_center()` works in any city
+- [x] **HTN Phases 0–4** — Goal stack data structures, Handoff detector, Executive Supervisor node, LLM prompt & JSON schema, RAG → HTN generation (200/200 tests ✅, manual test ✅). See [agent/brain/HTN_MIGRATION_PLAN.md](agent/brain/HTN_MIGRATION_PLAN.md).
+
+### Active
+
+**1. HTN Migration — Phases 5–7** *(in progress)*
+
+The primary active track. Replaces the hardcoded `MILESTONE_PROGRESSION` FSM with an LLM Executive Supervisor that maintains a dynamic Hierarchical Task Network (HTN) goal stack. Phases 0–4 complete; remaining phases:
+
+- **Phase 5: Memory Integration** — `battle_bot_node` logs battle outcomes to ChromaDB; split the Supervisor's single episodic query into two targeted queries (dialogue transcript vs. battle outcomes)
+- **Phase 6: Boot Timestamp** — filter stale ChromaDB records from previous runs so the Supervisor is not misled by old completion evidence
+- **Phase 7: Migration path** — shadow logging (`htn_shadow.jsonl`) → flip `--use-htn` for live navigation → retire `MILESTONE_PROGRESSION`
+
+**2. LOCATION_GRAPH Auto-Population** *(parallel with HTN; feeds RAG topology)*
+
+The `LOCATION_GRAPH` currently covers 21 locations (Littleroot → Rustboro). Auto-generating topology RAG chunks from it replaces the hand-written `SUPPLEMENTAL_CHUNKS` with ground-truth spatial facts. Two sub-tracks:
+
+- Auto-generate topology chunks in `build_walkthrough_db.py` from the existing graph (immediate — unblocks RAG quality for current coverage)
+- Agent self-discovery middleware: log `(from_location, pos, to_location, pos)` pairs on every map transition → `data/discovered_portals.jsonl`; fold back into `location_graph.py` after each playthrough (ongoing — grows coverage with playthroughs)
+
+### Backlog (ordered by priority)
+
+**3. OpenerBot Phase-Out** — Retire the hardcoded `OpenerBot` FSM once HTN Phase 7 is live and can handle the intro sequence as first-class HTN goals (starter selection, Birch rescue, initial rival battle). Until then, OpenerBot remains active and unchanged.
+
+**4. Karpathy Evaluation Loops** — Per-step reward signal with configurable weights, logged to JSONL for offline regression analysis. Primary applications: evaluate `SUPPLEMENTAL_CHUNKS` quality (chunk recall rate vs. goal quality), detect HTN regressions across runs, and measure VLM API cost per milestone. See `agent/brain/README.md` for the original telemetry design.
+
+**5. VLM NPC Bounding-Box Fallback** — Tier 3 NPC targeting for script-spawned NPCs absent from `gObjectEvents` (e.g., Norman during the Wally event). VLM receives the overhead map frame and returns pixel coordinates.
+
+**6. RL Combat Integration** — Observation alignment, live-agent RAM data bridging, and transition of the default combat backend from the Heuristic Agent to the trained PPO model. Requires an automated data-collection pipeline from manual play sessions. See [agent/combat/RL_BATTLE_BOT_PLAN.md](agent/combat/RL_BATTLE_BOT_PLAN.md).
+
+**7. Semantic Task Queue API** — Allow stream viewers (or external systems) to inject natural language goals (e.g., *"Catch a Pikachu"*) directly into the HTN goal stack via a FastAPI endpoint.
 
 ## Documentation
 
