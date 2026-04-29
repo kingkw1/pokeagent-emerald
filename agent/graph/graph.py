@@ -12,11 +12,11 @@ from langgraph.graph import END, StateGraph
 from agent.graph.router import routing_condition
 from agent.graph.state import AgentState
 from agent.graph.nodes.nav_bot import nav_bot_node
-from agent.graph.nodes.battle_bot import battle_bot_node
+from agent.graph.nodes.battle_bot import make_battle_bot_node
 from agent.graph.nodes.coms_bot import make_coms_bot_node
 from agent.graph.nodes.verification import make_verification_node
 from agent.graph.nodes.map_stitcher_relay import make_map_stitcher_relay_node
-from agent.graph.nodes.handoff_detector import handoff_detector_node
+from agent.graph.nodes.handoff_detector import make_handoff_detector_node
 from agent.graph.nodes.executive_supervisor import make_executive_supervisor_node
 
 
@@ -40,11 +40,11 @@ def build_graph(obj_manager, vlm, episodic_memory=None, walkthrough_db=None) -> 
     # ---- Nodes ----
     builder.add_node("dispatch", lambda s: s)
     builder.add_node("nav_bot", nav_bot_node)
-    builder.add_node("battle_bot", battle_bot_node)
+    builder.add_node("battle_bot", make_battle_bot_node(episodic_memory=episodic_memory))
     builder.add_node("coms_bot", make_coms_bot_node(vlm, episodic_memory))
     builder.add_node("verification", make_verification_node(obj_manager))
     builder.add_node("map_stitcher_relay", make_map_stitcher_relay_node(vlm))
-    builder.add_node("handoff_detector", handoff_detector_node)
+    builder.add_node("handoff_detector", make_handoff_detector_node(episodic_memory=episodic_memory))
     builder.add_node(
         "executive_supervisor",
         make_executive_supervisor_node(vlm, episodic_memory, walkthrough_db=walkthrough_db),

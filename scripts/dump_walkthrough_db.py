@@ -57,13 +57,15 @@ def print_stats(entries: list[dict]) -> None:
 
     parts = Counter(e["metadata"].get("part") for e in entries)
     supplemental = sum(1 for e in entries if e["metadata"].get("supplemental"))
+    topology = sum(1 for e in entries if e["metadata"].get("is_topology"))
     has_battle = sum(1 for e in entries if e["metadata"].get("has_battle"))
 
     print(f"Total chunks : {len(entries)}")
     print(f"Supplemental : {supplemental}")
+    print(f"Topology     : {topology}")
     print(f"Has battle   : {has_battle}")
     print(f"\nChunks per walkthrough part:")
-    for part, count in sorted(parts.items()):
+    for part, count in sorted(parts.items(), key=lambda x: (x[0] is None, x[0])):
         label = f"Part {part}" if part is not None else "None"
         print(f"  {label:8s}: {count}")
 

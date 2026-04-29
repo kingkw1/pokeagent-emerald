@@ -14,7 +14,7 @@ Routing contract:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent.battle_bot import get_battle_bot
 from agent.graph.state import AgentState
@@ -38,31 +38,84 @@ _DECISION_TO_BUTTONS: Dict[str, List[str]] = {
 }
 
 
-def battle_bot_node(state: AgentState) -> AgentState:
-    """Delegate battle decisions to BattleBot and convert to button presses.
+def _format_party_hp(state_data: dict) -> str:
+    """Return a compact party HP string like 'Treecko 45/50, Wingull 0/32'."""
+    party = (state_data.get("player") or {}).get("party") or state_data.get("party") or []
+    if not party:
+        return "(no party data)"
+    parts = []
+    for mon in party:
+        name = mon.get("species_name") or mon.get("name") or mon.get("species", "?")
+        hp = mon.get("current_hp", mon.get("hp", "?"))
+        max_hp = mon.get("max_hp", "?")
+        parts.append(f"{name} {hp}/{max_hp}")
+    return ", ".join(parts)
+
+
+def make_battle_bot_node(
+    episodic_memory=None,
+) -> Callable[[AgentState], AgentState]:
+    """Return a ``battle_bot_node`` function wired to the given dependencies.
 
     Args:
-        state: Current AgentState, must have ``state_data`` with active battle.
-
-    Returns:
-        Updated AgentState with ``last_action = "BATTLE"`` and
-        ``last_buttons`` populated.
+        episodic_memory: Optional ``EpisodicMemory`` instance.  When provided,
+                         battle start and outcome events are logged to ChromaDB
+                         so the HTN Supervisor can use them as completion evidence.
     """
-    bot = get_battle_bot()
-    state_data: Dict[str, Any] = dict(state.get("state_data") or {})
+    _prev_in_battle: list[bool] = [False]  # mutable cell avoids nonlocal on Python 3.10
 
-    # Inject latest visual observation so BattleBot can access VLM-extracted
-    # fields (mirrors the injection in agent/action.py lines 113–116).
-    perception: Dict[str, Any] = state.get("perception") or {}
-    latest_obs = perception.get("latest_observation") or perception
-    if latest_obs:
-        state_data["latest_observation"] = latest_obs
+    def battle_bot_node(state: AgentState) -> AgentState:
+        bot = get_battle_bot()
+        state_data: Dict[str, Any] = dict(state.get("state_data") or {})
 
-    decision: Optional[str] = bot.get_action(state_data)
-    logger.debug("[BATTLEBOT] step=%s  decision=%s", state.get("step_count"), decision)
+        # Inject latest visual observation so BattleBot can access VLM-extracted
+        # fields (mirrors the injection in agent/action.py lines 113–116).
+        perception: Dict[str, Any] = state.get("perception") or {}
+        latest_obs = perception.get("latest_observation") or perception
+        if latest_obs:
+            state_data["latest_observation"] = latest_obs
 
-    buttons: List[str] = (
-        _DECISION_TO_BUTTONS.get(decision, ["A"]) if decision else ["A"]
-    )
+        game: dict = state_data.get("game") or {}
+        in_battle: bool = bool(game.get("in_battle", False))
+        location: str = (state_data.get("player") or {}).get("location", "UNKNOWN")
 
-    return {**state, "last_action": "BATTLE", "last_buttons": buttons}
+        # ── Phase 5.3: Battle transition logging ────────────────────────
+        if not _prev_in_battle[0] and in_battle:
+            logger.debug("[BATTLEBOT] Battle started at %s", location)
+            if episodic_memory:
+                try:
+                    episodic_memory.log_event(
+                        f"Battle started at {location}.",
+                        metadata={
+                            "type": "battle_start",
+                            "location": location,
+                            "map_id": game.get("map_id", 0),
+                        },
+                        state_data=state_data,
+                    )
+                except Exception as exc:
+                    logger.warning("[BATTLEBOT] Failed to log battle_start: %s", exc)
+
+        # NOTE: battle_outcome logging lives in handoff_detector.make_handoff_detector_node.
+        # This node is only dispatched when in_battle=True, so the True→False transition
+        # is never visible here — by then the router has already sent the step to nav_bot.
+
+        _prev_in_battle[0] = in_battle
+        # ────────────────────────────────────────────────────────────────
+
+        decision: Optional[str] = bot.get_action(state_data)
+        logger.debug("[BATTLEBOT] step=%s  decision=%s", state.get("step_count"), decision)
+
+        buttons: List[str] = (
+            _DECISION_TO_BUTTONS.get(decision, ["A"]) if decision else ["A"]
+        )
+
+        return {**state, "last_action": "BATTLE", "last_buttons": buttons}
+
+    return battle_bot_node
+
+
+# Default instance with no episodic memory — used by legacy tests and any
+# callers that import battle_bot_node directly.  Production code should use
+# make_battle_bot_node(episodic_memory=...) via build_graph() instead.
+battle_bot_node = make_battle_bot_node(episodic_memory=None)

@@ -1615,11 +1615,27 @@ python scripts/dump_walkthrough_db.py --stats
   - `[SUPERVISOR] dialogue_ctx:` still shows only dialogue records, not the battle entry
 
 *Pass criteria:*
-- [ ] `game_history` has ≥ 1 `dialogue_transcript` entry with `timestamp > boot_timestamp` after a coms_bot step
-- [ ] `game_history` has ≥ 1 `battle_outcome` entry with `timestamp > boot_timestamp` after a battle ends (if applicable)
-- [ ] `dialogue_ctx` section in Supervisor prompt contains speaker names, NOT "Battle ended" text
-- [ ] `battle_ctx` section in Supervisor prompt contains "Battle ended", NOT dialogue text
+- [x] `game_history` has ≥ 1 `dialogue_transcript` entry with `timestamp > boot_timestamp` after a coms_bot step
+      *(confirmed: 18 dialogue_transcript records present; today's run logged YOUNGSTER CALVIN
+      pre-battle dialogue at ts=1777408xxx — visible in game_history DB inspection and
+      returned by `_query_dialogue_context` at step 1 of run_20260428_162536.log)*
+- [x] `game_history` has ≥ 1 `battle_outcome` entry with `timestamp > boot_timestamp` after a battle ends
+      *(confirmed: run_20260428_195845.log — `TREECKO 21/23` party HP logged correctly;
+      `battle_outcome` written to DB after `battle_bot → nav_bot` handoff via
+      `make_handoff_detector_node` factory. Two earlier stale records from debugging runs
+      show "(no party data)" / "? 15/23" — both fixed by run_20260428_195845.log.)*
+- [x] `dialogue_ctx` section in Supervisor prompt contains speaker names, NOT "Battle ended" text
+      *(confirmed: run_20260428_162536.log step 1 — `[SUPERVISOR] dialogue_ctx: NPC: See?
+      This is PETALBURG CITY's GYM. / NPC: Hello, and welcome to the POKéMON C`)*
+- [x] `battle_ctx` section in Supervisor prompt shows `(none)` before any battle ends
+      (no cross-contamination confirmed: `[SUPERVISOR] battle_ctx: (none)` at step 1)
+      *(positive case confirmed: run_20260428_194419.log step 14 —
+      `[SUPERVISOR] battle_ctx: Battle ended at ROUTE 102. Party HP: TREECKO 21/23`
+      appeared immediately after `battle_bot → nav_bot` handoff)*
 - [ ] Stale pre-boot records in both types are excluded (check `timestamp` against `boot_timestamp`)
+      *(deferred to Phase 6 — `_boot_timestamp` is 0.0 so all records pass through; stale
+      pre-run dialogue IS appearing in `dialogue_ctx` — this is the exact contamination
+      Phase 6 fixes by recording a real boot timestamp at `Agent.__init__()` time)*
 
 *Fail indicators:*
 - No `dialogue_transcript` entries: `episodic_memory` not passed to `make_coms_bot_node` — check `build_graph()` call
@@ -1628,11 +1644,12 @@ python scripts/dump_walkthrough_db.py --stats
 - `battle_ctx` contains NPC dialogue: `_query_battle_outcomes` is missing the `type=$eq:battle_outcome` filter
 - Both contexts always `(none)`: `_boot_timestamp` is 0.0 or not set — check `Agent.__init__()` sets it at runtime
 
-*Status:* 🔲 NOT YET RUN
-
----
-
-### Phase 5.5 — LOCATION_GRAPH Topology Chunks (Option A)
+*Status:* ✅ PASSED (criteria 1–4) — run_20260428_195845.log. 31/31 automated tests green.
+      Criterion 5 (stale record filtering) explicitly deferred to Phase 6 (`_boot_timestamp`).
+      Root causes fixed along the way: (a) `battle_outcome` was in a dead code path in
+      `battle_bot_node` — moved to `make_handoff_detector_node` factory; (b) party lookup
+      used wrong nesting (`state_data["party"]` vs `state_data["player"]["party"]`);
+      (c) party name used wrong key (`"name"` / `"species"` vs `"species_name"`).
 
 **Purpose:** Auto-generate RAG chunks from the 21-node `LOCATION_GRAPH` so the
 Supervisor can query precise portal coordinates, entry/exit tiles, and
@@ -1707,16 +1724,18 @@ db.add_chunks([c["text"] for c in topology_chunks],
 ```
 
 **Pass criteria:**
-- [ ] `python scripts/dump_walkthrough_db.py --stats` shows 21 topology chunks
+- [x] `python scripts/dump_walkthrough_db.py --stats` shows 21 topology chunks
       (one per `LOCATION_GRAPH` key) in addition to the 136 Bulbapedia chunks
-- [ ] `python scripts/dump_walkthrough_db.py --query "Route 102 portal Petalburg"` returns
+- [x] `python scripts/dump_walkthrough_db.py --query "Route 102 portal Petalburg"` returns
       a topology chunk with correct `entry_coords` and `exit_coords`
 - [ ] A re-run of the Phase 4 manual test (`run_20260427_190954.log` baseline)
       shows the Supervisor bootstrap using topology context (topology chunk in
       `[SUPERVISOR] strategy_ctx:` log line)
-- [ ] Phase 0–4 automated tests still green (200/200) after DB rebuild
+- [x] Phase 0–4 automated tests still green (200/200) after DB rebuild
 
-*Status:* 🔲 NOT YET RUN
+*Status:* ✅ PASSED (criteria 1, 2, 4) — DB rebuilt to 157 chunks (136 Bulbapedia +
+      21 topology + 5 supplemental). Topology query verified. Criterion 3 (live
+      strategy_ctx log line) deferred — not yet confirmed in a run log.
 
 ---
 

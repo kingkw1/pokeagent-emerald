@@ -168,3 +168,60 @@ def handoff_detector_node(state: AgentState) -> AgentState:
         "last_node_fired":   current_node_name,
         "supervisor_pending": is_significant,
     }
+
+
+# ---------------------------------------------------------------------------
+# Factory (Phase 5.3 — battle outcome logging)
+# ---------------------------------------------------------------------------
+
+def make_handoff_detector_node(episodic_memory=None):
+    """Return a ``handoff_detector_node`` optionally wired to episodic memory.
+
+    When ``episodic_memory`` is provided, the returned node logs a
+    ``battle_outcome`` event to ChromaDB whenever it detects a
+    ``battle_bot → <other>`` transition.  This is the correct place for that
+    log because ``battle_bot_node`` is only dispatched while ``in_battle=True``
+    — by the time ``in_battle`` flips to ``False`` the router has already sent
+    the step to ``nav_bot``, so the ``True → False`` branch in ``battle_bot_node``
+    can never fire.
+
+    Args:
+        episodic_memory: Optional ``EpisodicMemory`` instance.
+
+    Returns:
+        A node function compatible with LangGraph's ``add_node``.
+    """
+    if episodic_memory is None:
+        return handoff_detector_node  # no overhead for the common/test case
+
+    from agent.graph.nodes.battle_bot import _format_party_hp
+
+    def _node_with_memory(state: AgentState) -> AgentState:
+        # Detect battle→non-battle before delegating so we use the unmodified state.
+        current_action: str = state.get("last_action", "") or ""
+        previous_node:  str = state.get("last_node_fired", "") or ""
+        current_node_name  = _ACTION_TO_NODE.get(current_action, current_action)
+        previous_node_name = _ACTION_TO_NODE.get(previous_node, previous_node)
+
+        if previous_node_name == "battle_bot" and current_node_name != "battle_bot":
+            state_data = state.get("state_data") or {}
+            game       = state_data.get("game") or {}
+            location   = (state_data.get("player") or {}).get("location", "UNKNOWN")
+            party_hp   = _format_party_hp(state_data)
+            try:
+                episodic_memory.log_event(
+                    f"Battle ended at {location}. Party HP: {party_hp}",
+                    metadata={
+                        "type":     "battle_outcome",
+                        "location": location,
+                        "map_id":   game.get("map_id", 0),
+                        "party_hp": party_hp,
+                    },
+                )
+                logger.debug("[HANDOFF] Logged battle_outcome at %s  party=%s", location, party_hp)
+            except Exception as exc:
+                logger.warning("[HANDOFF] Failed to log battle_outcome: %s", exc)
+
+        return handoff_detector_node(state)
+
+    return _node_with_memory

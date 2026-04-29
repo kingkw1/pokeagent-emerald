@@ -54,6 +54,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.brain.walkthrough_db import WalkthroughDB, chunk_wikitext, SUPPLEMENTAL_CHUNKS
+from agent.location_graph import LOCATION_GRAPH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -208,6 +209,52 @@ After defeating Roxanne, you'll receive the Stone Badge and TM39 (Rock Tomb). Ex
 }
 
 
+def generate_location_graph_chunks() -> List[dict]:
+    """Convert LOCATION_GRAPH portal data into RAG-ready text chunks.
+
+    One chunk per location.  Format::
+
+        <display_name> (<key>): <description>
+        Portals:
+          <direction> → <neighbor_key>  (entry=<coords>, exit=<coords>, type=<type>)
+          ...
+
+    These topology chunks give the HTN Supervisor precise navigation data
+    (entry/exit tiles, connectivity) from structured game-world knowledge,
+    replacing the 5 hand-written SUPPLEMENTAL_CHUNKS.
+    """
+    chunks: List[dict] = []
+    for key, node in LOCATION_GRAPH.items():
+        lines = [
+            f"{node['display_name']} ({key}): {node.get('description', '')}",
+        ]
+        portals = node.get("portals") or {}
+        if portals:
+            lines.append("Portals:")
+            for neighbor_key, portal in portals.items():
+                req = portal.get("requirements")
+                req_str = f"  [requires: {req}]" if req else ""
+                lines.append(
+                    f"  {portal.get('direction', '?')} → {neighbor_key}"
+                    f"  (entry={portal.get('entry_coords')}, "
+                    f"exit={portal.get('exit_coords')}, "
+                    f"type={portal.get('type', '?')}){req_str}"
+                )
+        chunks.append({
+            "text": "\n".join(lines),
+            "metadata": {
+                "location_key": key,
+                "display_name": node["display_name"],
+                "map_id": node.get("map_id"),
+                "source": "LOCATION_GRAPH",
+                "supplemental": True,
+                "is_topology": True,
+                "has_battle": False,
+            },
+        })
+    return chunks
+
+
 def get_walkthrough_text(part: int, offline: bool = False) -> Optional[str]:
     """Fetch walkthrough text online, falling back to offline if available."""
     if offline:
@@ -285,6 +332,15 @@ def build_database(
         added = db.add_chunks(SUPPLEMENTAL_CHUNKS)
         total_chunks += added
         logger.info(f"Supplemental chunks: {added} embedded.")
+
+        # Phase 5.5 — LOCATION_GRAPH topology chunks.
+        # These provide precise portal coordinates and connectivity for the 21
+        # nodes covering Littleroot Town → Rustboro Gym.  Once validated they
+        # supersede all SUPPLEMENTAL_CHUNKS above (comment out that block then).
+        topology = generate_location_graph_chunks()
+        added = db.add_chunks(topology)
+        total_chunks += added
+        logger.info(f"LOCATION_GRAPH topology chunks: {added} embedded ({len(topology)} nodes).")
 
     action = "previewed" if dry_run else "embedded"
     logger.info(

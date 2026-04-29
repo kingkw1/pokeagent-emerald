@@ -364,7 +364,7 @@ The `LOCATION_GRAPH` currently covers 21 locations (Littleroot → Rustboro). Au
 
 **3. OpenerBot Phase-Out** — Retire the hardcoded `OpenerBot` FSM once HTN Phase 7 is live and can handle the intro sequence as first-class HTN goals (starter selection, Birch rescue, initial rival battle). Until then, OpenerBot remains active and unchanged.
 
-**4. Karpathy Evaluation Loops** — Per-step reward signal with configurable weights, logged to JSONL for offline regression analysis. Primary applications: evaluate `SUPPLEMENTAL_CHUNKS` quality (chunk recall rate vs. goal quality), detect HTN regressions across runs, and measure VLM API cost per milestone. See `agent/brain/README.md` for the original telemetry design.
+**4. Karpathy Evaluation Loops** — Per-step reward signal with configurable weights, logged to JSONL for offline regression analysis. Primary applications: evaluate `SUPPLEMENTAL_CHUNKS` quality (chunk recall rate vs. goal quality), detect HTN regressions across runs, and measure VLM API cost per milestone. See `agent/brain/README.md` for the original telemetry design. We
 
 **5. VLM NPC Bounding-Box Fallback** — Tier 3 NPC targeting for script-spawned NPCs absent from `gObjectEvents` (e.g., Norman during the Wally event). VLM receives the overhead map frame and returns pixel coordinates.
 

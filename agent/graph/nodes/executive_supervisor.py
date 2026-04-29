@@ -252,8 +252,13 @@ def make_executive_supervisor_node(
         # 2. Gather context for the LLM.
         # ----------------------------------------------------------------
         current_goal: Optional[GoalNode] = stack_peek(stack)
-        dialogue_ctx: str = _query_dialogue_context(episodic_memory, current_goal)
-        battle_ctx: str = _query_battle_outcomes(episodic_memory, current_goal)
+        boot_time: float = state.get("_boot_timestamp", 0.0)
+        dialogue_ctx: str = _query_dialogue_context(episodic_memory, current_goal, boot_time)
+        battle_ctx: str = _query_battle_outcomes(episodic_memory, boot_time)
+        logger.debug("[SUPERVISOR] dialogue_ctx: %s", (dialogue_ctx[:100] + "...") if len(dialogue_ctx) > 100 else dialogue_ctx or "(none)")
+        logger.debug("[SUPERVISOR] battle_ctx: %s", (battle_ctx[:100] + "...") if len(battle_ctx) > 100 else battle_ctx or "(none)")
+        print(f"[SUPERVISOR] dialogue_ctx: {dialogue_ctx[:80] if dialogue_ctx else '(none)'}")
+        print(f"[SUPERVISOR] battle_ctx: {battle_ctx[:80] if battle_ctx else '(none)'}")
         game_summary: dict = _build_game_summary(state_data, state)
         stack_repr: str = stack_summary(stack)
 
@@ -672,45 +677,78 @@ def _get_current_location(state_data: dict) -> str:
 def _query_dialogue_context(
     episodic_memory,
     current_goal: Optional[GoalNode],
+    boot_time: float = 0.0,
+    n: int = 5,
 ) -> str:
-    """Retrieve recent dialogue transcript entries from episodic memory.
+    """Return post-boot dialogue_transcript records relevant to the current goal.
 
-    Targets records tagged with dialogue/NPC events so the Supervisor can
-    verify completion conditions like "Norman explained the gym challenge".
-    Returns a safe placeholder string on any failure.
+    Filters ChromaDB by ``type == dialogue_transcript`` and
+    ``timestamp >= boot_time`` so pre-run records never appear in the
+    Supervisor's context.  Returns ``""`` (empty string) when nothing is
+    found — callers render this as ``"(none)"`` in the prompt template.
     """
-    if episodic_memory is None:
-        return "(No episodic memory available.)"
-    if current_goal is None:
-        return "(No current goal.)"
+    if episodic_memory is None or current_goal is None:
+        return ""
     try:
-        query = f"dialogue NPC conversation {current_goal.description}".strip()
-        return episodic_memory.retrieve_relevant(query, n_results=3, max_distance=1.2)
+        collection = episodic_memory.collection
+        count = collection.count()
+        if count == 0:
+            return ""
+        query = (
+            f"NPC dialogue relevant to: '{current_goal.description}'. "
+            f"Looking for keywords in: {current_goal.completion_condition}"
+        )
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(n, count),
+            where={
+                "$and": [
+                    {"type": {"$eq": "dialogue_transcript"}},
+                    {"timestamp": {"$gte": boot_time}},
+                ]
+            },
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        return "\n".join(docs) if docs else ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SUPERVISOR] Dialogue context query failed: %s", exc)
-        return "(Dialogue context query failed.)"
+        return ""
 
 
 def _query_battle_outcomes(
     episodic_memory,
-    current_goal: Optional[GoalNode],
+    boot_time: float = 0.0,
+    n: int = 3,
 ) -> str:
-    """Retrieve recent battle outcome records from episodic memory.
+    """Return post-boot battle_outcome records from episodic memory.
 
-    Targets records tagged with battle results so the Supervisor can verify
-    completion conditions like "defeated Roxanne's gym trainers".
-    Returns a safe placeholder string on any failure.
+    Filters ChromaDB by ``type == battle_outcome`` and
+    ``timestamp >= boot_time``.  Returns ``""`` when nothing is found.
     """
     if episodic_memory is None:
-        return "(No episodic memory available.)"
-    if current_goal is None:
-        return "(No current goal.)"
+        return ""
     try:
-        query = f"battle outcome victory defeat {current_goal.description}".strip()
-        return episodic_memory.retrieve_relevant(query, n_results=3, max_distance=1.2)
+        collection = episodic_memory.collection
+        count = collection.count()
+        if count == 0:
+            return ""
+        results = collection.query(
+            query_texts=["recent battle outcome party HP won lost"],
+            n_results=min(n, count),
+            where={
+                "$and": [
+                    {"type": {"$eq": "battle_outcome"}},
+                    {"timestamp": {"$gte": boot_time}},
+                ]
+            },
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        return "\n".join(docs) if docs else ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SUPERVISOR] Battle outcomes query failed: %s", exc)
-        return "(Battle outcomes query failed.)"
+        return ""
 
 
 def _build_game_summary(state_data: dict, state: dict) -> dict:
