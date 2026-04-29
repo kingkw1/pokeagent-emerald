@@ -219,6 +219,8 @@ def make_executive_supervisor_node(
         stack_raw = state.get("goal_stack", [])
         stack: list[GoalNode] = [GoalNode.from_dict(g) for g in stack_raw]
         state_data: dict = state.get("state_data") or {}
+        boot_time: float = state.get("_boot_timestamp", 0.0)
+        print(f"[SUPERVISOR] boot_timestamp={boot_time:.3f}")
 
         # ----------------------------------------------------------------
         # 1. Bootstrap: if the stack is empty, try to populate it.
@@ -252,11 +254,11 @@ def make_executive_supervisor_node(
         # 2. Gather context for the LLM.
         # ----------------------------------------------------------------
         current_goal: Optional[GoalNode] = stack_peek(stack)
-        boot_time: float = state.get("_boot_timestamp", 0.0)
         dialogue_ctx: str = _query_dialogue_context(episodic_memory, current_goal, boot_time)
         battle_ctx: str = _query_battle_outcomes(episodic_memory, boot_time)
         logger.debug("[SUPERVISOR] dialogue_ctx: %s", (dialogue_ctx[:100] + "...") if len(dialogue_ctx) > 100 else dialogue_ctx or "(none)")
         logger.debug("[SUPERVISOR] battle_ctx: %s", (battle_ctx[:100] + "...") if len(battle_ctx) > 100 else battle_ctx or "(none)")
+        print(f"[SUPERVISOR] boot_timestamp={boot_time:.3f}")
         print(f"[SUPERVISOR] dialogue_ctx: {dialogue_ctx[:80] if dialogue_ctx else '(none)'}")
         print(f"[SUPERVISOR] battle_ctx: {battle_ctx[:80] if battle_ctx else '(none)'}")
         game_summary: dict = _build_game_summary(state_data, state)

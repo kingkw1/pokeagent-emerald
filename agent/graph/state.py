@@ -270,3 +270,9 @@ class AgentState(TypedDict, total=False):
     """The Supervisor's free-text chain-of-thought from the most recent LLM
     call, truncated to ~500 chars.  Written to llm_logs/ for offline
     analysis."""
+
+    _boot_timestamp: float
+    """Unix timestamp recorded once at agent startup (Agent.__init__).
+    Passed unchanged into every graph invocation so all episodic ChromaDB
+    queries can filter ``timestamp >= _boot_timestamp``, excluding records
+    written during previous runs."""

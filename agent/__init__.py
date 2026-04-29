@@ -37,6 +37,7 @@ This file contains several TEMPORARY FIXES to resolve critical freezing bugs:
 """
 
 import logging
+import time
 from utils.vlm import VLM
 from .action import action_step
 from .memory import memory_step
@@ -162,6 +163,7 @@ class Agent:
             self._htn_supervisor_pending: bool = False
             self._htn_supervisor_last_operation: str | None = None
             self._htn_supervisor_last_reasoning: str | None = None
+            self._boot_timestamp: float = time.time()
             print("   🕸️  LangGraph dispatch graph: READY")
     
     def step(self, game_state):
@@ -596,6 +598,7 @@ class Agent:
                     supervisor_pending=self._htn_supervisor_pending,
                     supervisor_last_operation=self._htn_supervisor_last_operation,
                     supervisor_last_reasoning=self._htn_supervisor_last_reasoning,
+                    _boot_timestamp=self._boot_timestamp,
                 )
 
                 result = self._graph.invoke(agent_state)

@@ -186,7 +186,7 @@ and is useful for offline analysis.
 ```bash
 for i in 1 2 3; do
   python run.py --load-state Emerald-GBAdvance/route102_hackathon.state \
-    --agent-auto --max-steps 300
+    --agent-auto 
 done
 ```
 
