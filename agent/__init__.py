@@ -504,8 +504,9 @@ class Agent:
                 
                 # CRITICAL FIX: Ensure memory is always a string, never a list
                 if not isinstance(current_memory, str):
+                    original_type = type(current_memory)
                     current_memory = str(current_memory) if current_memory else ''
-                    logger.warning(f"[MEMORY] Fixed non-string memory type: {type(current_memory)}")
+                    logger.warning(f"[MEMORY] Fixed non-string memory type: {original_type}")
                 
                 new_memory_entry = f"\n--- Step {state_data.get('step_number', 0)} ---\nPerception: {perception_output.get('description', str(perception_output))}\nPlanning: {planning_output}\n"
                 

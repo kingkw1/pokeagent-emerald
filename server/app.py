@@ -969,7 +969,9 @@ async def get_comprehensive_state():
                 logger.error(f"Failed to generate visual_map: {e}")
         
         # Add stitched map info for the client/frontend
-        if map_stitcher:
+        # Skip during battles — A* grid data is irrelevant inside battle UI
+        _current_game_state = state.get("game", {}).get("game_state", "")
+        if map_stitcher and _current_game_state != "battle":
             # Get the location grid and connections
             if current_location and current_location != "Unknown":
                 # Indoor grid fix: resolve map_id FIRST so we use the canonical
@@ -982,7 +984,11 @@ async def get_comprehensive_state():
                 _grid_area = map_stitcher.map_areas.get(_map_id)
                 grid_location_name = _grid_area.location_name if _grid_area else current_location
                 if grid_location_name != current_location:
-                    print(f"🗺️ [SERVER A*] Indoor grid fix: using '{grid_location_name}' instead of '{current_location}'")
+                    # Only print when the resolved name changes (debounce per-transition)
+                    _prev = getattr(get_comprehensive_state, '_indoor_grid_last_reported', None)
+                    if grid_location_name != _prev:
+                        print(f"🗺️ [SERVER A*] Indoor grid fix: using '{grid_location_name}' instead of '{current_location}'")
+                        get_comprehensive_state._indoor_grid_last_reported = grid_location_name
 
                 location_grid = map_stitcher.get_location_grid(grid_location_name, simplified=True)
                 connections = []

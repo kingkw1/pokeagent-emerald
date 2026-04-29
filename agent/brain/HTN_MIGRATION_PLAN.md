@@ -2245,3 +2245,98 @@ asynchronously by the emulator).
 > Use ROM flags → verification node → indices 0–26, non-dialogue milestones  
 > Use milestones JSON → bootstrap anchor only  
 > Use ChromaDB → Supervisor POP decisions, all stages, all content
+
+---
+
+## Known Bug Backlog
+
+Issues observed during Phase 5 manual testing (`route102_hackathon` run). Not
+blocking HTN work. Address before or during Phase 7.
+
+---
+
+### BUG-1: Battle bot stuck in `UNKNOWN` menu state for ~10 steps
+
+**Severity:** Medium — functional but slow; wastes ~7 extra LLM calls per battle  
+**File(s):** `agent/combat/` (battle menu state detection), `agent/battle_bot.py`
+
+**Symptom:**  
+During a trainer battle, the battle bot outputs `[MENU STATE] UNKNOWN: no
+dialogue text, title='EMPTY'` for approximately 10 consecutive steps before
+eventually selecting a move via the grass-type heuristic fallback (`ABSORB →
+POOCHYENA`). A battle that should resolve in ~3 steps takes ~13.
+
+**How to reproduce:**  
+```
+python run.py --load-state Emerald-GBAdvance/route102_hackathon.state --agent-auto
+```
+Trigger the trainer battle on Route 102. Watch for repeated `MENU STATE UNKNOWN`
+log lines between the "BATTLE START" event and the first successful move selection.
+
+**Expected behaviour:**  
+The VLM should recognise the GBA battle action-select screen on the first or
+second step and return `MENU STATE: ACTION_SELECT` (or equivalent), allowing
+the bot to pick `FIGHT` immediately.
+
+**Root cause hypothesis:**  
+The VLM prompt / screenshot framing does not reliably parse the battle UI
+directly after a dialogue transition (e.g. "A wild POOCHYENA appeared!"). The
+fallback heuristic activates only after `N` failed UNKNOWN cycles. Possibly the
+screenshot captured during the transition frame still shows dialogue overlay.
+
+---
+
+### BUG-2: Species fuzzy matcher fed non-Pokémon strings
+
+**Severity:** Low — noisy logs only, no functional impact  
+**File(s):** wherever species name normalisation is called (search for `SPECIES FIX`)
+
+**Symptom:**  
+Log lines such as:
+```
+⚠️ [SPECIES FIX] No fuzzy match for 'PLAYER CHARACTER'
+⚠️ [SPECIES FIX] No fuzzy match for 'BOY TRAINER'
+```
+These appear when entity detection on the overworld or battle screen picks up
+trainer-class strings (sprite labels, NPC role names) and passes them through
+the Pokémon species fuzzy matcher.
+
+**How to reproduce:**  
+Any run that walks through Route 102 and encounters a trainer will produce these
+warnings. They appear in `run_logs/` immediately around the battle encounter.
+
+**Expected behaviour:**  
+The species matcher should only be called with strings that are plausible Pokémon
+species names. Trainer-class names (`PLAYER CHARACTER`, `BOY TRAINER`, etc.)
+should be filtered out before reaching the fuzzy match call — or the matcher
+should silently return `None` for obvious non-species strings rather than
+emitting a warning.
+
+---
+
+### BUG-3: Stale `battle_ctx` records surface in ChromaDB queries (Phase 6)
+
+**Severity:** Medium — correct record is present but old `(no party data)` records pollute context  
+**File(s):** `agent/graph/nodes/battle_bot.py` (`_boot_timestamp`), `agent/memory.py`  
+**Tracking:** Already scoped as Phase 6 work
+
+**Symptom:**  
+After a battle, `battle_ctx` shown in supervisor context contains multiple old
+records like `Battle ended at ROUTE 102. Party HP: (no party data)` alongside
+the correct new record. The stale records are from prior debugging runs stored
+in the same ChromaDB `game_history` collection.
+
+**How to reproduce:**  
+1. Run the agent at least twice against `route102_hackathon.state`.  
+2. On the second run, observe the `battle_ctx:` block in the supervisor prompt —
+   it will include records from the first run alongside the current run's record.
+
+**Expected behaviour:**  
+ChromaDB queries for `battle_outcome` events should only return records written
+during the **current session** (i.e. after `_boot_timestamp`). Records from
+previous runs should be excluded by the `$and` timestamp filter.
+
+**Fix (deferred to Phase 6):**  
+Record a real Unix timestamp in `Agent.__init__()` and store it as
+`_boot_timestamp`. The `$and` where-filter in `_query_battle_outcomes` already
+has the correct structure — it just needs a non-zero value to activate.
