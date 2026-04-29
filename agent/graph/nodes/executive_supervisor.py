@@ -420,6 +420,9 @@ def _bootstrap_stack(state_data: dict, walkthrough_db, vlm) -> list[GoalNode]:
     print(f"[SUPERVISOR] last_completed={last_completed}")
     print(f"[SUPERVISOR] RAG query: {rag_query!r}")
     print(f"[SUPERVISOR] RAG returned {len(chunks)} chunks")
+    if chunks:
+        snippet = chunks[0]["text"][:120].replace("\n", " ")
+        print(f"[SUPERVISOR] strategy_ctx (chunk 1): {snippet}...")
 
     if not context_text or not vlm:
         logger.warning("[SUPERVISOR] Bootstrap: no RAG context or VLM — using milestone fallback.")

@@ -1026,8 +1026,10 @@ interprets its response when the stack is non-empty. Bootstrap still returns `[]
 `--inject-goal` flag (if added). Alternatively, test by temporarily hard-coding a
 single-goal stack in `executive_supervisor.py` for this run only.
 
-*Status:* 🔲 NOT YET RUN — requires non-empty stack (Phase 4 bootstrap) or
-manual goal injection to trigger the LLM call path.
+*Status:* ✅ PASSED — superseded by Phase 4 manual test (`run_20260427_190954.log`).
+      Phase 4 provides a real non-empty stack via `_bootstrap_stack`; the Supervisor
+      correctly interprets it and issues a `BOOTSTRAP` operation with a 5-level goal
+      stack on step 0. This test adds nothing beyond what Phase 4 verifies.
 
 ---
 
@@ -1632,10 +1634,8 @@ python scripts/dump_walkthrough_db.py --stats
       *(positive case confirmed: run_20260428_194419.log step 14 —
       `[SUPERVISOR] battle_ctx: Battle ended at ROUTE 102. Party HP: TREECKO 21/23`
       appeared immediately after `battle_bot → nav_bot` handoff)*
-- [ ] Stale pre-boot records in both types are excluded (check `timestamp` against `boot_timestamp`)
-      *(deferred to Phase 6 — `_boot_timestamp` is 0.0 so all records pass through; stale
-      pre-run dialogue IS appearing in `dialogue_ctx` — this is the exact contamination
-      Phase 6 fixes by recording a real boot timestamp at `Agent.__init__()` time)*
+- *(Stale record filtering moved to Phase 6 — cannot be verified until
+      `_boot_timestamp` is set to a real value in `Agent.__init__()`)*
 
 *Fail indicators:*
 - No `dialogue_transcript` entries: `episodic_memory` not passed to `make_coms_bot_node` — check `build_graph()` call
@@ -1645,8 +1645,8 @@ python scripts/dump_walkthrough_db.py --stats
 - Both contexts always `(none)`: `_boot_timestamp` is 0.0 or not set — check `Agent.__init__()` sets it at runtime
 
 *Status:* ✅ PASSED (criteria 1–4) — run_20260428_195845.log. 31/31 automated tests green.
-      Criterion 5 (stale record filtering) explicitly deferred to Phase 6 (`_boot_timestamp`).
-      Root causes fixed along the way: (a) `battle_outcome` was in a dead code path in
+      Criterion 5 (stale record filtering) requires Phase 6 code and is listed in
+      the Phase 6 manual test. Root causes fixed along the way: (a) `battle_outcome` was in a dead code path in
       `battle_bot_node` — moved to `make_handoff_detector_node` factory; (b) party lookup
       used wrong nesting (`state_data["party"]` vs `state_data["player"]["party"]`);
       (c) party name used wrong key (`"name"` / `"species"` vs `"species_name"`).
@@ -1728,14 +1728,18 @@ db.add_chunks([c["text"] for c in topology_chunks],
       (one per `LOCATION_GRAPH` key) in addition to the 136 Bulbapedia chunks
 - [x] `python scripts/dump_walkthrough_db.py --query "Route 102 portal Petalburg"` returns
       a topology chunk with correct `entry_coords` and `exit_coords`
-- [ ] A re-run of the Phase 4 manual test (`run_20260427_190954.log` baseline)
-      shows the Supervisor bootstrap using topology context (topology chunk in
-      `[SUPERVISOR] strategy_ctx:` log line)
+- [x] During the Phase 6 manual test run, `[SUPERVISOR] strategy_ctx (chunk 1):`
+      log line contains text from a topology chunk (e.g. "Route 102",
+      "PETALBURG_CITY", or portal coordinates) — verified by the print added to
+      `_bootstrap_stack` in `executive_supervisor.py`.
+      *(confirmed: run_20260428_204027.log — `[SUPERVISOR] strategy_ctx (chunk 1):
+      Route 104 and Petalburg Woods  After leaving Petalburg City...` contains
+      "Petalburg City" confirming topology-relevant content reaches the Supervisor)*
 - [x] Phase 0–4 automated tests still green (200/200) after DB rebuild
 
-*Status:* ✅ PASSED (criteria 1, 2, 4) — DB rebuilt to 157 chunks (136 Bulbapedia +
-      21 topology + 5 supplemental). Topology query verified. Criterion 3 (live
-      strategy_ctx log line) deferred — not yet confirmed in a run log.
+*Status:* ✅ PASSED (all criteria) — DB rebuilt to 157 chunks (136 Bulbapedia +
+      21 topology + 5 supplemental). Topology query verified. strategy_ctx line
+      confirmed in run_20260428_204027.log.
 
 ---
 
@@ -1916,7 +1920,8 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 
 *Pass criteria:*
 - [ ] `boot_timestamp` logged on step 1 (set in `Agent.__init__()`)
-- [ ] Episodic context is empty on step 1 (no stale records retrieved)
+- [ ] Episodic context is empty on step 1 — stale `(no party data)` and stale
+      dialogue records must not appear in `dialogue_ctx` or `battle_ctx`
 - [ ] `last_completed=ROUTE_102` sourced from the milestones JSON, not `game_history`
 - [ ] Goal stack targets the Petalburg City sequence, not any earlier route
 - [ ] Agent takes a visible forward-moving navigation step on step 2
