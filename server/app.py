@@ -989,6 +989,12 @@ async def get_comprehensive_state():
                     if grid_location_name != _prev:
                         print(f"🗺️ [SERVER A*] Indoor grid fix: using '{grid_location_name}' instead of '{current_location}'")
                         get_comprehensive_state._indoor_grid_last_reported = grid_location_name
+                elif _grid_area is None:
+                    # map_id not yet in map_areas — A* will fall back to exterior grid (bug path)
+                    _prev_miss = getattr(get_comprehensive_state, '_indoor_grid_miss_last', None)
+                    if _map_id != _prev_miss:
+                        print(f"🗺️ [SERVER A*] ⚠️ map_id={_map_id:04X} not in map_areas — grid falls back to '{current_location}'")
+                        get_comprehensive_state._indoor_grid_miss_last = _map_id
 
                 location_grid = map_stitcher.get_location_grid(grid_location_name, simplified=True)
                 connections = []
@@ -1007,7 +1013,46 @@ async def get_comprehensive_state():
                 if location_grid:
                     for (x, y), tile in location_grid.items():
                         grid_serializable[f"{x},{y}"] = tile
-                
+
+                # Inject building exit tiles as '?' so A* cannot route through them.
+                # GBA building exits are warp EVENTS (not metatile behaviors), so the
+                # stitcher stores the exit tile as '.' (normal floor).  A* must not treat
+                # that tile as a free intermediate step or it will immediately walk out.
+                #
+                # Strategy: track the map_id transition directly inside this function so
+                # there is zero dependency on map_stitcher.warp_connections timing.
+                # When the player moves from an outdoor map into an indoor map (map_id
+                # changes), we record the spawn position.  The exit tile is one step south
+                # (y+1) of that spawn position — all outdoor→indoor doors are entered by
+                # pressing UP, so the exit is directly behind the player.
+                _INDOOR_KEYWORDS = ('1F', '2F', 'B1F', 'GYM', 'CENTER', 'CAVE',
+                                    'TOWER', 'MUSEUM', 'MART', 'LAB', 'HOUSE')
+                _is_indoor = any(k in current_location.upper() for k in _INDOOR_KEYWORDS)
+
+                # Lazily initialise persistent tracking attributes on this function object
+                if not hasattr(get_comprehensive_state, '_last_map_id'):
+                    get_comprehensive_state._last_map_id = None
+                    get_comprehensive_state._building_entries = {}  # map_id -> (x, y)
+
+                # Detect a transition INTO a building and record the spawn position
+                _prev_map_id = get_comprehensive_state._last_map_id
+                if _is_indoor and _prev_map_id != _map_id and player_coords:
+                    get_comprehensive_state._building_entries[_map_id] = player_coords
+                    print(f"🏠 [SERVER A*] Building entry recorded: map_id={_map_id:04X} "
+                          f"spawn={player_coords}  loc='{current_location}'")
+                get_comprehensive_state._last_map_id = _map_id
+
+                # Apply injection: mark the tile one step south of the spawn point as '?'
+                if _is_indoor:
+                    _entry = get_comprehensive_state._building_entries.get(_map_id)
+                    if _entry:
+                        _ex, _ey = _entry[0], _entry[1] + 1
+                        _ekey = f"{_ex},{_ey}"
+                        if _ekey in grid_serializable and grid_serializable[_ekey] != '?':
+                            grid_serializable[_ekey] = '?'
+                            print(f"🗺️ [SERVER A*] Injected exit warp '?' at "
+                                  f"({_ex},{_ey}) for '{current_location}'")
+
                 # Get explored bounds and origin offset for coordinate conversion
                 # CRITICAL: Match by current map ID, not just location name!
                 # Multiple areas can have the same name - we need the CURRENT one

@@ -1248,9 +1248,11 @@ def _astar_pathfind_with_grid_data(
             # Walkable: path, grass, doors, stairs, AND CARDINAL LEDGES (with directional constraints)
             # Note: We include 'D' (doors) and 'S' (stairs) for pathfinding, but safety checks will filter dangerous ones
             # Ledges are conditionally walkable based on approach direction (checked in neighbor loop)
-            # '?' tiles = unexplored frontier tiles adjacent to walkable areas (added by map stitcher)
-            # They MUST be walkable for A* to path through unexplored regions
-            return tile in ['.', '_', '~', 'D', 'S', '?'] or tile in LEDGE_TILES
+            # '?' tiles = warp/portal tiles (building entrances, etc.).
+            # They must NOT be treated as intermediate walkable tiles — stepping on one triggers a map
+            # transition.  A* can still TARGET a '?' tile as an explicit goal via the is_goal_tile
+            # bypass below, so navigating TO building entrances still works.
+            return tile in ['.', '_', '~', 'D', 'S'] or tile in LEDGE_TILES
         
         # Helper function to get movement cost for a tile
         # This allows us to prefer paths that avoid tall grass (wild encounters)
@@ -1706,6 +1708,13 @@ def pathfind_to_goal(state_data: Dict[str, Any], goal_x: int, goal_y: int,
                     x, y = map(int, key.split(','))
                     location_grid[(x, y)] = value
 
+                # Diagnostic: show which area/grid A* is actually using
+                _area_name = current_area.get('name', '?')
+                _area_id = current_area.get('id', '?')
+                print(f"🗺️ [A* GRID] area='{_area_name}' id={_area_id}  {len(location_grid)} tiles  "
+                      f"X:{bounds['min_x']}-{bounds['max_x']} Y:{bounds['min_y']}-{bounds['max_y']}  "
+                      f"gba_location={location}")
+
                 # Calculate goal direction
                 dx = goal_x - current_x
                 dy = goal_y - current_y
@@ -1725,8 +1734,17 @@ def pathfind_to_goal(state_data: Dict[str, Any], goal_x: int, goal_y: int,
                     avoid_grass=avoid_grass
                 )
                 if result:
+                    _path_list = result if isinstance(result, list) else [result]
+                    _first = _path_list[0] if _path_list else None
+                    _dd = {'UP': (0, -1), 'DOWN': (0, 1), 'LEFT': (-1, 0), 'RIGHT': (1, 0)}
+                    if _first in _dd:
+                        _ddx, _ddy = _dd[_first]
+                        _step1 = (current_x + _ddx, current_y + _ddy)
+                        _tile1 = location_grid.get(_step1, '?')
+                        _warn = " ⚠️ WARP — will trigger map transition!" if _tile1 in ['D', 'S', '?'] else ""
+                        print(f"   [A* PATH] Step 1: {_first} → {_step1} tile='{_tile1}'{_warn}")
                     print(f"✅ [PATHFIND] Global A* found path to ({goal_x}, {goal_y})")
-                    return result if isinstance(result, list) else [result]
+                    return _path_list
 
                 # Tier 2b: goal tile is '#' (e.g. gym door w/ collision=1 in stored grid,
                 # or west-edge boundary tile for Route 104 exit) but the tile is a real

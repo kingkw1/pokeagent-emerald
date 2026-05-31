@@ -69,7 +69,8 @@ def nav_bot_node(state: AgentState) -> AgentState:
     milestone_label = state.get("active_milestone") or ""
     desc_suffix = f"  ← {goal_desc}" if goal_desc else ""
     ms_suffix = f"  [{milestone_label}]" if milestone_label else ""
-    print(f"[NAVBOT] step={state.get('step_count')}  pos=({pos_x}, {pos_y})  goal=({goal_x}, {goal_y}){ms_suffix}{desc_suffix}")
+    _nav_location = state_data.get('player', {}).get('location', '?')
+    print(f"[NAVBOT] step={state.get('step_count')}  pos=({pos_x}, {pos_y})  goal=({goal_x}, {goal_y})  loc='{_nav_location}'{ms_suffix}{desc_suffix}")
 
     # pathfind_to_goal calls update_npc_obstacles internally.
     # Pass npc_coords so the target NPC's tile stays walkable.
