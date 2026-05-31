@@ -2034,6 +2034,8 @@ class TestFullCycleDialogueHandoff:
     # New Stack[0] directive targets ROUTE_104_SOUTH
 ```
 
+*Status:* ✅ 23/23 automated tests green.
+
 **Manual — Shadow Mode Divergence Analysis (`boundary_test.state`):**
 
 *Purpose:* Run the full Petalburg City sequence in shadow mode (Stage 7.1) to
@@ -2125,6 +2127,231 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 - Supervisor POP never fires after Norman dialogue: `coms_bot_node` is not writing dialogue turns to `game_history`, so the Supervisor always sees empty context and defaults to `CONTINUE` — confirm `episodic_memory.log_event` is called inside `coms_bot_node`
 - Stack grows unbounded: a PUSH loop where each coms_bot trigger pushes a new "talk to NPC" goal — add a guard in `executive_supervisor_node` that rejects PUSH when `goal_stack` depth > 6
 
+*Status:* ⚠️ BLOCKED — gym entry/exit loop prevents completion. See **Phase 7.2 Addendum** below for root-cause analysis and implementation plan. Re-run after `verification_node` gate is implemented.
+
+---
+
+## Phase 7.2 Addendum: Dialogue Milestone Authority Transfer
+
+**Purpose:** Fix the gym entry/exit loop observed when `--use-htn` is active. When the agent enters Petalburg City Gym, `verification_node` advances `milestone_index` from 17 (`DAD_FIRST_MEETING`) to 19 (`ROUTE_104_SOUTH`) in a single pass — before Norman speaks. The navigation target becomes Route 104 South while the agent is at gym interior coordinates. A* cannot path 103 tiles north through a building warp boundary; it falls back to pressing UP, which triggers the gym exit warp, and the loop begins.
+
+### Root Cause
+
+Two milestones advance prematurely on gym entry:
+
+1. **`DAD_FIRST_MEETING` (index 17, `completion_type="location"`)** — fires when `player.location == "PETALBURG_CITY_GYM"`. Correct and intentional in both modes.
+
+2. **`GYM_EXPLANATION` (index 18, `completion_type="dialogue"`)** — fires because the GBA ROM sets `dialogue_completed = True` in memory on gym map entry, not after Norman speaks. The `TransitionEvaluator` reads this flag and immediately satisfies the dialogue milestone on the **same** verification pass as `DAD_FIRST_MEETING`.
+
+Both milestones resolve in one `verification_node` pass. `milestone_index` jumps from 17 to 19. The navigation directive becomes `ROUTE_104_SOUTH`, but the agent is inside the gym at coordinates that are 103+ tiles south of the Route 104 exit. A* fails; the fallback presses UP; the gym exit warp fires. Loop.
+
+### Authority Split
+
+| Condition | Authority for dialogue milestone advancement |
+|---|---|
+| `use_htn=False` (FSM mode) | `verification_node` — advances via `dialogue_completed` flag set by `TransitionEvaluator` — **unchanged** |
+| `use_htn=True` (HTN mode) | Executive Supervisor — advances `milestone_index` only after `POP`ing the corresponding stack task, backed by `_query_dialogue_context()` evidence |
+
+When `use_htn=True`, the Supervisor uses `_query_dialogue_context()` to verify the completion condition against `game_history` ChromaDB records. These records are only written by `coms_bot_node` when fully-rendered dialogue frames are captured. Map entry alone cannot produce a `dialogue_transcript` record, so premature POP is structurally impossible.
+
+### Implementation: Three-Component Fix
+
+#### Component 1 — `verification_node` Dialogue Gate
+
+**File:** `agent/graph/nodes/verification_node.py`
+
+The `make_verification_node(use_htn=False)` factory must accept a `use_htn` parameter (same pattern as `make_executive_supervisor_node`). In the branch where a dialogue milestone fires:
+
+```python
+# When use_htn=True, the Supervisor is the authority for dialogue milestones.
+# Signal it and do NOT advance milestone_index.
+if use_htn and _is_dialogue_milestone(current_milestone_id):
+    logger.info(
+        "[VERIFY] %s: dialogue check → use_htn=True, deferring to Supervisor",
+        current_milestone_id,
+    )
+    return {
+        **state,
+        "dialogue_milestone_pending": current_milestone_id,
+    }
+
+# Legacy FSM path (use_htn=False): advance as before
+_advance_milestone(state, ...)
+```
+
+`_is_dialogue_milestone(mid)` checks `MILESTONE_PROGRESSION[index]["completion_type"] == "dialogue"`.
+
+Wire `use_htn` into `make_verification_node` in `build_graph()`:
+```python
+verification = make_verification_node(use_htn=use_htn)
+graph.add_node("verification", verification)
+```
+
+#### Component 2 — `AgentState` Field
+
+**File:** `agent/graph/state.py`
+
+```python
+dialogue_milestone_pending: Optional[str]
+"""Set by verification_node (use_htn=True) when a dialogue milestone fires but
+the Supervisor — not the FSM — is the authority. Value is the milestone_id string
+(e.g. "GYM_EXPLANATION"). Cleared by executive_supervisor_node after POP."""
+```
+
+#### Component 3 — Supervisor POP Advances Pending Milestone
+
+**File:** `agent/graph/nodes/executive_supervisor.py`
+
+In the `POP` branch of `executive_supervisor_node`, after `stack_pop()`:
+
+```python
+elif op == "POP":
+    popped, stack = stack_pop(stack)
+    logger.info("[SUPERVISOR] POP '%s' — %s", popped.goal_id if popped else "?", reason)
+
+    # When use_htn=True: if verification_node deferred a dialogue milestone,
+    # advance milestone_index now (Supervisor is the authority).
+    pending_mid = state.get("dialogue_milestone_pending")
+    if use_htn and pending_mid:
+        _advance_milestone_for_id(state, pending_mid)
+        new_state_patch["dialogue_milestone_pending"] = None
+        logger.info("[SUPERVISOR] Advancing deferred dialogue milestone: %s", pending_mid)
+
+    # Repopulate sub-goals if parent is now an exposed strategic goal with no children
+    parent = stack_peek(stack)
+    if parent and parent.goal_type == "strategic" and not _has_children(stack, parent):
+        new_sub_goals = _expand_strategic_goal(parent, state_data, walkthrough_db, vlm)
+        for g in reversed(new_sub_goals):
+            stack = stack_push(stack, g)
+```
+
+**`_advance_milestone_for_id(state, milestone_id)` helper** — new function in `executive_supervisor.py`:
+
+```python
+def _advance_milestone_for_id(state: dict, milestone_id: str) -> None:
+    """Increment milestone_index past the given milestone_id.
+
+    Scans MILESTONE_PROGRESSION for the milestone_id and sets
+    state["milestone_index"] to the next index. No-ops if milestone_index
+    is already past the given ID.
+    """
+    from agent.objective_manager import MILESTONE_PROGRESSION
+    for i, entry in enumerate(MILESTONE_PROGRESSION):
+        if entry["milestone"] == milestone_id:
+            current = state.get("milestone_index", 0)
+            if current <= i:
+                state["milestone_index"] = i + 1
+                logger.info(
+                    "[SUPERVISOR] milestone_index %d → %d (%s completed)",
+                    current, i + 1, milestone_id,
+                )
+            return
+```
+
+> **Note on mutation:** `_advance_milestone_for_id` mutates the `state` dict in-place
+> before the return dict is assembled. This matches the pattern already used by
+> `_apply_immediate_directive`. The caller must include `"milestone_index"` and
+> `"dialogue_milestone_pending"` in the final `new_state.update({...})` block.
+
+### Phase 7.2 Addendum Tests
+
+**Automated — `tests/test_htn_verification_gate.py`:**
+
+```python
+class TestDialogueMilestoneGated:
+    # verification_node with use_htn=True; current milestone is GYM_EXPLANATION (dialogue type)
+    # dialogue_completed = True in state_data
+    # → milestone_index unchanged in returned state
+    # → "dialogue_milestone_pending" == "GYM_EXPLANATION" in returned state
+
+class TestDialogueMilestoneNotGatedFSM:
+    # verification_node with use_htn=False; same GYM_EXPLANATION dialogue milestone fires
+    # → milestone_index advances (legacy FSM path unchanged)
+    # → "dialogue_milestone_pending" not set / None
+
+class TestLocationMilestoneAlwaysAdvances:
+    # verification_node with use_htn=True; current milestone is DAD_FIRST_MEETING (location type)
+    # player.location == "PETALBURG_CITY_GYM"
+    # → milestone_index advances (location milestones unaffected by this gate)
+    # → "dialogue_milestone_pending" not set
+
+class TestSupervisorPopAdvancesPendingMilestone:
+    # State has dialogue_milestone_pending="GYM_EXPLANATION", milestone_index=18
+    # Supervisor LLM mock returns POP
+    # → milestone_index == 19 in returned state
+    # → "dialogue_milestone_pending" == None in returned state
+
+class TestSupervisorContinueDoesNotAdvance:
+    # State has dialogue_milestone_pending="GYM_EXPLANATION", milestone_index=18
+    # Supervisor LLM mock returns CONTINUE
+    # → milestone_index unchanged (still 18)
+    # → "dialogue_milestone_pending" still "GYM_EXPLANATION"
+
+class TestSupervisorPopNoPending:
+    # State has dialogue_milestone_pending=None
+    # Supervisor LLM mock returns POP
+    # → milestone_index unchanged (no pending milestone to advance)
+    # → no crash, no KeyError
+
+class TestAdvanceMilestoneForIdAlreadyPast:
+    # milestone_index is already 19 when _advance_milestone_for_id("GYM_EXPLANATION") called
+    # → no-op; milestone_index remains 19
+
+class TestGymEntrySequence:
+    # Simulates the full gym-entry sequence end-to-end:
+    # Step 1: verification_node fires with DAD_FIRST_MEETING (location) → milestone_index 17→18
+    # Step 2: verification_node fires with GYM_EXPLANATION (dialogue, use_htn=True)
+    #         → gated; dialogue_milestone_pending="GYM_EXPLANATION"; milestone_index stays 18
+    # Step 3: Supervisor fires CONTINUE (mock episodic memory has no dialogue records)
+    #         → milestone_index 18; dialogue_milestone_pending still set
+    # Step 4: Supervisor fires POP (mock episodic memory contains Norman dialogue keywords)
+    #         → milestone_index advances to 19; dialogue_milestone_pending cleared to None
+    #         → Stack[0] directive points to ROUTE_104_SOUTH (confirmed via _apply_immediate_directive)
+```
+
+**Automated test command:**
+```bash
+.venv/bin/python -m pytest tests/test_htn_verification_gate.py -v
+```
+
+*Pass criteria:* All 8 tests green (or more if finer-grained coverage is added).
+
+**Manual — Gym Loop Fix Verification (`boundary_test.state`):**
+
+*Purpose:* Confirm the agent enters Petalburg City Gym, stays inside until Norman speaks, then navigates toward Route 104 South without the entry/exit loop. This is also the unblock condition for the Phase 7.2 "Full Petalburg Corridor Run" manual test above.
+
+*Command:*
+```bash
+python run.py --load-state tests/save_states/boundary_test.state --agent-auto --use-htn
+```
+
+*Observe in console:*
+```
+[VERIFY] DAD_FIRST_MEETING: location check → advancing milestone_index 17 → 18
+[VERIFY] GYM_EXPLANATION: dialogue check → use_htn=True, deferring to Supervisor
+[SUPERVISOR] step=N  CONTINUE  "Norman has not yet spoken — no dialogue_transcript in game_history"
+[coms_bot] NPC dialogue captured → logged to game_history
+[SUPERVISOR] step=M  POP  "Norman dialogue confirmed in episodic memory"
+[SUPERVISOR] Advancing deferred dialogue milestone: GYM_EXPLANATION → milestone_index 18 → 19
+[NAVBOT] goal_location=ROUTE_104_SOUTH
+```
+
+*Pass criteria:*
+- [ ] Agent enters gym and does NOT exit on the immediately following step
+- [ ] `[VERIFY] GYM_EXPLANATION: ... deferring to Supervisor` log line appears in console
+- [ ] `milestone_index` stays at 18 while agent is inside gym awaiting Norman dialogue
+- [ ] Supervisor issues `CONTINUE` at least once while `dialogue_milestone_pending` is set
+- [ ] Supervisor issues `POP` after Norman dialogue is captured to `game_history`
+- [ ] After POP: `milestone_index` = 19 and `Stack[0].directive.goal_location` = `ROUTE_104_SOUTH`
+- [ ] Agent exits gym and begins navigating north toward Route 104 South
+- [ ] **Full corridor**: PC heal → Norman dialogue → Route 104 South navigation all complete in one run
+
+*Fail indicators:*
+- Agent still exits gym immediately: `use_htn` not passed to `make_verification_node()` in `build_graph()` — confirm factory call signature
+- `[VERIFY] GYM_EXPLANATION` line never appears: code path not reached — add a temporary print before the `_is_dialogue_milestone()` check to confirm `verification_node` sees the right `current_milestone_id`
+- Supervisor always issues `CONTINUE` even after Norman speaks: `coms_bot_node` not writing to `game_history`, or `episodic_memory` not wired in `build_graph()` — confirm `make_coms_bot_node(episodic_memory=...)` call
+- `dialogue_milestone_pending` never cleared: POP branch not reaching the `pending_mid` check — confirm it is inside `if op == "POP":`, not in the outer `new_state.update()` block
+
 *Status:* 🔲 NOT YET RUN
 
 ---
@@ -2160,6 +2387,11 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 | 7.2 | `agent/__init__.py` | MODIFY (read `use_htn` from args; pass to `build_graph`; init `_graph_milestone_index` from game state on first step) | ✅ |
 | 7.1 | `tests/test_htn_shadow_log.py` | **CREATE** | ✅ |
 | 7.2 | `tests/test_htn_full_cycle.py` | **CREATE** | ✅ |
+| 7.2A | `agent/graph/state.py` | MODIFY — add `dialogue_milestone_pending: Optional[str]` field | ☐ |
+| 7.2A | `agent/graph/nodes/verification_node.py` | MODIFY — add `use_htn` factory parameter; gate `completion_type="dialogue"` milestones when `use_htn=True`; set `dialogue_milestone_pending` instead of advancing | ☐ |
+| 7.2A | `agent/graph/nodes/executive_supervisor.py` | MODIFY — in POP branch: check `dialogue_milestone_pending`, call `_advance_milestone_for_id()`, clear field; add `_advance_milestone_for_id()` helper | ☐ |
+| 7.2A | `agent/graph/graph.py` | MODIFY — pass `use_htn` to `make_verification_node()` | ☐ |
+| 7.2A | `tests/test_htn_verification_gate.py` | **CREATE** | ☐ |
 
 ---
 
