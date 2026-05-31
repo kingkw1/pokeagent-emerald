@@ -17,9 +17,11 @@ from agent.graph.nodes.executive_supervisor import (
     _HTN_SYSTEM_PROMPT,
     _bootstrap_stack,
     _build_htn_generation_prompt,
+    _build_rag_query,
     _count_badges,
     _expand_strategic_goal,
     _get_current_location,
+    _get_effective_progress_index,
     _get_last_completed_milestone,
     _milestone_fallback_stack,
 )
@@ -124,8 +126,11 @@ class TestBootstrapEmpty:
             {"text": "Travel through Route 104 South after meeting Norman.", "metadata": {}, "distance": 0.5},
         ]
         db = _make_walkthrough_db(chunks)
-        vlm = _make_vlm(_VALID_HTN_RESPONSE)
-        return _bootstrap_stack(_PETALBURG_STATE_DATA, db, vlm)
+        # Use a response that correctly targets PETALBURG_CITY_GYM — the
+        # mandatory next milestone when last_completed=ROUTE_102 and the
+        # player is already in PETALBURG_CITY.
+        vlm = _make_vlm(_gym_response())
+        return _bootstrap_stack(_PETALBURG_CITY_STATE_DATA, db, vlm)
 
     def test_returns_non_empty_list(self):
         stack = self._run()
@@ -443,3 +448,265 @@ class TestGetCurrentLocation:
 
     def test_returns_unknown_when_none(self):
         assert _get_current_location({"player": {"location": None}}) == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# _PETALBURG_CITY milestones — used by bootstrap-fix tests below
+# ---------------------------------------------------------------------------
+
+_PETALBURG_CITY_MILESTONES = {
+    **_ROUTE_102_MILESTONES,
+    "PETALBURG_CITY": True,   # arrived; DAD_FIRST_MEETING is next
+}
+
+_PETALBURG_CITY_STATE_DATA = {
+    "player": {"location": "PETALBURG_CITY", "position": {"x": 10, "y": 20}},
+    "game": {"badges": 0, "in_battle": False},
+    "party": [{"name": "Treecko", "current_hp": 25, "max_hp": 30}],
+    "milestones": _PETALBURG_CITY_MILESTONES,
+}
+
+
+def _gym_response() -> str:
+    """LLM response that correctly targets PETALBURG_CITY_GYM."""
+    return json.dumps({"goals": [
+        {
+            "goal_id": "enter_petalburg_gym",
+            "description": "Enter Petalburg City Gym to meet Dad",
+            "goal_type": "immediate",
+            "parent_id": "meet_dad_norman",
+            "completion_condition": "milestone DAD_FIRST_MEETING completed",
+            "directive": {
+                "action": "NAVIGATE",
+                "goal_coords": None,
+                "goal_location": "PETALBURG_CITY_GYM",
+                "should_interact": False,
+                "npc_coords": None,
+                "description": "Go to Petalburg City Gym",
+            },
+            "metadata": {},
+        },
+        {
+            "goal_id": "meet_dad_norman",
+            "description": "Meet Norman in the gym",
+            "goal_type": "tactical",
+            "parent_id": "earn_stone_badge",
+            "completion_condition": "DAD_FIRST_MEETING completed",
+            "directive": None,
+            "metadata": {},
+        },
+        {
+            "goal_id": "earn_stone_badge",
+            "description": "Earn the Stone Badge",
+            "goal_type": "strategic",
+            "parent_id": None,
+            "completion_condition": "Player has 1 badge",
+            "directive": None,
+            "metadata": {},
+        },
+    ]})
+
+
+def _route104_response() -> str:
+    """LLM response that wrongly skips the gym and targets ROUTE_104_SOUTH."""
+    return json.dumps({"goals": [
+        {
+            "goal_id": "head_to_route_104",
+            "description": "Walk west out of Petalburg City to Route 104 South",
+            "goal_type": "immediate",
+            "parent_id": "reach_rustboro",
+            "completion_condition": "Player is on ROUTE_104_SOUTH",
+            "directive": {
+                "action": "NAVIGATE",
+                "goal_coords": None,
+                "goal_location": "ROUTE_104_SOUTH",
+                "should_interact": False,
+                "npc_coords": None,
+                "description": "Head to Route 104 South",
+            },
+            "metadata": {},
+        },
+        {
+            "goal_id": "reach_rustboro",
+            "description": "Reach Rustboro City",
+            "goal_type": "strategic",
+            "parent_id": None,
+            "completion_condition": "Player is in RUSTBORO_CITY",
+            "directive": None,
+            "metadata": {},
+        },
+    ]})
+
+
+# ---------------------------------------------------------------------------
+# TestBootstrapNextMilestonePrompt
+# ---------------------------------------------------------------------------
+
+class TestBootstrapNextMilestonePrompt:
+    """_build_htn_generation_prompt includes a MANDATORY section when
+    next_milestone is provided."""
+
+    def _next_ms(self) -> dict:
+        return {
+            "milestone": "DAD_FIRST_MEETING",
+            "description": "Enter gym to meet Dad",
+            "target_location": "PETALBURG_CITY_GYM",
+            "completion_type": "dialogue",
+        }
+
+    def test_mandatory_section_present(self):
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY", "PETALBURG_CITY", 0,
+            next_milestone=self._next_ms(),
+        )
+        assert "MANDATORY" in prompt
+
+    def test_milestone_id_in_prompt(self):
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY", "PETALBURG_CITY", 0,
+            next_milestone=self._next_ms(),
+        )
+        assert "DAD_FIRST_MEETING" in prompt
+
+    def test_target_location_in_prompt(self):
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY", "PETALBURG_CITY", 0,
+            next_milestone=self._next_ms(),
+        )
+        assert "PETALBURG_CITY_GYM" in prompt
+
+    def test_cannot_skip_milestone_warning_in_prompt(self):
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY", "PETALBURG_CITY", 0,
+            next_milestone=self._next_ms(),
+        )
+        assert "skip" in prompt.lower() or "cannot" in prompt.lower()
+
+    def test_no_mandatory_section_without_next_milestone(self):
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY", "PETALBURG_CITY", 0,
+        )
+        assert "MANDATORY" not in prompt
+
+    def test_none_target_location_uses_placeholder(self):
+        """next_milestone with no target_location renders gracefully."""
+        ms = {"milestone": "GYM_EXPLANATION", "description": "Watch Wally tutorial",
+              "target_location": None, "completion_type": "dialogue"}
+        prompt = _build_htn_generation_prompt(
+            "ctx", "PETALBURG_CITY_GYM", "GYM_EXPLANATION", 0,
+            next_milestone=ms,
+        )
+        assert "GYM_EXPLANATION" in prompt
+        assert "MANDATORY" in prompt
+
+
+# ---------------------------------------------------------------------------
+# TestBootstrapValidationFallback
+# ---------------------------------------------------------------------------
+
+class TestBootstrapValidationFallback:
+    """When the LLM ignores the MANDATORY section and targets the wrong location,
+    _bootstrap_stack falls back to the deterministic milestone stack."""
+
+    def _chunks(self):
+        return [
+            {"text": "Enter Petalburg City Gym to meet your father Norman.",
+             "metadata": {}, "distance": 0.2},
+        ]
+
+    def test_wrong_target_triggers_fallback(self):
+        """LLM returns ROUTE_104_SOUTH instead of PETALBURG_CITY_GYM — must fall back."""
+        db = _make_walkthrough_db(self._chunks())
+        vlm = _make_vlm(_route104_response())
+        stack = _bootstrap_stack(_PETALBURG_CITY_STATE_DATA, db, vlm)
+        # Fallback produces milestone stack targeting PETALBURG_CITY_GYM
+        assert len(stack) >= 1
+        assert stack[0].directive is not None
+        assert stack[0].directive.get("goal_location") == "PETALBURG_CITY_GYM"
+
+    def test_correct_target_accepted(self):
+        """LLM correctly targets PETALBURG_CITY_GYM — stack accepted as-is."""
+        db = _make_walkthrough_db(self._chunks())
+        vlm = _make_vlm(_gym_response())
+        stack = _bootstrap_stack(_PETALBURG_CITY_STATE_DATA, db, vlm)
+        assert len(stack) >= 1
+        assert stack[0].goal_id == "enter_petalburg_gym"
+        assert stack[0].directive["goal_location"] == "PETALBURG_CITY_GYM"
+
+    def test_fallback_stack_targets_gym_for_petalburg_city(self):
+        """Milestone fallback for PETALBURG_CITY milestones points at GYM."""
+        from agent.objective_manager import MILESTONE_PROGRESSION
+        stack = _milestone_fallback_stack(_PETALBURG_CITY_MILESTONES, _PETALBURG_CITY_STATE_DATA)
+        assert len(stack) >= 1
+        assert stack[0].directive is not None
+        assert stack[0].directive.get("goal_location") == "PETALBURG_CITY_GYM"
+
+    def test_no_validation_when_target_is_none(self):
+        """next_milestone with target_location=None skips validation — no spurious fallback."""
+        # GYM_EXPLANATION has target_location=None; any goal_location is accepted
+        gym_exp_milestones = {
+            **_PETALBURG_CITY_MILESTONES,
+            "DAD_FIRST_MEETING": True,
+        }
+        state = {**_PETALBURG_CITY_STATE_DATA, "milestones": gym_exp_milestones,
+                 "player": {"location": "PETALBURG_CITY_GYM", "position": {"x": 14, "y": 8}}}
+        db = _make_walkthrough_db([{"text": "Watch the Wally tutorial.", "metadata": {}, "distance": 0.1}])
+        # LLM returns any valid immediate goal — should be accepted without validation
+        vlm = _make_vlm(_VALID_HTN_RESPONSE)  # points at PETALBURG_WOODS — fine since no required target
+        stack = _bootstrap_stack(state, db, vlm)
+        assert isinstance(stack, list)
+        assert len(stack) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TestBuildRagQueryNextMilestone
+# ---------------------------------------------------------------------------
+
+class TestBuildRagQueryNextMilestone:
+    """_build_rag_query uses next_milestone to focus the query."""
+
+    def _next_ms(self) -> dict:
+        return {
+            "milestone": "DAD_FIRST_MEETING",
+            "description": "Enter gym to meet Dad",
+            "target_location": "PETALBURG_CITY_GYM",
+        }
+
+    def test_query_targets_gym_when_next_milestone_given(self):
+        query = _build_rag_query(
+            "PETALBURG_CITY", "PETALBURG_CITY", "Petalburg City",
+            next_milestone=self._next_ms(),
+        )
+        assert "Petalburg City Gym" in query
+
+    def test_query_contains_next_milestone_description(self):
+        query = _build_rag_query(
+            "PETALBURG_CITY", "PETALBURG_CITY", "Petalburg City",
+            next_milestone=self._next_ms(),
+        )
+        assert "Enter gym to meet Dad" in query
+
+    def test_query_without_next_milestone_still_works(self):
+        """No next_milestone falls back to old behaviour gracefully."""
+        query = _build_rag_query("PETALBURG_CITY", "PETALBURG_CITY", "Petalburg City")
+        assert "Petalburg City" in query
+        assert isinstance(query, str) and len(query) > 0
+
+    def test_query_excludes_route104_when_gym_is_next(self):
+        """With next_milestone=DAD_FIRST_MEETING, Route 104 should NOT appear
+        in the description text (we only include the single next description)."""
+        query = _build_rag_query(
+            "PETALBURG_CITY", "PETALBURG_CITY", "Petalburg City",
+            next_milestone=self._next_ms(),
+        )
+        assert "Route 104" not in query
+
+    def test_bootstrap_passes_next_milestone_to_rag(self):
+        """_bootstrap_stack passes next_milestone to db.query so the RAG call
+        is focused on the gym, not on later milestones."""
+        db = _make_walkthrough_db([])
+        vlm = _make_vlm(_gym_response())
+        _bootstrap_stack(_PETALBURG_CITY_STATE_DATA, db, vlm)
+        call_args = db.query.call_args
+        query_text = call_args[0][0] if call_args[0] else call_args[1].get("query_text", "")
+        assert "Petalburg City Gym" in query_text

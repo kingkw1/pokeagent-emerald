@@ -486,16 +486,25 @@ def _bootstrap_stack(state_data: dict, walkthrough_db, vlm) -> list[GoalNode]:
     location = _get_current_location(state_data)
     location_natural = location.replace("_", " ").title()
 
-    rag_query = _build_rag_query(location, last_completed, location_natural)
+    # Determine the mandatory next milestone so the prompt and RAG query are
+    # anchored on exactly where the agent must go next — not on later content.
+    effective_idx = _get_effective_progress_index(location, last_completed)
+    next_milestone: dict | None = None
+    if effective_idx + 1 < len(MILESTONE_PROGRESSION):
+        next_milestone = {"index": effective_idx + 1, **MILESTONE_PROGRESSION[effective_idx + 1]}
+
+    rag_query = _build_rag_query(location, last_completed, location_natural, next_milestone=next_milestone)
     chunks = walkthrough_db.query(rag_query, n_results=5) if walkthrough_db else []
     context_text = "\n\n".join(c["text"] for c in chunks) if chunks else ""
 
     logger.info(
         "[SUPERVISOR] BOOTSTRAP  last_completed=%s  location=%s  badges=%s  "
-        "rag_chunks=%d",
+        "rag_chunks=%d  next_milestone=%s",
         last_completed, location, badge_count, len(chunks),
+        next_milestone.get("milestone") if next_milestone else None,
     )
     print(f"[SUPERVISOR] last_completed={last_completed}")
+    print(f"[SUPERVISOR] next_milestone={next_milestone.get('milestone') if next_milestone else None}")
     print(f"[SUPERVISOR] RAG query: {rag_query!r}")
     print(f"[SUPERVISOR] RAG returned {len(chunks)} chunks")
     if chunks:
@@ -509,6 +518,7 @@ def _bootstrap_stack(state_data: dict, walkthrough_db, vlm) -> list[GoalNode]:
     htn_prompt = _build_htn_generation_prompt(
         context_text, location, last_completed, badge_count,
         completed_milestones=_infer_completed_milestones(location, milestones),
+        next_milestone=next_milestone,
     )
     try:
         raw = vlm.get_json_query(_HTN_SYSTEM_PROMPT, htn_prompt, module_name="HTNBootstrap", timeout=60)
@@ -517,6 +527,25 @@ def _bootstrap_stack(state_data: dict, walkthrough_db, vlm) -> list[GoalNode]:
         stack = [GoalNode.from_dict(g) for g in goals_data["goals"]]
         assert any(g.goal_type == "immediate" and g.directive for g in stack), \
             "No immediate goal with directive in HTN output"
+        # Validate: if the next milestone has a required target_location, the
+        # LLM's immediate goal must agree.  A mismatch means the LLM ignored
+        # the mandatory section — fall back to the deterministic milestone stack.
+        if next_milestone and next_milestone.get("target_location"):
+            expected = next_milestone["target_location"]
+            immediate = next((g for g in stack if g.goal_type == "immediate" and g.directive), None)
+            if immediate:
+                actual = (immediate.directive or {}).get("goal_location")
+                if actual and actual != expected:
+                    logger.warning(
+                        "[SUPERVISOR] Bootstrap divergence: LLM immediate goal targets %r "
+                        "but next milestone requires %r — using milestone fallback.",
+                        actual, expected,
+                    )
+                    print(
+                        f"[SUPERVISOR] Bootstrap diverged: HTN={actual!r} required={expected!r}"
+                        f" — falling back to milestone stack"
+                    )
+                    return _milestone_fallback_stack(milestones, state_data)
         return stack
     except Exception as e:
         logger.warning("[SUPERVISOR] HTN generation failed: %s — using milestone fallback", e)
@@ -563,6 +592,7 @@ def _build_htn_generation_prompt(
     last_completed: str,
     badge_count: int,
     completed_milestones: list | None = None,
+    next_milestone: dict | None = None,
 ) -> str:
     """Build the user-side HTN generation prompt from RAG context + game state."""
     completed_section = ""
@@ -572,18 +602,36 @@ def _build_htn_generation_prompt(
             + "\n".join(f"  - {m}" for m in completed_milestones)
             + "\n\n"
         )
+    next_milestone_section = ""
+    if next_milestone:
+        m_id = next_milestone.get("milestone", "")
+        desc = next_milestone.get("description", m_id)
+        target = next_milestone.get("target_location") or "(in current location)"
+        c_type = next_milestone.get("completion_type", "location")
+        next_milestone_section = (
+            f"=== NEXT REQUIRED MILESTONE — MANDATORY ===\n"
+            f"Milestone ID : {m_id}\n"
+            f"Description  : {desc}\n"
+            f"Target       : {target}\n"
+            f"Type         : {c_type}\n"
+            f"The immediate goal (goal_type=\"immediate\", Stack[0]) MUST have "
+            f"goal_location={target!r}. The agent CANNOT proceed to any later "
+            f"destination until this milestone is satisfied. Do NOT skip this "
+            f"milestone or generate goals for anything further ahead.\n\n"
+        )
     return (
         f"=== WALKTHROUGH CONTEXT ===\n{context_text}\n\n"
         f"=== CURRENT GAME STATE ===\n"
         f"Location     : {location}\n"
         f"Badge count  : {badge_count}\n"
         f"Last milestone: {last_completed}\n\n"
+        f"{next_milestone_section}"
         f"{completed_section}"
         f"Generate a 3-level goal hierarchy (strategic → tactical → immediate) "
-        f"to guide the agent from its current position toward the next gym badge. "
+        f"to guide the agent from its current position. "
         f"Only include goals that are NOT yet completed. "
         f"The immediate goal MUST describe the very next action from the current location. "
-        f"The immediate goal MUST include a directive block. "
+        f"The immediate goal MUST include a directive block with the target specified above. "
         f"Return ONLY JSON."
     )
 
@@ -650,31 +698,46 @@ def _infer_completed_milestones(location: str, milestones: dict) -> list[str]:
     ))
 
 
-def _build_rag_query(location: str, last_completed: str, location_natural: str) -> str:
-    """Build a content-rich RAG query for the current game position.
+def _build_rag_query(
+    location: str,
+    last_completed: str,
+    location_natural: str,
+    next_milestone: dict | None = None,
+) -> str:
+    """Build a focused RAG query for the current game position.
 
-    Anchors on the player's physical location (not just the tracked milestone)
-    to handle gaps between milestone tracking and actual game progress.
-    Uses the next milestone descriptions to surface semantically relevant chunks.
+    When ``next_milestone`` is provided the query is anchored tightly on that
+    single milestone's target so the walkthrough DB returns chunks about the
+    immediate next goal, not content from milestones two or three steps ahead
+    (which would bias the LLM toward skipping required story events).
     """
     effective_idx = _get_effective_progress_index(location, last_completed)
-
-    # Find the next non-current target location (our destination)
     normalized_location = location.replace(" ", "_").upper()
-    next_location_natural = None
-    for entry in MILESTONE_PROGRESSION[effective_idx + 1:]:
-        tl = entry.get("target_location")
-        if tl and tl != normalized_location:
-            next_location_natural = tl.replace("_", " ").title()
-            break
 
-    # Collect descriptions for the next 4 milestones to enrich the query
-    next_milestone_descs = [
-        e["description"]
-        for e in MILESTONE_PROGRESSION[effective_idx + 1: effective_idx + 5]
-        if e.get("description")
-    ]
-    desc_text = ". ".join(next_milestone_descs)
+    # Resolve the next destination — prefer the explicit next_milestone if given
+    next_location_natural: str | None = None
+    if next_milestone and next_milestone.get("target_location"):
+        tl = next_milestone["target_location"]
+        if tl != normalized_location:
+            next_location_natural = tl.replace("_", " ").title()
+    else:
+        for entry in MILESTONE_PROGRESSION[effective_idx + 1:]:
+            tl = entry.get("target_location")
+            if tl and tl != normalized_location:
+                next_location_natural = tl.replace("_", " ").title()
+                break
+
+    # When we know the exact next milestone, use only its description.
+    # Limit to 2 descriptions otherwise to avoid pulling in far-future content.
+    if next_milestone:
+        desc_text = next_milestone.get("description", "")
+    else:
+        next_milestone_descs = [
+            e["description"]
+            for e in MILESTONE_PROGRESSION[effective_idx + 1: effective_idx + 3]
+            if e.get("description")
+        ]
+        desc_text = ". ".join(next_milestone_descs)
 
     if next_location_natural:
         return (
