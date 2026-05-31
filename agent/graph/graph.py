@@ -20,7 +20,7 @@ from agent.graph.nodes.handoff_detector import make_handoff_detector_node
 from agent.graph.nodes.executive_supervisor import make_executive_supervisor_node
 
 
-def build_graph(obj_manager, vlm, episodic_memory=None, walkthrough_db=None) -> "langgraph.graph.graph.CompiledGraph":  # type: ignore[name-defined]
+def build_graph(obj_manager, vlm, episodic_memory=None, walkthrough_db=None, use_htn: bool = False) -> "langgraph.graph.graph.CompiledGraph":  # type: ignore[name-defined]
     """Assemble and compile the dispatch StateGraph.
 
     Args:
@@ -31,6 +31,11 @@ def build_graph(obj_manager, vlm, episodic_memory=None, walkthrough_db=None) -> 
         walkthrough_db:   Optional ``WalkthroughDB`` instance passed to the
                           executive supervisor for RAG-bootstrap (Phase 4+).
                           ``None`` is safe — the Phase 2 stub ignores it.
+        use_htn:          When ``True`` the executive supervisor overwrites
+                          ``goal_coords``/``goal_location`` from Stack[0].directive
+                          (Phase 7.2 immediate layer handoff).  Defaults ``False``
+                          (shadow mode — stack is built and logged but nav fields
+                          are not changed).
 
     Returns:
         A compiled LangGraph graph ready for ``graph.invoke(state)``.
@@ -47,7 +52,7 @@ def build_graph(obj_manager, vlm, episodic_memory=None, walkthrough_db=None) -> 
     builder.add_node("handoff_detector", make_handoff_detector_node(episodic_memory=episodic_memory))
     builder.add_node(
         "executive_supervisor",
-        make_executive_supervisor_node(vlm, episodic_memory, walkthrough_db=walkthrough_db),
+        make_executive_supervisor_node(vlm, episodic_memory, walkthrough_db=walkthrough_db, use_htn=use_htn),
     )
 
     # ---- Entry point ----

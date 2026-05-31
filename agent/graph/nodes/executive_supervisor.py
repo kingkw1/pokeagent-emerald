@@ -242,6 +242,17 @@ def make_executive_supervisor_node(
             )
             print(f"[SUPERVISOR] step={step}  BOOTSTRAP")
             print(f"[SUPERVISOR] Stack: {stack_summary(stack)}")
+            _write_shadow_log(
+                step=step,
+                supervisor_op="BOOTSTRAP",
+                stack=stack,
+                milestone_target=(
+                    MILESTONE_PROGRESSION[state.get("milestone_index", 0)].get("target_location")
+                    if state.get("milestone_index", 0) < len(MILESTONE_PROGRESSION) else None
+                ),
+                milestone_index=state.get("milestone_index", 0),
+                reasoning="Initial goal stack populated.",
+            )
             return {
                 **state,
                 "goal_stack": [g.to_dict() for g in stack],
@@ -258,7 +269,6 @@ def make_executive_supervisor_node(
         battle_ctx: str = _query_battle_outcomes(episodic_memory, boot_time)
         logger.debug("[SUPERVISOR] dialogue_ctx: %s", (dialogue_ctx[:100] + "...") if len(dialogue_ctx) > 100 else dialogue_ctx or "(none)")
         logger.debug("[SUPERVISOR] battle_ctx: %s", (battle_ctx[:100] + "...") if len(battle_ctx) > 100 else battle_ctx or "(none)")
-        print(f"[SUPERVISOR] boot_timestamp={boot_time:.3f}")
         print(f"[SUPERVISOR] dialogue_ctx: {dialogue_ctx[:80] if dialogue_ctx else '(none)'}")
         print(f"[SUPERVISOR] battle_ctx: {battle_ctx[:80] if battle_ctx else '(none)'}")
         game_summary: dict = _build_game_summary(state_data, state)
@@ -344,6 +354,17 @@ def make_executive_supervisor_node(
                 "supervisor_last_reasoning": reason[:500],
             }
         )
+        _write_shadow_log(
+            step=step,
+            supervisor_op=op,
+            stack=stack,
+            milestone_target=(
+                MILESTONE_PROGRESSION[state.get("milestone_index", 0)].get("target_location")
+                if state.get("milestone_index", 0) < len(MILESTONE_PROGRESSION) else None
+            ),
+            milestone_index=state.get("milestone_index", 0),
+            reasoning=reason,
+        )
         return new_state
 
     return executive_supervisor_node
@@ -387,6 +408,61 @@ def _apply_immediate_directive(state: AgentState, stack: list[GoalNode]) -> dict
         patch["active_milestone"] = immediate.goal_id
 
     return {**state, **patch}
+
+
+def _write_shadow_log(
+    step: int,
+    supervisor_op: str,
+    stack: list[GoalNode],
+    milestone_target: Optional[str],
+    milestone_index: int,
+    reasoning: str,
+    log_path: str = "llm_logs/htn_shadow.jsonl",
+) -> None:
+    """Append one shadow-log entry.
+
+    Each line is a JSON object with keys:
+      step, supervisor_op, stack_depth, milestone_index,
+      milestone_target, htn_target, diverged, reasoning.
+
+    ``diverged`` is True when both systems have non-None targets and
+    they disagree — this is the primary metric for Phase 7 evaluation.
+    """
+    import json
+    import os
+
+    immediate = stack_peek(stack)
+    htn_target: Optional[str] = None
+    if immediate and immediate.directive:
+        htn_target = immediate.directive.get("goal_location")
+
+    diverged: bool = (
+        milestone_target is not None
+        and htn_target is not None
+        and milestone_target != htn_target
+    )
+
+    entry = {
+        "step": step,
+        "supervisor_op": supervisor_op,
+        "stack_depth": len(stack),
+        "milestone_index": milestone_index,
+        "milestone_target": milestone_target,
+        "htn_target": htn_target,
+        "diverged": diverged,
+        "reasoning": (reasoning or "")[:200],
+    }
+
+    os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
+    file_mode = "w" if supervisor_op == "BOOTSTRAP" else "a"
+    with open(log_path, file_mode, encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+    if diverged:
+        print(
+            f"[SHADOW] ⚡ DIVERGE step={step}  "
+            f"milestone={milestone_target}  htn={htn_target}"
+        )
 
 
 # ---------------------------------------------------------------------------

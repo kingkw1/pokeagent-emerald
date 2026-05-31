@@ -134,6 +134,8 @@ def main():
                        help="Record video of the gameplay")
     parser.add_argument("--no-ocr", action="store_true", 
                        help="Disable OCR dialogue detection")
+    parser.add_argument("--use-htn", action="store_true", default=False,
+                       help="Enable HTN supervisor to drive navigation (Phase 7.2)")
     
     args = parser.parse_args()
     

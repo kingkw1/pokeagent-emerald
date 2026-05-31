@@ -74,7 +74,7 @@ class Agent:
         backend = args.backend if args else "gemini"
         model_name = args.model_name if args else "gemini-2.5-flash"
         simple_mode = args.simple if args else False
-        
+        use_htn = getattr(args, "use_htn", False)
 
         
         # Initialize VLM
@@ -153,7 +153,7 @@ class Agent:
             self._get_session_transcript = get_session_transcript
             self._clear_session_transcript = clear_session_transcript
             self._transition_evaluator = TransitionEvaluator(vlm=self.vlm)
-            self._graph = build_graph(self.objective_manager, self.vlm, self.episodic_memory, walkthrough_db=self.walkthrough_db)
+            self._graph = build_graph(self.objective_manager, self.vlm, self.episodic_memory, walkthrough_db=self.walkthrough_db, use_htn=use_htn)
             self._step_count: int = 0
             self._prev_state_snapshot: dict | None = None
             self._graph_milestone_index: int = 0
@@ -164,7 +164,8 @@ class Agent:
             self._htn_supervisor_last_operation: str | None = None
             self._htn_supervisor_last_reasoning: str | None = None
             self._boot_timestamp: float = time.time()
-            print("   🕸️  LangGraph dispatch graph: READY")
+            htn_mode = "ACTIVE (HTN drives nav)" if use_htn else "shadow (HTN logs only)"
+            print(f"   🕸️  LangGraph dispatch graph: READY — HTN={htn_mode}")
     
     def step(self, game_state):
         """
@@ -531,6 +532,15 @@ class Agent:
                     if isinstance(m, dict) and m.get('completed')
                 ]
                 state_data.setdefault('game', {})['milestones_completed'] = completed_ids
+
+                # Phase 7.2: Lazy-init milestone_index from save-state milestones on first step.
+                # _graph_milestone_index starts at 0 in __init__, which is wrong when loading a
+                # mid-game save.  On step 0 we derive the correct starting index so
+                # _write_shadow_log() produces non-null milestone_target values.
+                if self._step_count == 0:
+                    from agent.objective_manager import get_highest_milestone_index
+                    highest = get_highest_milestone_index(milestones)
+                    self._graph_milestone_index = max(0, highest + 1)
 
                 # Get the current navigation directive to populate goal_coords
                 directive_raw = self.objective_manager.get_next_action_directive(state_data)

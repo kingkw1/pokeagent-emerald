@@ -2002,23 +2002,14 @@ transition, with the HTN taking increasing ownership.
 
 ### Phase 7 Tests
 
-**Automated — `tests/test_shadow_mode.py`** (Stage 7.1):
+**Automated — `tests/test_htn_shadow_log.py`** (Stage 7.1): ✅ 10/10 tests green
 
+*Implemented (all passing):*
 ```python
-class TestShadowLogWritten:
-    # After 3 graph.invoke() calls in shadow mode, llm_logs/htn_shadow.jsonl exists
-    # Each line is valid JSON with keys: step, milestone_index, supervisor_op, stack_depth, diverged
-    # Line count matches number of Supervisor activations
-
-class TestShadowDivergenceDetected:
-    # Milestone system targets PETALBURG_CITY_GYM
-    # Mock HTN supervisor targets ROUTE_104_SOUTH (simulating the known RAG override bug)
-    # Shadow log entry has diverged=True
-    # AgentState goal_coords unchanged (milestone target still used — HTN not active yet)
-
-class TestShadowNoDivergence:
-    # Both systems agree on PETALBURG_CITY as next target
-    # Shadow log entry has diverged=False
+class TestShadowLogWritten        # file created; each line valid JSON with all required keys;
+                                  # line count == activations; stack_depth correct; milestone_index recorded
+class TestShadowDivergenceDetected  # diverged=True when targets differ; nav fields not mutated
+class TestShadowNoDivergence        # diverged=False when targets match; when milestone_target=None; when htn_target=None
 ```
 
 **Automated — `tests/test_htn_full_cycle.py`** (Stages 7.2–7.3):
@@ -2071,8 +2062,8 @@ for r in diverged[:5]:
 *Pass criteria:*
 - [ ] Shadow log file created at `llm_logs/htn_shadow.jsonl`
 - [ ] Agent navigates from boundary (Petalburg City entrance) into gym within 200 steps (driven by `MILESTONE_PROGRESSION`, HTN in shadow only)
-- [ ] For the `DAD_FIRST_MEETING` step: HTN target is `PETALBURG_CITY_GYM` (no divergence)
-- [ ] For the `GYM_EXPLANATION` step: HTN does NOT target `ROUTE_104_SOUTH` (this was the legacy bug — verify it is fixed in the HTN)
+- [ ] For the `DAD_FIRST_MEETING` step (milestone_index=17): `milestone_target=PETALBURG_CITY_GYM` and `diverged=False` — the HTN's Stack[0] directive also targets `PETALBURG_CITY_GYM`. The legacy FSM may detour via the Pokemon Center for healing first; this is expected and does not constitute divergence (the HTN is not issuing the heal order)
+- [ ] For the `GYM_EXPLANATION` step (milestone_index=18): `milestone_target=None` (no `target_location` in MILESTONE_PROGRESSION for this dialogue milestone) — divergence cannot fire; verify HTN does NOT independently target `ROUTE_104_SOUTH`
 - [ ] Supervisor activations ≤ 6 across 200 steps (handoff-gated correctly)
 
 *Fail indicators:*
@@ -2080,7 +2071,15 @@ for r in diverged[:5]:
 - HTN still targets `ROUTE_104_SOUTH` for `DAD_FIRST_MEETING`: Supervisor `completion_condition` check is not receiving the correct game state — check `_apply_immediate_directive` is writing `active_milestone` to state so the Supervisor knows which goal is active
 - Supervisor activates every step: handoff detector `_SIGNIFICANT_TRANSITIONS` is not filtering same-node repeats
 
-*Status:* 🔲 NOT YET RUN
+*Status:* ⚠️ PARTIAL PASS — run `llm_logs/htn_shadow.jsonl` (multiple runs, approx 200 steps each)
+
+*Findings:*
+- ✅ Shadow log file created at `llm_logs/htn_shadow.jsonl`
+- ✅ Agent navigates to Petalburg Gym within 200 steps (FSM-driven; HTN in shadow)
+- ✅ Supervisor activations ≤ 6 across each run (3–5 observed)
+- ⚠️ `milestone_target` always `null` — root cause: `AgentState.milestone_index` initialised to 0 in `agent/__init__.py` regardless of loaded save state, so `MILESTONE_PROGRESSION[0]` is always read. Fix: initialise `self._graph_milestone_index` from the game state milestones on first step (Phase 7.2). Criterion moved to Phase 7.2 manual test.
+- ❌ `GYM_EXPLANATION` step not verified — pre-existing FSM race condition: Norman cutscene auto-advances on gym entry, triggering `dialogue_completed=True` before the player actually speaks to Norman. Both `DAD_FIRST_MEETING` and `GYM_EXPLANATION` advance prematurely. Decision: do NOT fix; HTN resolves this by design (uses episodic transcript evidence, not `dialogue_completed` flag). Criterion moved to Phase 7.2 manual test.
+- ⚠️ Key divergence finding: with `last_completed=PETALBURG_CITY`, HTN bootstrap generates stack `[I]Exit Petalburg City west to Route 104 South` — skips `DAD_FIRST_MEETING`. FSM correctly locks to `PETALBURG_CITY_GYM` via RAG LOCK (`DAD_FIRST_MEETING requires PETALBURG_CITY_GYM — RAG suggested ROUTE_104_SOUTH — ignored`). This is the primary divergence Phase 7.2 must address.
 
 **Manual — Full Petalburg Corridor Run with HTN Active (`boundary_test.state`):**
 
@@ -2155,10 +2154,12 @@ python run.py --load-state tests/save_states/boundary_test.state --agent-auto --
 | 6 | `agent/graph/state.py` | MODIFY (add `_boot_timestamp`) | ✅ |
 | 6 | `agent/__init__.py` | MODIFY (set `_boot_timestamp`) | ✅ |
 | 6 | `tests/test_boot_sequence.py` | **CREATE** | ✅ |
-| 7.1 | `agent/graph/nodes/executive_supervisor.py` | MODIFY (add shadow jsonl logging) | ☐ |
-| 7.2 | `run.py` / `agent/__init__.py` | MODIFY (add `--use-htn` flag; pass to `build_graph` → `make_executive_supervisor_node`) | ☐ |
-| 7 | `tests/test_shadow_mode.py` | **CREATE** | ☐ |
-| 7 | `tests/test_htn_full_cycle.py` | **CREATE** | ☐ |
+| 7.1 | `agent/graph/nodes/executive_supervisor.py` | MODIFY (add shadow jsonl logging) | ✅ |
+| 7.2 | `run.py` | MODIFY (add `--use-htn` flag) | ✅ |
+| 7.2 | `agent/graph/graph.py` | MODIFY (accept `use_htn` param; pass to `make_executive_supervisor_node`) | ✅ |
+| 7.2 | `agent/__init__.py` | MODIFY (read `use_htn` from args; pass to `build_graph`; init `_graph_milestone_index` from game state on first step) | ✅ |
+| 7.1 | `tests/test_htn_shadow_log.py` | **CREATE** | ✅ |
+| 7.2 | `tests/test_htn_full_cycle.py` | **CREATE** | ✅ |
 
 ---
 
