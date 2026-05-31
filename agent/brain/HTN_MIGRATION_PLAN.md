@@ -2210,12 +2210,26 @@ elif op == "POP":
     logger.info("[SUPERVISOR] POP '%s' — %s", popped.goal_id if popped else "?", reason)
 
     # When use_htn=True: if verification_node deferred a dialogue milestone,
-    # advance milestone_index now (Supervisor is the authority).
+    # advance milestone_index ONLY if the goal we just popped was an
+    # interaction/dialogue task — not a navigation sub-goal.
+    #
+    # ⚠️ Critical guard: dialogue_milestone_pending is set on gym map ENTRY,
+    # before Norman speaks. The stack at that point is typically:
+    #   Stack[1]: [T] Talk to Norman          (action=INTERACT)
+    #   Stack[0]: [I] Walk across gym floor   (action=NAVIGATE)
+    # Without this guard, popping the NAVIGATE sub-goal would advance
+    # GYM_EXPLANATION prematurely — before the agent has spoken to Norman.
     pending_mid = state.get("dialogue_milestone_pending")
-    if use_htn and pending_mid:
-        _advance_milestone_for_id(state, pending_mid)
-        new_state_patch["dialogue_milestone_pending"] = None
-        logger.info("[SUPERVISOR] Advancing deferred dialogue milestone: %s", pending_mid)
+    if use_htn and pending_mid and popped and popped.directive:
+        if popped.directive.get("action") in ("DIALOGUE", "INTERACT"):
+            _advance_milestone_for_id(state, pending_mid)
+            new_state_patch["dialogue_milestone_pending"] = None
+            logger.info("[SUPERVISOR] Advancing deferred dialogue milestone: %s", pending_mid)
+        else:
+            logger.debug(
+                "[SUPERVISOR] Popped '%s' (action=%s) — keeping dialogue milestone '%s' pending",
+                popped.goal_id, popped.directive.get("action"), pending_mid,
+            )
 
     # Repopulate sub-goals if parent is now an exposed strategic goal with no children
     parent = stack_peek(stack)
@@ -2293,6 +2307,28 @@ class TestSupervisorPopNoPending:
     # → milestone_index unchanged (no pending milestone to advance)
     # → no crash, no KeyError
 
+class TestSupervisorPopNavSubgoalNoAdvance:
+    # State has dialogue_milestone_pending="GYM_EXPLANATION", milestone_index=18
+    # Popped goal has directive={"action": "NAVIGATE", "goal_location": "PETALBURG_CITY_GYM"}
+    # Supervisor LLM mock returns POP
+    # → milestone_index unchanged (still 18) — navigation sub-goal, not a dialogue task
+    # → "dialogue_milestone_pending" still "GYM_EXPLANATION"
+    # → debug log line contains "Popped ... keeping dialogue milestone"
+
+class TestSupervisorPopInteractAdvances:
+    # State has dialogue_milestone_pending="GYM_EXPLANATION", milestone_index=18
+    # Popped goal has directive={"action": "INTERACT", "npc_coords": [4, 108]}
+    # Supervisor LLM mock returns POP
+    # → milestone_index == 19 in returned state (INTERACT action triggers advancement)
+    # → "dialogue_milestone_pending" == None
+
+class TestSupervisorPopDialogueAdvances:
+    # State has dialogue_milestone_pending="GYM_EXPLANATION", milestone_index=18
+    # Popped goal has directive={"action": "DIALOGUE", "goal_location": "PETALBURG_CITY_GYM"}
+    # Supervisor LLM mock returns POP
+    # → milestone_index == 19 in returned state (DIALOGUE action triggers advancement)
+    # → "dialogue_milestone_pending" == None
+
 class TestAdvanceMilestoneForIdAlreadyPast:
     # milestone_index is already 19 when _advance_milestone_for_id("GYM_EXPLANATION") called
     # → no-op; milestone_index remains 19
@@ -2302,9 +2338,12 @@ class TestGymEntrySequence:
     # Step 1: verification_node fires with DAD_FIRST_MEETING (location) → milestone_index 17→18
     # Step 2: verification_node fires with GYM_EXPLANATION (dialogue, use_htn=True)
     #         → gated; dialogue_milestone_pending="GYM_EXPLANATION"; milestone_index stays 18
-    # Step 3: Supervisor fires CONTINUE (mock episodic memory has no dialogue records)
+    # Step 3: Supervisor fires POP for a NAVIGATE sub-goal (walk to Norman)
+    #         → milestone_index unchanged (18); dialogue_milestone_pending still set
+    #         → guard correctly skips advancement because action="NAVIGATE"
+    # Step 4: Supervisor fires CONTINUE (mock episodic memory has no dialogue records)
     #         → milestone_index 18; dialogue_milestone_pending still set
-    # Step 4: Supervisor fires POP (mock episodic memory contains Norman dialogue keywords)
+    # Step 5: Supervisor fires POP for an INTERACT goal (mock episodic memory has Norman keywords)
     #         → milestone_index advances to 19; dialogue_milestone_pending cleared to None
     #         → Stack[0] directive points to ROUTE_104_SOUTH (confirmed via _apply_immediate_directive)
 ```
@@ -2314,7 +2353,7 @@ class TestGymEntrySequence:
 .venv/bin/python -m pytest tests/test_htn_verification_gate.py -v
 ```
 
-*Pass criteria:* All 8 tests green (or more if finer-grained coverage is added).
+*Pass criteria:* All 11 tests green (or more if finer-grained coverage is added).
 
 **Manual — Gym Loop Fix Verification (`boundary_test.state`):**
 
